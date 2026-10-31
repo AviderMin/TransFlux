@@ -101,17 +101,19 @@ public sealed class AppRoot : Component<AppServices>
         };
 
         var navigation = (NavigationView(navItems, content) with { SelectedTag = page })
-            .PaneDisplayMode(NavigationViewPaneDisplayMode.Auto)
+            .PaneDisplayMode(NavigationViewPaneDisplayMode.Left)
             .OpenPaneLength(220)
             .CompactModeThresholdWidth(Space.WindowMinWidth)
             .ExpandedModeThresholdWidth(1200)
             .PaneTitle(UiText.AppTitle)
+            .Set(nv => { nv.IsSettingsVisible = false; nv.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed; })
             .SelectedTagChanged(tag => { if (!string.IsNullOrEmpty(tag)) setPage(tag); })
             .Provide(UiContext.Shell, shell);
 
-        Element root = VStack(0,
+        Element root = FlexColumn(
             settingsError is string err ? InfoBar("设置读取失败", err).Warning().IsClosable(false).Margin(Space.Lg, Space.Sm) : null,
-            navigation.Flex(grow: 1, basis: 0));
+            navigation.Flex(grow: 1, basis: 0))
+            .Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch);
 
         return root
             .RequestedTheme(AppTheme.Resolve(effectiveSettings.Theme))

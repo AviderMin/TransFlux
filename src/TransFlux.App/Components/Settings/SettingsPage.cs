@@ -93,10 +93,10 @@ public sealed class SettingsPage : Component<SettingsPageProps>
 
         var noticeBar = notice is { } msg ? InfoBar("提示", msg).Informational().IsClosable(true).Closed(() => setNotice(null)).Margin(0, 0, 0, Space.Sm) : null;
 
-        return VStack(0, noticeBar,
+        return FlexColumn(noticeBar,
             HStack(Space.Sm, Heading(UiText.SettingsTitle), Ui.Spacer(),
                 Button("保存设置", () => _ = SaveAsync()).AccentButton().IsEnabled(!saving).AutomationName("保存设置")),
             ScrollView(VStack(Space.Lg, appearance, output, hardware, resources, privacy)).Flex(grow: 1, basis: 0))
-            .Padding(Space.PagePadding);
+            .Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch).FlexPadding(Space.PagePadding);
     }
 }

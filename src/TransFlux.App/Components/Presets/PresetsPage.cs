@@ -131,12 +131,12 @@ public sealed class PresetsPage : Component<PresetsPageProps>
         if (customs.Count == 0) customChildren.Add(Ui.Dim("还没有自建预设，可从任一预设“另存为”。"));
         customChildren.AddRange(customs.Select(Card));
 
-        return VStack(0, noticeBar, header,
+        return FlexColumn(noticeBar, header,
             ScrollView(VStack(Space.Lg,
                 VStack(Space.Sm, builtInChildren.ToArray()),
                 VStack(Space.Sm, customChildren.ToArray()))
                 .Flex(grow: 1, basis: 0)),
-            editDialog, deleteDialog).Padding(Space.PagePadding);
+            editDialog, deleteDialog).Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch).FlexPadding(Space.PagePadding);
     }
 
     private static string DescribeTemplate(PresetRequestTemplate t)

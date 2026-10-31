@@ -6,7 +6,16 @@ using TransFlux.App.Hosting;
 // TransFlux entry point. The composition root is built before the window opens; the
 // Reactor shell is the single root component (docs/04: Reactor is the UI core).
 TransFluxAppHost.Initialize();
-ReactorApp.Run<TransFluxRoot>("TransFlux", 1280, 820);
+ReactorApp.Run<TransFluxRoot>(
+    new WindowSpec
+    {
+        Title = "TransFlux",
+        Width = 1280,
+        Height = 820,
+        MinWidth = 1000,
+        MinHeight = 680,
+    },
+    configure: _ => { });
 
 sealed class TransFluxRoot : Component
 {

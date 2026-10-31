@@ -122,8 +122,8 @@ public sealed class QueuePage : Component<QueuePageProps>
             },
         };
 
-        return VStack(0, noticeBar, header, tabs, ScrollView(VStack(0, body).Padding(0, Space.Sm)).Flex(grow: 1, basis: 0), cancelDialog)
-            .Padding(Space.PagePadding);
+        return FlexColumn(noticeBar, header, tabs, ScrollView(VStack(0, body).Padding(0, Space.Sm)).Flex(grow: 1, basis: 0), cancelDialog)
+            .Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch).FlexPadding(Space.PagePadding);
     }
 
     private static IReadOnlyList<QueueRow> SortRows(IReadOnlyList<QueueRow> rows, QueueSort sort)

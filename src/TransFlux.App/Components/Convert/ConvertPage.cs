@@ -333,14 +333,14 @@ public sealed class ConvertPage : Component<ConvertPageProps>
             ?? p.Settings.DefaultOutputDirectory
             ?? "TransFlux Output（源文件所在文件夹）";
 
-        Element header = HStack(Space.Sm,
-            Heading(UiText.NavConvert),
-            Ui.Spacer(),
-            Ui.WithAccelerator((ButtonElement)Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton(), VirtualKey.O, VirtualKeyModifiers.Control).AutomationName(UiText.AddFiles),
-            Ui.WithAccelerator((ButtonElement)Button(UiText.AddFolder, () => _ = ImportFolderAsync()), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift).AutomationName(UiText.AddFolder),
-            Ui.WithAccelerator((ButtonElement)Button(UiText.RemoveSelected, RemoveSelected).IsEnabled(workbench.Items.Count > 0), VirtualKey.Delete).AutomationName(UiText.RemoveSelected),
-            Ui.WithAccelerator((ButtonElement)Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).IsEnabled(workbench.Items.Count > 0), VirtualKey.A, VirtualKeyModifiers.Control).AutomationName(UiText.SelectAll),
-            Ui.WithAccelerator((ButtonElement)Button("详情", () => setDetail(workbench.Focused)).IsEnabled(workbench.Focused?.Snapshot is not null), VirtualKey.Enter, VirtualKeyModifiers.Menu).AutomationName("查看详情"));
+        Element headerTop = Grid(
+            columns: [GridSize.Star(), GridSize.Auto],
+            rows: [GridSize.Auto],
+            Heading(UiText.NavConvert).Grid(column: 0),
+            HStack(Space.Sm,
+                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton(), VirtualKey.O, VirtualKeyModifiers.Control).AutomationName(UiText.AddFiles),
+                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFolder, () => _ = ImportFolderAsync()), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift).AutomationName(UiText.AddFolder))
+                .Grid(column: 1));
 
         Element listArea;
         if (workbench.Items.Count == 0)
@@ -352,7 +352,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                 .WithBorder(Theme.CardStroke, 1)
                 .MinHeight(260)
                 .Set(ConfigureDrop);
-            listArea = dropBorder.Flex(grow: 1, basis: 0);
+            listArea = dropBorder;
         }
         else
         {
@@ -366,38 +366,58 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                     id => dispatch(new RemoveDrafts(new[] { id })))
                 .WithKey(draft.MediaId.ToString())).ToArray();
 
-            listArea = ScrollView(VStack(Space.Xs, rows)).Flex(grow: 1, basis: 0);
+            listArea = ScrollView(VStack(Space.Xs, rows));
         }
 
         var summaryLine = $"{workbench.Items.Count} 项 · 已选 {selectedSet.Count} 项 · 约 {Fmt.Size(workbench.TotalReadyBytes)}";
+
+        Element summaryText = Ui.Dim(summaryLine);
+
+        Element headerActions = HStack(Space.Sm,
+            Ui.WithAccelerator((ButtonElement)Button(UiText.RemoveSelected, RemoveSelected).IsEnabled(workbench.Items.Count > 0), VirtualKey.Delete).AutomationName(UiText.RemoveSelected),
+            Ui.WithAccelerator((ButtonElement)Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).IsEnabled(workbench.Items.Count > 0), VirtualKey.A, VirtualKeyModifiers.Control).AutomationName(UiText.SelectAll),
+            Ui.WithAccelerator((ButtonElement)Button("详情", () => setDetail(workbench.Focused)).IsEnabled(workbench.Focused?.Snapshot is not null), VirtualKey.Enter, VirtualKeyModifiers.Menu).AutomationName("查看详情"));
 
         Element advanced = Expander(UiText.AdvancedSettings,
                 AdvancedPanel.Render(current, targets.FirstOrDefault(t => t.Snapshot is not null)?.Snapshot, ApplyToTargets),
                 advancedOpen,
                 v => setAdvancedOpen(v));
 
-        Element rightPanel = VStack(Space.Md,
-            Ui.Card(VStack(Space.Md,
-                TextBlock(capabilityText).Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap),
-                OutputSettingsPanel.Render(current, mixed, presets, selectedPresetId, ApplyPreset, ApplyToTargets, outputDirText, () => _ = PickOutputAsync()),
-                advanced,
-                Ui.Divider(),
-                PlanSummary.Render(preview, issues, workbench.ReadyItems.Count > 0, CopyPlanDetails),
-                HStack(Space.Sm,
-                    Button(UiText.AddToQueue, () => _ = EnqueueAsync(false)).IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.AddToQueue),
-                    Button(UiText.StartConvert, () => _ = EnqueueAsync(true)).AccentButton().IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.StartConvert).Flex(grow: 1, basis: 0)))))
-            .Width(Space.SettingsPanelMax)
-            .Flex(shrink: 0);
+        Element settingsCard = Ui.Card(VStack(Space.Md,
+            TextBlock(capabilityText).Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap).MaxWidth(Space.SettingsPanelMax - Space.Lg),
+            OutputSettingsPanel.Render(current, mixed, presets, selectedPresetId, ApplyPreset, ApplyToTargets, outputDirText, () => _ = PickOutputAsync()),
+            advanced,
+            Ui.Divider(),
+            PlanSummary.Render(preview, issues, workbench.ReadyItems.Count > 0, CopyPlanDetails),
+            HStack(Space.Sm,
+                Button(UiText.AddToQueue, () => _ = EnqueueAsync(false)).IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.AddToQueue),
+                Button(UiText.StartConvert, () => _ = EnqueueAsync(true)).AccentButton().IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.StartConvert).Flex(grow: 1, basis: 0))));
 
-        var body = FlexRow(VStack(Space.Sm, header, Ui.Dim(summaryLine), listArea).Flex(grow: 1, basis: 0), rightPanel).Set(f => f.ColumnGap = Space.Lg);
+        Element rightPanel = ScrollViewer(VStack(Space.Md, settingsCard))
+            .HorizontalScrollMode(ScrollMode.Disabled)
+            .VerticalScrollMode(ScrollMode.Auto)
+            .Flex(grow: 0, shrink: 0, basis: Space.SettingsPanelMax);
 
-        var noticeBar = notice is { } n
+        Element leftContent = Grid(
+            columns: [GridSize.Star()],
+            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star()],
+            headerTop.Grid(row: 0),
+            summaryText.Grid(row: 1),
+            headerActions.Grid(row: 2),
+            listArea.Grid(row: 3)) with { RowSpacing = Space.Sm };
+
+        Element body = FlexRow(
+                leftContent.Flex(grow: 1, basis: 0),
+                rightPanel)
+            .Set(f => f.ColumnGap = Space.Lg);
+
+        Element noticeBar = notice is { } n
             ? InfoBar(n.Title, n.Message)
                 .Severity(n.Success ? InfoBarSeverity.Success : InfoBarSeverity.Error)
                 .IsClosable(true)
                 .Closed(() => setNotice(null))
                 .Margin(0, 0, 0, Space.Sm)
-            : null;
+            : Empty();
 
         Element detailDialog = ContentDialog("文件详情",
                 DetailContent(detail),
@@ -407,7 +427,14 @@ public sealed class ConvertPage : Component<ConvertPageProps>
             OnClosed = _ => setDetail(null),
         };
 
-        return VStack(0, noticeBar, body.Flex(grow: 1, basis: 0), detailDialog).Padding(Space.PagePadding);
+        Element pageContent = (Grid(
+                columns: [GridSize.Star()],
+                rows: [GridSize.Auto, GridSize.Star()],
+                noticeBar.Grid(row: 0),
+                body.Grid(row: 1)) with { RowSpacing = Space.Sm })
+            .Padding(Space.PagePadding);
+
+        return Grid(columns: [GridSize.Star()], rows: [GridSize.Star()], pageContent, detailDialog);
     }
 
     private void ConfigureDrop(Border border)
