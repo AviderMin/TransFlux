@@ -70,3 +70,7 @@ tools/ffmpeg/**
 # Local reference checkouts
 .ref/
 .tmp/
+
+# ---- Installer build artifacts (large; regenerate with scripts/build-installer.ps1) ----
+installer/stage/
+installer/dist/
