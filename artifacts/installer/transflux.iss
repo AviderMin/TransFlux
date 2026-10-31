@@ -1,5 +1,5 @@
 ; TransFlux Inno Setup script (per-user install; bundles Windows App Runtime prerequisite)
-; Build: ISCC.exe transflux.iss  -> ..\artifacts\installer\TransFlux-Setup-1.0.0.1.exe
+; Build: ISCC.exe transflux.iss -> TransFlux-Setup-1.0.0.1.exe (all files live under artifacts\installer)
 #define MyAppName "TransFlux"
 #define MyAppVersion "1.0.0.1"
 #define MyAppPublisher "TransFlux"
@@ -15,7 +15,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\TransFlux
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=..\artifacts\installer
+OutputDir=.
 OutputBaseFilename=TransFlux-Setup-{#MyAppVersion}
 SetupIconFile=stage\appicon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -52,4 +52,3 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 Filename: "{tmp}\WindowsAppRuntimeInstall-x64.exe"; Parameters: "--quiet"; StatusMsg: "Installing Windows App Runtime (first run only)..."; Flags: waituntilterminated runhidden
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
-

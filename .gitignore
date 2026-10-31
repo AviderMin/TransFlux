@@ -26,7 +26,7 @@ bld/
 # .NET Core
 project.lock.json
 project.fragment.lock.json
-artifacts/
+artifacts/*
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt
@@ -74,3 +74,8 @@ tools/ffmpeg/**
 # ---- Installer build artifacts (large; regenerate with scripts/build-installer.ps1) ----
 installer/stage/
 installer/dist/
+
+# Keep the installer script/README under artifacts/installer tracked; ignore heavy build outputs
+!artifacts/installer/
+artifacts/installer/stage/
+artifacts/installer/*.exe
