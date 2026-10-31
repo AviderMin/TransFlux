@@ -1,26 +1,15 @@
-﻿using Microsoft.UI.Reactor;
+using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
-using Microsoft.UI.Reactor.Layout;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using static Microsoft.UI.Reactor.Factories;
+using TransFlux.App.Components;
+using TransFlux.App.Hosting;
 
-// To learn more about Reactor, the Reactor project structure, and more about
-// our project templates, see: https://github.com/microsoft/microsoft-ui-reactor
-ReactorApp.Run<App>("TransFlux.App");
+// TransFlux entry point. The composition root is built before the window opens; the
+// Reactor shell is the single root component (docs/04: Reactor is the UI core).
+TransFluxAppHost.Initialize();
+ReactorApp.Run<TransFluxRoot>("TransFlux", 1280, 820);
 
-class App : Component
+sealed class TransFluxRoot : Component
 {
     public override Element Render()
-    {
-        var titleBar = TitleBar("TransFlux.App")
-            .Flex(shrink: 0);
-
-        // This is the main content area of your application.
-        // Add your UI elements here.
-        var content = Border(Empty()).Flex(grow: 1, basis: 0);
-
-        return FlexColumn(titleBar, content)
-            .Backdrop(BackdropKind.Mica);
-    }
+        => AppShell.Create(TransFluxAppHost.Services!);
 }

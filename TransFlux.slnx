@@ -1,2 +1,19 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TransFlux.App/TransFlux.App.csproj" />
+    <Project Path="src/TransFlux.Application/TransFlux.Application.csproj" />
+    <Project Path="src/TransFlux.Domain/TransFlux.Domain.csproj" />
+    <Project Path="src/TransFlux.Engine.FFmpeg/TransFlux.Engine.FFmpeg.csproj" />
+    <Project Path="src/TransFlux.Hardware.Windows/TransFlux.Hardware.Windows.csproj" />
+    <Project Path="src/TransFlux.Infrastructure/TransFlux.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TransFlux.Application.Tests/TransFlux.Application.Tests.csproj" />
+    <Project Path="tests/TransFlux.Domain.Tests/TransFlux.Domain.Tests.csproj" />
+    <Project Path="tests/TransFlux.Engine.IntegrationTests/TransFlux.Engine.IntegrationTests.csproj" />
+    <Project Path="tests/TransFlux.Infrastructure.Tests/TransFlux.Infrastructure.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/TransFlux.E2E/TransFlux.E2E.csproj" />
+  </Folder>
 </Solution>

@@ -1,0 +1,235 @@
+using System.Buffers.Binary;
+using TransFlux.Application.Contracts;
+using TransFlux.Domain.Jobs;
+using TransFlux.Domain.Media;
+using TransFlux.Domain.Plans;
+using TransFlux.Engine.FFmpeg.Core;
+using TransFlux.Engine.FFmpeg.Processes;
+using TransFlux.Engine.FFmpeg.Probe;
+
+namespace TransFlux.Engine.FFmpeg.Verifier;
+
+/// <summary>
+/// Verifies a produced file against the plan's declared expectations: stream/codec/count,
+/// dimensions, pixel format, duration tolerance, MP4 faststart ordering and a sampled decode
+/// of first/middle/last (full decode when requested). A passing exit code alone is never enough.
+/// </summary>
+public sealed class FfmpegVerifier : IOutputVerifier
+{
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(15);
+
+    private readonly FfmpegCorePaths _core;
+
+    public FfmpegVerifier(FfmpegCorePaths core)
+    {
+        _core = core ?? throw new ArgumentNullException(nameof(core));
+    }
+
+    public async Task<VerificationResult> VerifyAsync(VerificationRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var expected = request.Plan.ExpectedOutput;
+        var outputPath = request.OutputPath;
+
+        if (string.IsNullOrWhiteSpace(outputPath) || !File.Exists(outputPath))
+            return VerificationResult.Fail(FailureInfo.Of(FailureCode.VerifyFailed, "verify.missing", $"Output file missing: '{outputPath}'."), "Output file missing.");
+
+        long size;
+        try { size = new FileInfo(outputPath).Length; }
+        catch (Exception ex) { return VerificationResult.Fail(FailureInfo.Of(FailureCode.VerifyFailed, "verify.unreadable", ex.Message), "Output file unreadable."); }
+        if (size <= 0)
+            return VerificationResult.Fail(FailureInfo.Of(FailureCode.VerifyFailed, "verify.empty", "Output file is empty."), "Output file is empty.");
+
+        var probe = new FfmpegProbe(_core, ProbeTimeout);
+        var probeResult = await probe.ProbeAsync(new SourceReference { AbsolutePath = outputPath }, ct).ConfigureAwait(false);
+        if (probeResult.IsCanceled) return new VerificationResult { Passed = false, Summary = "Verification canceled." };
+        if (!probeResult.IsSuccess || probeResult.Value is null)
+            return VerificationResult.Fail(
+                probeResult.Failure ?? FailureInfo.Of(FailureCode.VerifyFailed, "verify.probe_failed", "ffprobe could not read output."),
+                "ffprobe could not read output file.");
+
+        var actual = probeResult.Value;
+        var problems = Compare(expected, actual, outputPath);
+
+        if (problems.Count == 0)
+        {
+            var decode = await SampleDecodeAsync(outputPath, actual.DurationUs, request.FullDecode, ct).ConfigureAwait(false);
+            if (!decode.Ok) problems.Add(decode.Error ?? "sampled decode failed");
+        }
+
+        var summary = problems.Count == 0
+            ? $"Verified {expected.Container.DisplayName()}: {actual.VideoStreams.Count()} video / {actual.AudioStreams.Count()} audio, {size} bytes."
+            : "Verification failed: " + string.Join("; ", problems);
+
+        if (problems.Count > 0)
+            return new VerificationResult
+            {
+                Passed = false,
+                Summary = summary,
+                Failure = FailureInfo.Of(FailureCode.VerifyFailed, "verify.mismatch", string.Join("; ", problems)),
+                ActualSnapshot = actual,
+            };
+
+        return VerificationResult.Ok(summary, actual);
+    }
+
+    private static List<string> Compare(ExpectedOutput expected, SourceSnapshot actual, string outputPath)
+    {
+        var problems = new List<string>();
+        var video = actual.PrimaryVideo;
+        var audio = actual.PrimaryAudio;
+
+        var videoCount = actual.VideoStreams.Count();
+        var audioCount = actual.AudioStreams.Count();
+        if (expected.VideoStreamCount != videoCount)
+            problems.Add($"video stream count {videoCount} != expected {expected.VideoStreamCount}");
+        if (expected.AudioStreamCount != audioCount)
+            problems.Add($"audio stream count {audioCount} != expected {expected.AudioStreamCount}");
+
+        if (expected.VideoCodec is VideoCodec.H264)
+        {
+            if (video is null) problems.Add("expected H.264 video stream but none present");
+            else if (!string.Equals(video.Codec, "h264", StringComparison.OrdinalIgnoreCase))
+                problems.Add($"video codec '{video.Codec}' != expected 'h264'");
+        }
+
+        if (expected.AudioCodec is { } audioCodec)
+        {
+            var want = audioCodec switch
+            {
+                AudioCodec.Aac => "aac",
+                AudioCodec.Flac => "flac",
+                AudioCodec.PcmS16le => "pcm_s16le",
+                _ => null,
+            };
+            if (want is not null)
+            {
+                if (audio is null) problems.Add($"expected {want} audio stream but none present");
+                else if (!string.Equals(audio.Codec, want, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"audio codec '{audio.Codec}' != expected '{want}'");
+            }
+            else if (audioCodec == AudioCodec.Copy && audio is null && expected.AudioStreamCount > 0)
+            {
+                problems.Add("expected copied audio stream but none present");
+            }
+        }
+
+        if (expected.Width is int expectedWidth && video is not null && video.Width != expectedWidth)
+            problems.Add($"width {video.Width?.ToString() ?? "?"} != expected {expectedWidth}");
+        if (expected.Height is int expectedHeight && video is not null && video.Height != expectedHeight)
+            problems.Add($"height {video.Height?.ToString() ?? "?"} != expected {expectedHeight}");
+        if (expected.PixelFormat is not null && video is not null
+            && !string.Equals(video.PixelFormat, expected.PixelFormat, StringComparison.OrdinalIgnoreCase))
+            problems.Add($"pixel format '{video.PixelFormat}' != expected '{expected.PixelFormat}'");
+
+        if (expected.FastStart && expected.Container == ContainerFormat.Mp4 && !IsMoovBeforeMdat(outputPath))
+            problems.Add("MP4 is not faststart (moov box not before mdat)");
+
+        if (expected.DurationUs is long expectedUs && actual.DurationUs is long actualUs)
+        {
+            var toleranceUs = DurationToleranceUs(expected, video, audio);
+            var delta = Math.Abs(actualUs - expectedUs);
+            if (delta > toleranceUs)
+                problems.Add($"duration {actualUs} us differs from expected {expectedUs} us by {delta} us (tolerance {toleranceUs} us)");
+        }
+
+        return problems;
+    }
+
+    private static long DurationToleranceUs(ExpectedOutput expected, StreamDescriptor? video, StreamDescriptor? audio)
+    {
+        var frameDuration = 1.0 / 30.0;
+        var rate = video?.AverageFrameRate ?? video?.FrameRate;
+        if (rate is { } r && r.ToDouble() > 0) frameDuration = 1.0 / r.ToDouble();
+
+        var toleranceSeconds = Math.Max(0.5, 2.0 * frameDuration);
+        if (expected.AudioStreamCount > 0 || audio is not null)
+            toleranceSeconds += 0.1; // AAC priming / encoder padding
+        return (long)(toleranceSeconds * 1_000_000d);
+    }
+
+    /// <summary>Scans top-level ISO BMFF boxes to confirm moov precedes mdat (faststart).</summary>
+    internal static bool IsMoovBeforeMdat(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var header = new byte[16];
+            long position = 0;
+            var length = stream.Length;
+            bool? moovFirst = null;
+            while (position + 8 <= length)
+            {
+                stream.Position = position;
+                if (stream.Read(header, 0, 8) < 8) break;
+                long boxSize = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
+                var type = System.Text.Encoding.ASCII.GetString(header, 4, 4);
+                long headerSize = 8;
+                if (boxSize == 1)
+                {
+                    if (stream.Read(header, 8, 8) < 8) break;
+                    boxSize = (long)BinaryPrimitives.ReadUInt64BigEndian(header.AsSpan(8, 8));
+                    headerSize = 16;
+                }
+                else if (boxSize == 0)
+                {
+                    boxSize = length - position;
+                }
+
+                if (type == "moov" && moovFirst is null) moovFirst = true;
+                else if (type == "mdat" && moovFirst is null) moovFirst = false;
+
+                if (moovFirst is not null && (type == "mdat" || type == "moov")) { /* keep scanning for both */ }
+
+                if (boxSize < headerSize) break;
+                position += boxSize;
+            }
+            return moovFirst ?? false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<(bool Ok, string? Error)> SampleDecodeAsync(string path, long? durationUs, bool full, CancellationToken ct)
+    {
+        if (full)
+        {
+            var fullArgs = new List<string> { "-hide_banner", "-nostdin", "-v", "error", "-i", path, "-f", "null", "-" };
+            var fullResult = await ProcessCapture.RunAsync(_core.FfmpegPath, fullArgs, TimeSpan.FromMinutes(10), 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+            return fullResult.TimedOut
+                ? (false, "full decode timed out")
+                : fullResult.ExitCode == 0 ? (true, null) : (false, $"full decode failed: {Trim(fullResult.Stderr)}");
+        }
+
+        var points = new List<TimeSpan> { TimeSpan.Zero };
+        if (durationUs is long durUs && durUs > 2_000_000)
+        {
+            var dur = TimeSpan.FromMicroseconds(durUs);
+            points.Add(TimeSpan.FromTicks(dur.Ticks / 2));
+            var last = dur - TimeSpan.FromMilliseconds(600);
+            if (last > points[1]) points.Add(last);
+        }
+
+        foreach (var point in points)
+        {
+            var args = new List<string> { "-hide_banner", "-nostdin", "-v", "error" };
+            if (point > TimeSpan.Zero)
+            {
+                args.Add("-ss");
+                args.Add(point.TotalSeconds.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            args.Add("-i"); args.Add(path);
+            args.Add("-t"); args.Add("0.5");
+            args.Add("-f"); args.Add("null"); args.Add("-");
+
+            var result = await ProcessCapture.RunAsync(_core.FfmpegPath, args, TimeSpan.FromSeconds(20), 128 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+            if (result.TimedOut) return (false, $"sampled decode at {point.TotalSeconds:0.###}s timed out");
+            if (result.ExitCode != 0) return (false, $"sampled decode at {point.TotalSeconds:0.###}s failed: {Trim(result.Stderr)}");
+        }
+        return (true, null);
+    }
+
+    private static string Trim(string value) => value.Length <= 500 ? value : value[^500..];
+}

@@ -1,0 +1,210 @@
+using System.Diagnostics;
+using System.Globalization;
+using TransFlux.Application.Contracts;
+using TransFlux.Engine.FFmpeg.Core;
+using TransFlux.Engine.FFmpeg.Processes;
+
+namespace TransFlux.Engine.FFmpeg.Capabilities;
+
+/// <summary>
+/// Engine-owned core capabilities: identity (version/buildconf/paths/hash) and compiled
+/// encoders/decoders/hwaccels/filters/pixel formats, plus a bounded trial encode used by the
+/// hardware capability service. Results are cached for the process lifetime of this instance.
+/// </summary>
+public sealed class FfmpegEngineCapabilities : IEngineCapabilities
+{
+    private readonly FfmpegCorePaths _core;
+    private readonly SemaphoreSlim _queryLock = new(1, 1);
+    private FfmpegCapabilityInfo? _cached;
+    private CoreIdentity? _identity;
+
+    public FfmpegEngineCapabilities(FfmpegCorePaths core)
+    {
+        _core = core ?? throw new ArgumentNullException(nameof(core));
+    }
+
+    public CoreIdentity GetIdentity()
+    {
+        if (_identity is not null) return _identity;
+
+        var version = _core.Version;
+        var buildConfiguration = string.Empty;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = _core.FfmpegPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-version");
+            using var process = Process.Start(psi);
+            if (process is not null)
+            {
+                var output = process.StandardOutput.ReadToEnd();
+                if (!process.WaitForExit(5000))
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                }
+                foreach (var line in output.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (string.IsNullOrEmpty(version) && trimmed.StartsWith("ffmpeg version ", StringComparison.Ordinal))
+                    {
+                        var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 3) version = parts[2];
+                    }
+                    else if (trimmed.StartsWith("configuration:", StringComparison.Ordinal))
+                    {
+                        buildConfiguration = trimmed["configuration:".Length..].Trim();
+                    }
+                }
+            }
+        }
+        catch { /* identity still usable from core paths/hash */ }
+
+        _identity = new CoreIdentity
+        {
+            CoreHash = _core.CoreHash,
+            FfmpegVersion = version,
+            FfprobePath = _core.FfprobePath,
+            FfmpegPath = _core.FfmpegPath,
+            BuildConfiguration = buildConfiguration,
+        };
+        return _identity;
+    }
+
+    public async Task<FfmpegCapabilityInfo> QueryAsync(CancellationToken ct)
+    {
+        if (_cached is not null) return _cached;
+
+        await _queryLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_cached is not null) return _cached;
+            var timeout = TimeSpan.FromSeconds(20);
+
+            var encoders = await RunListAsync(new[] { "-encoders" }, timeout, ct).ConfigureAwait(false);
+            var decoders = await RunListAsync(new[] { "-decoders" }, timeout, ct).ConfigureAwait(false);
+            var hwaccels = await RunHwaccelsAsync(timeout, ct).ConfigureAwait(false);
+            var filters = await RunListAsync(new[] { "-filters" }, timeout, ct).ConfigureAwait(false);
+            var pixelFormats = await RunListAsync(new[] { "-pix_fmts" }, timeout, ct).ConfigureAwait(false);
+
+            _cached = new FfmpegCapabilityInfo
+            {
+                Encoders = encoders,
+                Decoders = decoders,
+                Hwaccels = hwaccels,
+                Filters = filters,
+                PixelFormats = pixelFormats,
+            };
+            return _cached;
+        }
+        finally
+        {
+            _queryLock.Release();
+        }
+    }
+
+    public async Task<HardwareValidationResult> ValidateEncoderAsync(HardwareValidationRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var arguments = new List<string> { "-hide_banner", "-nostdin", "-n", "-loglevel", "error" };
+        if (!string.IsNullOrWhiteSpace(request.DeviceArgument))
+        {
+            foreach (var token in request.DeviceArgument.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                arguments.Add(token);
+        }
+        arguments.Add("-f"); arguments.Add("lavfi");
+        arguments.Add("-i"); arguments.Add($"testsrc=duration=1:size={Math.Max(2, request.Width)}x{Math.Max(2, request.Height)}:rate=30");
+        if (!string.IsNullOrWhiteSpace(request.PixelFormat))
+        {
+            arguments.Add("-pix_fmt"); arguments.Add(request.PixelFormat!);
+        }
+        arguments.Add("-c:v"); arguments.Add(request.EncoderName);
+        arguments.Add("-t"); arguments.Add("1");
+        arguments.Add("-f"); arguments.Add("null"); arguments.Add("-");
+
+        var timeout = request.Timeout <= TimeSpan.Zero ? TimeSpan.FromSeconds(10) : request.Timeout;
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+            stopwatch.Stop();
+            if (result.TimedOut)
+                return new HardwareValidationResult { Success = false, FailureReason = $"Trial encode timed out after {timeout.TotalSeconds:0}s.", Elapsed = stopwatch.Elapsed };
+            if (result.ExitCode != 0)
+                return new HardwareValidationResult { Success = false, FailureReason = Trim(result.Stderr), Elapsed = stopwatch.Elapsed };
+            return new HardwareValidationResult { Success = true, Elapsed = stopwatch.Elapsed };
+        }
+        catch (OperationCanceledException)
+        {
+            stopwatch.Stop();
+            return new HardwareValidationResult { Success = false, FailureReason = "Trial encode canceled.", Elapsed = stopwatch.Elapsed };
+        }
+        catch (Exception ex)
+        {
+            stopwatch.Stop();
+            return new HardwareValidationResult { Success = false, FailureReason = ex.Message, Elapsed = stopwatch.Elapsed };
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> RunListAsync(string[] commandArgs, TimeSpan timeout, CancellationToken ct)
+    {
+        var arguments = new List<string> { "-hide_banner", "-nostdin" };
+        arguments.AddRange(commandArgs);
+        var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 4 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        return ParseNames(result.Stdout, skipFirstToken: true);
+    }
+
+    private async Task<IReadOnlyList<string>> RunHwaccelsAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var arguments = new List<string> { "-hide_banner", "-nostdin", "-hwaccels" };
+        var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        var names = new List<string>();
+        foreach (var raw in result.Stdout.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (line.StartsWith("Hardware acceleration", StringComparison.OrdinalIgnoreCase)) continue;
+            var token = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+            if (!names.Contains(token)) names.Add(token);
+        }
+        return names;
+    }
+
+    private static IReadOnlyList<string> ParseNames(string output, bool skipFirstToken)
+    {
+        var names = new List<string>();
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (line.EndsWith(':')) continue; // section header such as "Encoders:"
+            if (line.StartsWith('-')) continue; // separator legend
+            var tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length < 2) continue;
+            if (skipFirstToken)
+            {
+                var name = tokens[1];
+                if (IsFlagToken(tokens[0]) && !names.Contains(name)) names.Add(name);
+            }
+        }
+        return names;
+    }
+
+    private static bool IsFlagToken(string token)
+    {
+        if (token.Length is < 2 or > 12) return false;
+        foreach (var c in token)
+        {
+            if (!(char.IsLetter(c) || c == '.' || c == '_' || c == '-')) return false;
+        }
+        return true;
+    }
+
+    private static string Trim(string value) => value.Length <= 1000 ? value : value[^1000..];
+}

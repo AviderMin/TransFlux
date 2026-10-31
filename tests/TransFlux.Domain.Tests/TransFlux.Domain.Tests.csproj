@@ -17,4 +17,8 @@
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Shared QA helper that locates generated sample media under tests/media. -->
+    <Compile Include="..\media\MediaSampleLocator.cs" Link="Media\MediaSampleLocator.cs" />
+  </ItemGroup>
 </Project>

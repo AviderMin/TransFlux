@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-10-31T08:25:02.2066706Z",
+  "generator": "tests/media/generate-samples.ps1",
+  "ffmpegVersion": "ffmpeg version N-128212-g17a4a474f4-20261030 Copyright (c) 2000-2026 the FFmpeg developers",
+  "samples": [
+    {
+      "sampleId": "S01",
+      "fileName": "S01_1080p_sdr_bt709_h264_aac_5s.mp4",
+      "path": "tests/media/samples/S01_1080p_sdr_bt709_h264_aac_5s.mp4",
+      "purpose": "1080p SDR BT.709 H.264/AAC 30fps 5s baseline for CPU/GPU transcode paths",
+      "streams": "video h264 1920x1080 yuv420p bt709; audio aac stereo 48kHz",
+      "sha256": "5d259208575c5a0a9eef707b9dc3105a79dc19a9de212e8156e5b69f9f49d614",
+      "sizeBytes": 4243154,
+      "probeSummary": "video:h264:1920x1080; audio:aac:2ch@48000Hz",
+      "notes": "Generated from lavfi testsrc2 + sine; no personal media."
+    },
+    {
+      "sampleId": "S02",
+      "fileName": "S02_vertical_1080x1920_sdr_h264_aac_5s.mp4",
+      "path": "tests/media/samples/S02_vertical_1080x1920_sdr_h264_aac_5s.mp4",
+      "purpose": "Vertical/portrait 1080x1920 SDR sample for display-orientation handling",
+      "streams": "video h264 1080x1920 yuv420p bt709; audio aac stereo 48kHz",
+      "sha256": "4eb0bcc9bc16f473458e82ca1ceaaad409be6fbece1439111e0d7ecfb6b2e370",
+      "sizeBytes": 4576576,
+      "probeSummary": "video:h264:1080x1920; audio:aac:2ch@48000Hz",
+      "notes": "Portrait source; verifies rotation/display-size computation downstream."
+    },
+    {
+      "sampleId": "S03",
+      "fileName": "S03_nonsquare_sar_1440x1080_sdr_h264_aac_5s.mp4",
+      "path": "tests/media/samples/S03_nonsquare_sar_1440x1080_sdr_h264_aac_5s.mp4",
+      "purpose": "Non-square sample aspect ratio (1440x1080 SAR 4:3 -> DAR 16:9)",
+      "streams": "video h264 1440x1080 SAR 4:3 yuv420p bt709; audio aac stereo 48kHz",
+      "sha256": "17f8611d840038106ab1d17dfab49de26e1e52855a35319965bf6a912c6ff392",
+      "sizeBytes": 3180443,
+      "probeSummary": "video:h264:1440x1080; audio:aac:2ch@48000Hz",
+      "notes": "Exercises square-pixel / DAR preservation rules."
+    },
+    {
+      "sampleId": "S04",
+      "fileName": "S04_no_audio_1080p_h264_5s.mp4",
+      "path": "tests/media/samples/S04_no_audio_1080p_h264_5s.mp4",
+      "purpose": "Video with no audio stream; verifies audio-extract blocking and silent transcode",
+      "streams": "video h264 1920x1080 yuv420p bt709; no audio",
+      "sha256": "e7031f02732673cecfd25db314b42291c808695909a46e0350ad3d9bdce8a6e5",
+      "sizeBytes": 4160912,
+      "probeSummary": "video:h264:1920x1080",
+      "notes": "No-audio sample."
+    },
+    {
+      "sampleId": "S05",
+      "fileName": "S05_audio_only_aac_5s.m4a",
+      "path": "tests/media/samples/S05_audio_only_aac_5s.m4a",
+      "purpose": "Audio-only source; verifies audio extraction and video-transcode blocking",
+      "streams": "audio aac stereo 48kHz; no video",
+      "sha256": "2b65efde3e0b066259dab7d90bdc2d4ea2afdd7298140b93ded029ab05f94b04",
+      "sizeBytes": 79751,
+      "probeSummary": "audio:aac:2ch@48000Hz",
+      "notes": "Audio-only sample."
+    },
+    {
+      "sampleId": "S06",
+      "fileName": "S06_5.1_surround_h264_aac_5s.mkv",
+      "path": "tests/media/samples/S06_5.1_surround_h264_aac_5s.mkv",
+      "purpose": "5.1 surround audio; verifies channel-layout mapping and A/V sync",
+      "streams": "video h264 1920x1080 yuv420p bt709; audio aac 5.1 48kHz",
+      "sha256": "b0024e60ae4741468a72f12de99579433e98d104f3bb58003f7417d7af5eb079",
+      "sizeBytes": 4403968,
+      "probeSummary": "video:h264:1920x1080; audio:aac:6ch@48000Hz",
+      "notes": "Multichannel sample for docs/09 S10-style checks."
+    },
+    {
+      "sampleId": "S07",
+      "fileName": "S07_text_subtitle_h264_aac_srt_5s.mkv",
+      "path": "tests/media/samples/S07_text_subtitle_h264_aac_srt_5s.mkv",
+      "purpose": "MKV with a text (SRT/subrip) subtitle stream; remux subtitle compatibility",
+      "streams": "video h264 1280x720 yuv420p bt709; audio aac stereo; subtitle subrip",
+      "sha256": "f65af85212b3eeec8d10d5bc7f1efac6e72fc06b26ae7c72f112afe2200ba218",
+      "sizeBytes": 2058431,
+      "probeSummary": "video:h264:1280x720; audio:aac:2ch@48000Hz; subtitle:subrip",
+      "notes": "Text subtitle sample; bitmap subtitles are not included in first release."
+    },
+    {
+      "sampleId": "S08",
+      "fileName": "S08_truncated_from_S01.mp4",
+      "path": "tests/media/samples/S08_truncated_from_S01.mp4",
+      "purpose": "Truncated/corrupt container for decode-failure isolation and error handling",
+      "streams": "invalid (first 40% of S01 bytes)",
+      "sha256": "1da5f3874bccdafca932397ea972c33d8d7db35b6126081bf075156a0c6d9458",
+      "sizeBytes": 1697261,
+      "probeSummary": "video:h264:1920x1080; audio:aac:2ch@48000Hz",
+      "notes": "Truncated from S01 at 40% of byte length; MP4 faststart keeps the header readable, so ffprobe may parse it but full decode fails."
+    },
+    {
+      "sampleId": "S09",
+      "fileName": "S09 空格 中文字符 & test (1).mp4",
+      "path": "tests/media/samples/特殊 目录 & test/S09 空格 中文字符 & test (1).mp4",
+      "purpose": "Special-character path: Chinese, spaces, ampersand, parentheses",
+      "streams": "copy of S01 (video h264 1920x1080; audio aac stereo)",
+      "sha256": "5d259208575c5a0a9eef707b9dc3105a79dc19a9de212e8156e5b69f9f49d614",
+      "sizeBytes": 4243154,
+      "probeSummary": "video:h264:1920x1080; audio:aac:2ch@48000Hz",
+      "notes": "Verifies path handling with non-ASCII and shell-special characters."
+    }
+  ]
+}

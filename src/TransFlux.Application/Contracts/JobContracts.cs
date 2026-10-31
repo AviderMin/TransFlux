@@ -45,6 +45,11 @@ public interface IJobService
     Task<CancelResult> CancelAsync(Guid id, CancellationToken ct);
     Task<Guid> RetryAsync(Guid id, CancellationToken ct);
     IAsyncEnumerable<JobEvent> WatchAsync(JobWatchQuery query, CancellationToken ct);
+    Task PauseQueueAsync(CancellationToken ct);
+    Task ResumeQueueAsync(CancellationToken ct);
+    QueueControlSnapshot GetControl();
+    /// <summary>Removes a not-yet-started job from the queue (undoable).</summary>
+    Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct);
 }
 
 public sealed record QueueControlSnapshot
