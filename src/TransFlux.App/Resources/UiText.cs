@@ -124,4 +124,21 @@ public static class UiText
     public const string DirtySelectionHint = "所选文件的设置不同，修改会同时应用到所有选中项。";
     public const string BatchTitleFormat = "批处理设置（{0} 项）";
     public const string SaveSettingsAction = "保存";
+
+    // ---- P1 interactions ----
+    public const string SelectedCountFormat = "已选 {0} 项";
+    public const string UndoDelete = "撤销";
+    public const string DeletedCountFormat = "已删除 {0} 项";
+    public const string UndoDeleteHint = "撤销可把这些任务重新加回列表。";
+    public const string ConversionCompleteFormat = "转换完成：{0}";
+    public const string OpenOutputFolder = "打开输出文件夹";
+    public const string HistoryRecords = "历史记录";
+    public const string HistoryEmpty = "暂无历史记录。";
+    public const string HistoryLoading = "正在读取历史记录…";
+    public const string HistoryClear = "清空历史";
+    public const string HistoryClearConfirm = "确定清空全部历史记录？";
+    public const string HistoryClearHint = "只删除历史记录，不会删除已生成的输出文件。";
+    public const string HistoryConfirmClear = "确认清空";
+    public const string Rejoin = "重新加入";
+    public const string OpenFolder = "打开文件夹";
 }

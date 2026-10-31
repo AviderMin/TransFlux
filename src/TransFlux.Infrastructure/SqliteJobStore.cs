@@ -33,6 +33,11 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
         (int)JobState.Committing, (int)JobState.Recovering, (int)JobState.CancelRequested,
     };
 
+    private static readonly int[] TerminalStates =
+    {
+        (int)JobState.Succeeded, (int)JobState.Failed, (int)JobState.Canceled, (int)JobState.Interrupted,
+    };
+
     private readonly string _databasePath;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SqliteConnection? _connection;
@@ -437,6 +442,91 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false)) list.Add(ReadOutput(reader));
             return (IReadOnlyList<OutputRecord>)list;
+        }, ct);
+
+    // ---- History ----
+
+    /// <summary>Reads terminal jobs as user-facing history rows (newest first). Internal so the
+    /// public port surface stays on <see cref="IJobStore"/>; <see cref="HistoryService"/> adapts it.</summary>
+    internal Task<IReadOnlyList<HistoryEntry>> GetHistoryAsync(int limit, CancellationToken ct)
+    {
+        if (limit <= 0)
+            return Task.FromResult<IReadOnlyList<HistoryEntry>>(Array.Empty<HistoryEntry>());
+
+        return InGateAsync(async conn =>
+        {
+            var stateList = string.Join(",", TerminalStates);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT j.id, COALESCE(j.source_path, s.normalized_path), o.final_path, j.state, j.created_utc, j.updated_utc, " +
+                "o.size, a.failure_json, j.retry_of FROM jobs j " +
+                "LEFT JOIN sources s ON s.id = j.source_id " +
+                "LEFT JOIN outputs o ON o.attempt_id = (" +
+                "SELECT o2.attempt_id FROM outputs o2 WHERE o2.job_id = j.id ORDER BY o2.committed_utc DESC LIMIT 1) " +
+                "LEFT JOIN attempts a ON a.id = (" +
+                "SELECT a2.id FROM attempts a2 WHERE a2.job_id = j.id ORDER BY a2.ordinal DESC LIMIT 1) " +
+                "WHERE j.state IN (" + stateList + ") ORDER BY j.updated_utc DESC, j.enqueue_order DESC LIMIT $limit;";
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var list = new List<HistoryEntry>();
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                FailureCode? failureCode = null;
+                if (!reader.IsDBNull(7))
+                {
+                    var failure = JsonSerializer.Deserialize<FailureInfo>(reader.GetString(7), Json);
+                    if (failure is not null) failureCode = failure.Code;
+                }
+
+                var updatedUtc = ParseDate(reader.GetString(5));
+                list.Add(new HistoryEntry
+                {
+                    JobId = Guid.Parse(reader.GetString(0)),
+                    SourcePath = reader.IsDBNull(1) ? null : reader.GetString(1),
+                    OutputPath = reader.IsDBNull(2) ? null : reader.GetString(2),
+                    State = (JobState)reader.GetInt32(3),
+                    CreatedUtc = ParseDate(reader.GetString(4)),
+                    CompletedUtc = updatedUtc,
+                    OutputSizeBytes = reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    FailureCode = failureCode,
+                    RetryOfJobId = reader.IsDBNull(8) ? null : Guid.Parse(reader.GetString(8)),
+                });
+            }
+            return (IReadOnlyList<HistoryEntry>)list;
+        }, ct);
+    }
+
+    /// <summary>Deletes terminal jobs plus their attempts/outputs in one short transaction.
+    /// Returns the number of job rows removed. Output files on disk are never touched.</summary>
+    internal Task<int> ClearHistoryAsync(CancellationToken ct)
+        => InGateAsync(async conn =>
+        {
+            var stateList = string.Join(",", TerminalStates);
+            using var tx = conn.BeginTransaction();
+
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM outputs WHERE job_id IN (SELECT id FROM jobs WHERE state IN (" + stateList + "));";
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM attempts WHERE job_id IN (SELECT id FROM jobs WHERE state IN (" + stateList + "));";
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            int deletedJobs;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM jobs WHERE state IN (" + stateList + ");";
+                deletedJobs = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            tx.Commit();
+            return deletedJobs;
         }, ct);
 
     // ---- Commit journal ----

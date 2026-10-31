@@ -15,4 +15,5 @@ public sealed record AppServices(
     IPresetService Presets,
     ISettingsService Settings,
     IEngineCapabilities Core,
-    SchedulerOptions Options);
+    SchedulerOptions Options,
+    IHistoryService History);

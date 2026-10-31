@@ -96,7 +96,7 @@ public static class TransFluxAppHost
 
         _scheduler = scheduler;
         _store = store;
-        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, options);
+        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, options, new HistoryService(store));
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {

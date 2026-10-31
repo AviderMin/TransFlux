@@ -38,7 +38,7 @@ public sealed record BatchRequest(Guid RequestId);
 public sealed class AppRoot : Component<AppServices>
 {
     // Latest closures captured for the native drop handlers (stable across renders).
-    private Func<IReadOnlyList<string>, Task>? _addPaths;
+    private Func<IReadOnlyList<string>, Task<int>>? _addPaths;
     private Action<NoticeModel?>? _setNotice;
 
     public override Element Render()
@@ -62,6 +62,13 @@ public sealed class AppRoot : Component<AppServices>
         var (settingsReq, setSettingsReq) = UseState(0);
         var (aboutOpen, setAboutOpen) = UseState(false);
         var (aboutReq, setAboutReq) = UseState(0);
+        var (undoBatch, setUndoBatch) = UseState<IReadOnlyList<MediaDraft>?>(null);
+        var (completion, setCompletion) = UseState<CompletionNotice?>(null);
+        var (historyOpen, setHistoryOpen) = UseState(false);
+        var (historyReq, setHistoryReq) = UseState(0);
+        var settingsInitialized = UseRef(false);
+        var seenSucceeded = UseRef<HashSet<Guid>?>(null);
+        var completionBaseline = UseRef(false);
 
         var reactorWindow = UseWindow();
         var dispatcher = DispatcherQueue.GetForCurrentThread();
@@ -84,12 +91,47 @@ public sealed class AppRoot : Component<AppServices>
             var cts = new CancellationTokenSource();
             _ = Task.Run(async () =>
             {
-                try { setSettings(await services.Settings.GetAsync(cts.Token)); }
+                try
+                {
+                    var loaded = await services.Settings.GetAsync(cts.Token);
+                    setSettings(loaded);
+                    if (settingsInitialized.Current) return;
+                    settingsInitialized.Current = true;
+                    if (TargetFormats.Find(loaded.LastTargetFormatKey ?? string.Empty) is { Enabled: true } rememberedFormat)
+                        setTargetKey(rememberedFormat.Key);
+                    if (Enum.TryParse<QualityTier>(loaded.LastQuality, ignoreCase: true, out var rememberedQuality)
+                        && Enum.IsDefined(rememberedQuality))
+                        setDefaultQuality(rememberedQuality);
+                }
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { setSettingsError(ex.Message); }
             });
             return () => cts.Cancel();
         }, services);
+
+        UseEffect(() =>
+        {
+            var succeeded = snapshot.Rows
+                .Where(r => r.State == JobState.Succeeded && r.Output is not null)
+                .ToList();
+            var seen = seenSucceeded.Current ??= new HashSet<Guid>();
+            if (!completionBaseline.Current)
+            {
+                // The first non-empty projection may contain jobs from an earlier
+                // session: baseline them so only *new* completions raise a banner.
+                if (snapshot.Rows.Count == 0) return;
+                foreach (var row in succeeded) seen.Add(row.Job.JobId);
+                completionBaseline.Current = true;
+                return;
+            }
+            QueueRow? latest = null;
+            foreach (var row in succeeded)
+                if (seen.Add(row.Job.JobId)) latest = row;
+            if (latest?.Output?.FinalPath is { } finalPath)
+                setCompletion(new CompletionNotice(
+                    System.IO.Path.GetFileName(finalPath),
+                    System.IO.Path.GetDirectoryName(finalPath)));
+        }, snapshot);
 
         UseEffect(() =>
         {
@@ -114,6 +156,62 @@ public sealed class AppRoot : Component<AppServices>
             OutputDirectory = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory,
         });
 
+        void ClearUndo()
+        {
+            if (undoBatch is not null) setUndoBatch(null);
+        }
+
+        // Every explicit user action other than 撤销 invalidates the delete buffer.
+        void UserDispatch(WorkbenchAction action)
+        {
+            ClearUndo();
+            dispatch(action);
+        }
+
+        void PersistLastUsed(Func<AppSettings, AppSettings> mutate)
+        {
+            if (settings is not { } current) return;
+            var next = mutate(current);
+            setSettings(next);
+            _ = SaveSettingsAsync(next);
+        }
+
+        void SelectQuality(QualityTier quality)
+        {
+            ClearUndo();
+            setDefaultQuality(quality);
+            ApplyQualityToSelected(quality);
+            if (!string.Equals(settings?.LastQuality, quality.ToString(), StringComparison.Ordinal))
+                PersistLastUsed(s => s with { LastQuality = quality.ToString() });
+        }
+
+        void ApplyQualityToRow(Guid mediaId, QualityTier quality)
+        {
+            ClearUndo();
+            dispatch(new UpdateOptions(new[] { mediaId }, o => o with { Quality = quality }));
+        }
+
+        void UndoDelete()
+        {
+            if (undoBatch is not { Count: > 0 } batch) return;
+            setUndoBatch(null);
+            dispatch(new AddDrafts(batch));
+            foreach (var draft in batch.Where(d => d.Status == DraftStatus.Probing))
+                ProbeOne(draft.MediaId, draft.Path);
+        }
+
+        void OpenCompletionFolder()
+        {
+            if (completion?.OutputDirectory is { } dir) _ = LauncherInterop.OpenFolderAsync(dir);
+        }
+
+        void OpenHistory()
+        {
+            ClearUndo();
+            setHistoryReq(historyReq + 1);
+            setHistoryOpen(true);
+        }
+
         // ---- import / probe ----
         void ProbeOne(Guid mediaId, string path)
         {
@@ -136,8 +234,9 @@ public sealed class AppRoot : Component<AppServices>
             });
         }
 
-        async Task AddPathsAsync(IReadOnlyList<string> rawPaths)
+        async Task<int> AddPathsAsync(IReadOnlyList<string> rawPaths)
         {
+            ClearUndo();
             var existing = workbench.Items.Select(i => i.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var drafts = rawPaths
                 .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -148,10 +247,11 @@ public sealed class AppRoot : Component<AppServices>
             if (drafts.Count == 0)
             {
                 setNotice(NoticeModel.Error("未导入文件", "所选文件已在列表中或不是可读取的本地媒体文件。"));
-                return;
+                return 0;
             }
             dispatch(new AddDrafts(drafts));
             foreach (var d in drafts) ProbeOne(d.MediaId, d.Path);
+            return drafts.Count;
         }
         _addPaths = AddPathsAsync;
 
@@ -179,7 +279,10 @@ public sealed class AppRoot : Component<AppServices>
         {
             var fmt = TargetFormats.Find(key);
             if (fmt is null || !fmt.Enabled) return;
+            ClearUndo();
             setTargetKey(key);
+            if (!string.Equals(settings?.LastTargetFormatKey, key, StringComparison.Ordinal))
+                PersistLastUsed(s => s with { LastTargetFormatKey = key });
         }
 
         void ApplyQualityToSelected(QualityTier quality)
@@ -190,6 +293,7 @@ public sealed class AppRoot : Component<AppServices>
 
         async Task PickDefaultOutputAsync()
         {
+            ClearUndo();
             try
             {
                 var folder = await FilePickerInterop.PickFolderAsync(reactorWindow?.NativeWindow);
@@ -209,7 +313,7 @@ public sealed class AppRoot : Component<AppServices>
                 setNotice(NoticeModel.Info("输出位置", "默认输出到源文件旁的 TransFlux Output 文件夹。"));
                 return;
             }
-            _ = LauncherInterop.OpenAsync(dir);
+            _ = LauncherInterop.OpenFolderAsync(dir);
         }
 
         void ClearCompleted()
@@ -218,7 +322,7 @@ public sealed class AppRoot : Component<AppServices>
                 .Where(d => JobFor(d.MediaId) is { State: JobState.Succeeded })
                 .Select(d => d.MediaId)
                 .ToList();
-            if (done.Count > 0) dispatch(new RemoveDrafts(done));
+            if (done.Count > 0) UserDispatch(new RemoveDrafts(done));
         }
 
         HashSet<Guid> EnqueuedIds() => snapshot.Rows
@@ -229,6 +333,7 @@ public sealed class AppRoot : Component<AppServices>
         async Task StartAsync()
         {
             if (busyEnqueue) return;
+            ClearUndo();
             var enqueued = EnqueuedIds();
             var ready = workbench.ReadyItems.Where(d => !enqueued.Contains(d.MediaId)).ToList();
             if (ready.Count == 0)
@@ -277,6 +382,7 @@ public sealed class AppRoot : Component<AppServices>
 
         async Task TogglePauseAsync()
         {
+            ClearUndo();
             try
             {
                 if (snapshot.Paused) { await services.Jobs.ResumeQueueAsync(CancellationToken.None); queue.SetPaused(false); }
@@ -291,7 +397,12 @@ public sealed class AppRoot : Component<AppServices>
             var ids = workbench.Selected.Count > 0
                 ? workbench.Selected
                 : workbench.FocusedId is Guid f ? new[] { f } : Array.Empty<Guid>();
-            if (ids.Count > 0) dispatch(new RemoveDrafts(ids));
+            if (ids.Count == 0) return;
+            var removed = workbench.Items.Where(i => ids.Contains(i.MediaId)).ToList();
+            if (removed.Count == 0) return;
+            ClearUndo();
+            dispatch(new RemoveDrafts(ids));
+            setUndoBatch(removed);
         }
 
         async Task SaveSettingsAsync(AppSettings next)
@@ -320,8 +431,8 @@ public sealed class AppRoot : Component<AppServices>
 
         // ---- title bar ----
         var titleBar = TitleBarView.Render(new TitleBarProps(
-            () => { setSettingsReq(settingsReq + 1); setSettingsOpen(true); },
-            () => { setAboutReq(aboutReq + 1); setAboutOpen(true); }));
+            () => { ClearUndo(); setSettingsReq(settingsReq + 1); setSettingsOpen(true); },
+            () => { ClearUndo(); setAboutReq(aboutReq + 1); setAboutOpen(true); }));
 
         // ---- left output settings ----
         var selectedCount = workbench.Selected.Count;
@@ -329,7 +440,7 @@ public sealed class AppRoot : Component<AppServices>
         var catalog = OutputSettingsPanel.Render(new OutputSettingsProps(
             targetKey, defaultQuality, selectedCount, outputDirectoryText,
             SelectFormat,
-            quality => { setDefaultQuality(quality); ApplyQualityToSelected(quality); },
+            SelectQuality,
             () => ApplyQualityToSelected(defaultQuality),
             () => _ = PickDefaultOutputAsync(),
             OpenOutputDir));
@@ -380,12 +491,13 @@ public sealed class AppRoot : Component<AppServices>
                         workbench.Selected.Contains(draft.MediaId),
                         workbench.FocusedId == draft.MediaId || (workbench.FocusedId is null && index == 0),
                         JobFor(draft.MediaId),
-                        id => dispatch(new ToggleSelect(id)),
-                        id => dispatch(new FocusDraft(id)),
-                        id => dispatch(new RemoveDrafts(new[] { id })),
-                        id => setParamRequest(new ParamRequest(Guid.NewGuid(), id)),
+                        id => UserDispatch(new ToggleSelect(id)),
+                        id => UserDispatch(new FocusDraft(id)),
+                        id => UserDispatch(new RemoveDrafts(new[] { id })),
+                        id => { ClearUndo(); setParamRequest(new ParamRequest(Guid.NewGuid(), id)); },
                         OpenOutput,
-                        RevealOutput)
+                        RevealOutput,
+                        ApplyQualityToRow)
                     .WithKey(draft.MediaId.ToString())).ToArray();
 
                 listArea = ScrollViewer(VStack(0, rows))
@@ -400,12 +512,12 @@ public sealed class AppRoot : Component<AppServices>
         }
 
         Element selectionGroup = HStack(Space.Xs,
-            Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).SubtleButton()
+            Button(UiText.SelectAll, () => UserDispatch(new SelectAllDrafts())).SubtleButton()
                 .IsEnabled(workbench.Items.Count > 0).AutomationName(UiText.SelectAll),
             Button(UiText.DeleteSelected, DeleteSelected).SubtleButton()
                 .IsEnabled(selectedCount > 0 || workbench.FocusedId is not null).AutomationName(UiText.DeleteSelected),
             Button(selectedCount > 0 ? string.Format(UiText.BatchTitleFormat, selectedCount) : UiText.BatchSettings,
-                    () => setBatchRequest(new BatchRequest(Guid.NewGuid())))
+                    () => { ClearUndo(); setBatchRequest(new BatchRequest(Guid.NewGuid())); })
                 .SubtleButton().IsEnabled(selectedCount > 0).AutomationName(UiText.BatchSettings));
 
         Element queueGroup = HStack(Space.Sm,
@@ -425,11 +537,33 @@ public sealed class AppRoot : Component<AppServices>
         var filterBar = SelectorBar(new[]
         {
             SelectorBarItem("全部"), SelectorBarItem("进行中"), SelectorBarItem("已完成"), SelectorBarItem("失败"),
-        }, filter, i => setFilter(i));
+        }, filter, i => { ClearUndo(); setFilter(i); });
         var filterRow = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
             filterBar.Grid(column: 0),
             Empty().Grid(column: 1),
-            Button("清除已完成", ClearCompleted).SubtleButton().Grid(column: 2));
+            HStack(Space.Xs,
+                Button(UiText.HistoryRecords, OpenHistory).SubtleButton()
+                    .AutomationName(UiText.HistoryRecords).ToolTip("查看最近的转换记录"),
+                Button("清除已完成", ClearCompleted).SubtleButton()).Grid(column: 2));
+
+        var batchBar = selectedCount > 0
+            ? Border(Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
+                    rows: [GridSize.Auto],
+                    TextBlock(string.Format(UiText.SelectedCountFormat, selectedCount)).SemiBold()
+                        .VAlign(VerticalAlignment.Center).Grid(column: 0),
+                    Empty().Grid(column: 1),
+                    Button(UiText.BatchSettings, () => { ClearUndo(); setBatchRequest(new BatchRequest(Guid.NewGuid())); })
+                        .SubtleButton().AutomationName(UiText.BatchSettings).Grid(column: 2),
+                    Button(UiText.DeleteSelected, DeleteSelected).SubtleButton()
+                        .AutomationName(UiText.DeleteSelected).Grid(column: 3),
+                    Button(UiText.ClearSelection, () => UserDispatch(new ClearDraftSelection())).SubtleButton()
+                        .AutomationName(UiText.ClearSelection).Grid(column: 4))
+                .Padding(Space.Md, Space.Sm))
+                .Background(Theme.SubtleFill)
+                .CornerRadius(6)
+                .WithBorder(Theme.CardStroke, 1)
+                .WithKey("batch-bar")
+            : Empty();
 
         var outputBar = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
             Ui.FieldLabel("输出到").VAlign(VerticalAlignment.Center).Grid(column: 0),
@@ -440,12 +574,13 @@ public sealed class AppRoot : Component<AppServices>
             Button("打开", OpenOutputDir).SubtleButton().Grid(column: 3)) with { ColumnSpacing = Space.Xs };
 
         var rightGrid = Grid(columns: [GridSize.Star()],
-            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
             toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Sm),
             filterRow.Grid(row: 1).Margin(0, 0, 0, Space.Xs),
-            TaskRow.Header().Grid(row: 2),
-            listArea.Grid(row: 3),
-            outputBar.Grid(row: 4).Margin(0, Space.Sm, 0, 0));
+            batchBar.Grid(row: 2).Margin(0, 0, 0, Space.Xs),
+            TaskRow.Header().Grid(row: 3),
+            listArea.Grid(row: 4),
+            outputBar.Grid(row: 5).Margin(0, Space.Sm, 0, 0));
 
 
         var rightSurface = Border(rightGrid)
@@ -459,21 +594,34 @@ public sealed class AppRoot : Component<AppServices>
             catalog.Grid(column: 0),
             rightSurface.Grid(column: 1)) with { ColumnSpacing = Space.Lg };
 
-        var noticeRow = notice is { } n
-            ? InfoBar(n.Title, n.Message)
+        var banners = new List<Element>();
+        if (settingsError is { } err)
+            banners.Add(InfoBar("设置读取失败", err).Warning().IsClosable(false));
+        if (notice is { } n)
+            banners.Add(InfoBar(n.Title, n.Message)
                 .Severity(n.Success ? InfoBarSeverity.Success : InfoBarSeverity.Error)
                 .IsClosable(true)
-                .Closed(() => setNotice(null))
-            : Empty();
+                .Closed(() => setNotice(null)));
+        if (undoBatch is { Count: > 0 } deleted)
+            banners.Add((InfoBar(string.Format(UiText.DeletedCountFormat, deleted.Count), UiText.UndoDeleteHint)
+                    .Warning()
+                    .IsClosable(true) with
+                {
+                    ActionButtonContent = UiText.UndoDelete,
+                    OnActionButtonClick = UndoDelete,
+                }).Closed(() => setUndoBatch(null)));
+        if (completion is { } done)
+            banners.Add((InfoBar(string.Format(UiText.ConversionCompleteFormat, done.FileName))
+                    .Success()
+                    .IsClosable(true) with
+                {
+                    ActionButtonContent = UiText.OpenOutputFolder,
+                    OnActionButtonClick = OpenCompletionFolder,
+                }).Closed(() => setCompletion(null)));
 
-        Element settingsErrorRow = settingsError is { } err
-            ? InfoBar("设置读取失败", err).Warning().IsClosable(false)
-            : Empty();
-
-        var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Auto, GridSize.Star()],
-            settingsErrorRow.Grid(row: 0).Margin(0, 0, 0, Space.Sm),
-            noticeRow.Grid(row: 1).Margin(0, 0, 0, Space.Sm),
-            workbenchArea.Grid(row: 2))
+        var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
+            VStack(Space.Sm, banners.ToArray()).Grid(row: 0).Margin(0, 0, 0, Space.Sm),
+            workbenchArea.Grid(row: 1))
             .Padding(Space.PagePadding);
 
         // ---- overlays (mount only while open; keyed by request id) ----
@@ -529,13 +677,22 @@ public sealed class AppRoot : Component<AppServices>
                 .WithKey("about-" + aboutReq)
             : Empty();
 
+        var historyOverlay = historyOpen
+            ? Component<HistoryDialog, HistoryDialogProps>(
+                    new HistoryDialogProps(services,
+                        async path => await AddPathsAsync(new[] { path }) > 0,
+                        () => setHistoryOpen(false)))
+                .WithKey("history-" + historyReq)
+            : Empty();
+
         var root = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
             titleBar.Grid(row: 0),
             content.Grid(row: 1),
             paramOverlay.Grid(row: 1),
             batchOverlay.Grid(row: 1),
             settingsOverlay.Grid(row: 1),
-            aboutOverlay.Grid(row: 1));
+            aboutOverlay.Grid(row: 1),
+            historyOverlay.Grid(row: 1));
 
         return root
             .RequestedTheme(AppTheme.Resolve(effectiveSettings.Theme))

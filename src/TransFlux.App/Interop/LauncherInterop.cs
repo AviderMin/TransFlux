@@ -19,6 +19,25 @@ public static class LauncherInterop
         }
     }
 
+    /// <summary>Opens a folder path in Explorer; falls back to the default file handler.</summary>
+    public static async Task OpenFolderAsync(string path)
+    {
+        try
+        {
+            if (System.IO.Directory.Exists(path))
+            {
+                var folder = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(path);
+                await Launcher.LaunchFolderAsync(folder);
+                return;
+            }
+            await OpenAsync(path);
+        }
+        catch (Exception)
+        {
+            // Ignore: the caller already surfaces the path in the UI.
+        }
+    }
+
     public static void RevealInExplorer(string path)
     {
         try

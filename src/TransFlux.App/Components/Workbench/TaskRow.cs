@@ -7,6 +7,7 @@ using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
 using TransFlux.Domain.Jobs;
+using TransFlux.Domain.Plans;
 
 namespace TransFlux.App.Components.Workbench;
 
@@ -17,11 +18,13 @@ namespace TransFlux.App.Components.Workbench;
 /// </summary>
 public static class TaskRow
 {
+    private static readonly string[] QualityItems = { "较小体积", "均衡", "更高画质" };
+
     /// <summary>Column tracks shared by the header and every row.</summary>
     public static GridSize[] Columns { get; } = new[]
     {
-        GridSize.Px(36), GridSize.Star(), GridSize.Px(118), GridSize.Px(218),
-        GridSize.Px(86), GridSize.Px(150), GridSize.Px(96),
+        GridSize.Px(36), GridSize.Star(), GridSize.Px(110), GridSize.Px(190),
+        GridSize.Px(72), GridSize.Px(110), GridSize.Px(228),
     };
 
     public static Element Header() => Border(Grid(
@@ -47,7 +50,8 @@ public static class TaskRow
         Action<Guid> onRemove,
         Action<Guid> onOpenParam,
         Action<Guid> onOpenOutput,
-        Action<Guid> onRevealOutput)
+        Action<Guid> onRevealOutput,
+        Action<Guid, QualityTier>? onQuality = null)
     {
         var (status, progress) = BuildStatus(draft, job);
         var target = TextBlock(Fmt.TargetSummary(draft.Options)).FontSize(12)
@@ -64,11 +68,17 @@ public static class TaskRow
                 .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath)
             : Ui.Dim("—").FontSize(12);
 
-        var actions = new List<Element>
+        var actions = new List<Element>();
+        if (draft.Options.Mode == ConversionMode.VideoTranscode && onQuality is not null)
         {
-            IconAction("\uE713", "设置参数", "设置参数", () => onOpenParam(draft.MediaId)).WithKey("param"),
-            IconAction("\uE74D", "移除文件", "移除", () => onRemove(draft.MediaId)).WithKey("remove"),
-        };
+            actions.Add(ComboBox(QualityItems, (int)draft.Options.Quality, i => onQuality(draft.MediaId, (QualityTier)i))
+                .Width(88).MinHeight(30)
+                .AutomationName("快捷质量 " + draft.FileName)
+                .ToolTip("快捷质量：仅影响此任务")
+                .WithKey("quality"));
+        }
+        actions.Add(IconAction("\uE713", "设置参数", "设置参数", () => onOpenParam(draft.MediaId)).WithKey("param"));
+        actions.Add(IconAction("\uE74D", "移除文件", "移除", () => onRemove(draft.MediaId)).WithKey("remove"));
         if (job is { State: JobState.Succeeded, Output: not null })
         {
             actions.Add(IconAction("\uE8E5", UiText.OpenOutput, UiText.OpenOutput, () => onOpenOutput(draft.MediaId)).WithKey("open"));
