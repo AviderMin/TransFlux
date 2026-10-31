@@ -55,3 +55,18 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# ---- TransFlux ----
+# Acquired third-party media core binaries and archives (fetched via scripts/fetch-ffmpeg.ps1)
+tools/ffmpeg/**
+!tools/ffmpeg/core-manifest.json
+!tools/ffmpeg/README.md
+
+# TransFlux workspace / attempt temp directories
+.transflux-work/
+**/TransFlux Output/
+**/*.transflux-tmp
+
+# Local reference checkouts
+.ref/
+.tmp/

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "recordedUtc": "2026-10-31T16:30:00+08:00",
+  "distribution": "BtbN FFmpeg-Builds (win64-gpl, static)",
+  "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+  "reproducibilityNote": "Rolling 'latest' master build pinned by SHA-256. For release, pin a fixed release tag and re-verify.",
+  "license": "GPLv3 (--enable-gpl --enable-version3), includes libx264/libx265. Distribution obligations apply; see docs/08.",
+  "ffmpeg": {
+    "version": "N-128212-g17a4a474f4-20261030",
+    "relativePath": "tools/ffmpeg/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe",
+    "sha256": "C16F1190C3CF7236A3B9D9A49EC2C71D029531A8E438C04ABDE59F7B5B5DDB95",
+    "sizeBytes": 169913856
+  },
+  "ffprobe": {
+    "relativePath": "tools/ffmpeg/ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe",
+    "sha256": "91386C6ACFD87A6C7C57DFFCCA85F7758408A7CBEA8236B93235F2DFF4028604",
+    "sizeBytes": 169698304
+  },
+  "verifiedCapabilities": {
+    "gpl": true,
+    "libx264": true,
+    "libx265": true,
+    "h264_nvenc": true,
+    "h264_qsv": true,
+    "h264_amf": true,
+    "aac": true,
+    "flac": true,
+    "libvmaf": true
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "TransFlux.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "TransFlux.App (Unpackaged)": {
+      "commandName": "Project"
+    },
+    "TransFlux.App (Unpackaged, Devtools)": {
+      "commandName": "Project",
+      "commandLineArgs": "--devtools"
+    }
+  }
+}

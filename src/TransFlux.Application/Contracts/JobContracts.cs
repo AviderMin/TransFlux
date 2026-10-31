@@ -1,0 +1,55 @@
+using TransFlux.Domain.Jobs;
+using TransFlux.Domain.Plans;
+
+namespace TransFlux.Application.Contracts;
+
+public sealed record EnqueueRequest
+{
+    public required ConversionRequest Request { get; init; }
+    public required Domain.Media.SourceSnapshot Source { get; init; }
+    public Guid? RetryOfJobId { get; init; }
+}
+
+public sealed record CancelResult
+{
+    public bool Accepted { get; init; }
+    public string Message { get; init; } = string.Empty;
+    public static CancelResult Ok(string msg) => new() { Accepted = true, Message = msg };
+    public static CancelResult Refused(string msg) => new() { Accepted = false, Message = msg };
+}
+
+public enum JobEventKind { Snapshot, Enqueued, StateChanged, Progress, AttemptChanged, OutputCommitted, Failed, Removed }
+
+public sealed record JobEvent
+{
+    public JobEventKind Kind { get; init; }
+    public long Sequence { get; init; }
+    public Guid? JobId { get; init; }
+    public Job? Job { get; init; }
+    public Attempt? Attempt { get; init; }
+    public ProgressSnapshot? Progress { get; init; }
+    public OutputRecord? Output { get; init; }
+    public FailureInfo? Failure { get; init; }
+}
+
+public sealed record JobWatchQuery
+{
+    public Guid? JobId { get; init; }
+    public bool IncludeCompleted { get; init; } = true;
+    public long? AfterSequence { get; init; }
+}
+
+public interface IJobService
+{
+    Task<Guid> EnqueueAsync(EnqueueRequest request, CancellationToken ct);
+    Task<CancelResult> CancelAsync(Guid id, CancellationToken ct);
+    Task<Guid> RetryAsync(Guid id, CancellationToken ct);
+    IAsyncEnumerable<JobEvent> WatchAsync(JobWatchQuery query, CancellationToken ct);
+}
+
+public sealed record QueueControlSnapshot
+{
+    public bool Paused { get; init; }
+    public int RunningCount { get; init; }
+    public int QueuedCount { get; init; }
+}
