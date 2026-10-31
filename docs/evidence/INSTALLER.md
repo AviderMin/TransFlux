@@ -54,3 +54,9 @@ and to the installer (`SetupIconFile`).
 
 > 2026-11-01: installer rebuilt (same version 1.0.0.2, 117.4 MB) with the redesigned Format-Factory UI and
 > top-bar Settings/About. Re-verified: install/launch/About version 1.0.0.2/E2E/uninstall.
+
+> 2026-11-01 (installer UX fix): the interactive “文件夹已存在/install into this folder?” prompt is Inno's
+> Select-Destination-Location warning, shown when the target folder exists but Setup does not recognise it as a
+> previous install of the same AppId (e.g. an older build installed elsewhere/leftover folder). Fixed by setting
+> `DisableDirPage=yes` + `DirExistsWarning=no` (+ `UsePreviousAppDir=yes`) with the fixed per-user location and a
+> stable AppId, so updates silently reuse the same folder. Fixed build: `artifacts/installer/x64/TransFlux-Setup-1.0.0.2-x64-fixed.exe`.
