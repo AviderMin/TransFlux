@@ -4,7 +4,7 @@ Date: 2026-10-31. Installer version: **1.0.0.1**.
 
 ## Built artifact
 
-- File: `installer/dist/TransFlux-Setup-1.0.0.1.exe`
+- File: `artifacts/installer/TransFlux-Setup-1.0.0.1.exe`
 - Size: **257.3 MB**
 - FileVersion / ProductVersion: **1.0.0.1**
 - FileDescription: `TransFlux 1.0.0.1 Setup`
@@ -33,3 +33,4 @@ Date: 2026-10-31. Installer version: **1.0.0.1**.
 - The Windows App Runtime prerequisite is installed by the setup each run (fast no-op if already present).
 - This is an EXE installer alternative to the docs' MSIX route; MSIX remains an M5 deliverable.
 - Installer binaries are git-ignored; rebuild with `scripts/build-installer.ps1`.
+

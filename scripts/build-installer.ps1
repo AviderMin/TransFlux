@@ -65,4 +65,5 @@ $iscc = Find-Iscc
 Write-Host "Compiling installer with $iscc ..."
 & $iscc (Join-Path $root 'installer/transflux.iss') | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
-Write-Host "Done: installer/dist/TransFlux-Setup-$Version.exe"
+Write-Host "Done: artifacts/installer/TransFlux-Setup-$Version.exe"
+
