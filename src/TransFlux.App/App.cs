@@ -14,6 +14,8 @@ ReactorApp.Run<TransFluxRoot>(
         Height = 820,
         MinWidth = 920,
         MinHeight = 640,
+        ExtendsContentIntoTitleBar = true,
+        Backdrop = BackdropChoice.Of(OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? BackdropKind.Mica : BackdropKind.None),
     },
     configure: _ => { });
 

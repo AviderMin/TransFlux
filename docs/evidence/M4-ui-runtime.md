@@ -92,3 +92,15 @@ sibling overlap. Screenshots: [convert.png](screenshots/convert.png), [queue.png
 
 Changed files: `App.cs`, `Components/Shell/AppRoot.cs`, `Components/Convert/ConvertPage.cs`,
 `Components/Queue/QueuePage.cs`, `Components/Presets/PresetsPage.cs`, `Components/Settings/SettingsPage.cs`.
+
+## 2026-11-01 — Format-Factory redesign + top-bar Settings/About
+
+UI rewritten per user request: custom title bar (`TitleBar` + right header 设置/关于 via ContentDialog),
+left target-format catalogue (视频/音频/图片; image disabled), right task list with 添加文件/文件夹·开始·暂停·全选·删除·批处理设置,
+per-item parameter dialog (grouped, presets-first + numeric values), batch settings dialog, presets inside the parameter dialog,
+no NavigationView. Engine/domain gained explicit override fields (CRF, target bitrate, custom W/H, frame rate, sample rate, channels).
+
+Verified on the installed 1.0.0.2 build (117.4 MB): install exit 0, version 1.0.0.2, window renders (title bar + catalogue + toolbar),
+About shows “版本 1.0.0.2”, E2E with installed FFmpeg PASS, uninstall clean. Screenshots:
+[workbench-installed.png](screenshots/workbench-installed.png), [settings-dialog.png](screenshots/settings-dialog.png),
+[about-dialog.png](screenshots/about-dialog.png), [workbench.png](screenshots/workbench.png).

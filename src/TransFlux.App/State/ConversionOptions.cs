@@ -21,6 +21,14 @@ public sealed record ConversionOptions
     public string? OutputDirectory { get; init; }
     public TimeSpan? TrimStart { get; init; }
     public TimeSpan? TrimEnd { get; init; }
+    public int? TargetWidth { get; init; }
+    public int? TargetHeight { get; init; }
+    public int? CrfOverride { get; init; }
+    public int? VideoBitrateKbps { get; init; }
+    public double? FrameRateOverride { get; init; }
+    public int? AudioSampleRate { get; init; }
+    public int? AudioChannels { get; init; }
+    public string? OutputFileName { get; init; }
 
     public static readonly ConversionOptions Default = new();
 
@@ -53,11 +61,14 @@ public sealed record ConversionOptions
         SelectedStreamIndices = SelectedStreams,
         Quality = Quality,
         Speed = Speed,
-        Resize = new ResizeSpec { Mode = ResizeMode, AllowUpscale = AllowUpscale },
+        Resize = new ResizeSpec { Mode = ResizeMode, AllowUpscale = AllowUpscale, TargetWidth = TargetWidth, TargetHeight = TargetHeight },
         Trim = BuildTrim(),
-        Audio = new AudioSpec { Codec = AudioCodec, BitRateKbps = AudioBitRateKbps, KeepChannelLayout = true },
+        Audio = new AudioSpec { Codec = AudioCodec, BitRateKbps = AudioBitRateKbps, KeepChannelLayout = true, SampleRate = AudioSampleRate, Channels = AudioChannels },
         Metadata = MetadataPolicy,
         Hardware = new HardwarePreference { Backend = Hardware },
-        Output = new OutputPolicy { OutputDirectory = outputDirectory ?? OutputDirectory },
+        Output = new OutputPolicy { OutputDirectory = outputDirectory ?? OutputDirectory, FileNameOverride = OutputFileName },
+        CrfOverride = CrfOverride,
+        VideoBitrateKbps = VideoBitrateKbps,
+        FrameRateOverride = FrameRateOverride,
     };
 }

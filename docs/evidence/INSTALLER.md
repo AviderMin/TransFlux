@@ -51,3 +51,6 @@ and to the installer (`SetupIconFile`).
 - Per-user install (`PrivilegesRequired=lowest`), to `%LOCALAPPDATA%\Programs\TransFlux`.
 - Unsigned (dev build). MSIX remains a separate M5 deliverable.
 - Installer binaries are git-ignored; rebuild with `pwsh -File tools/package-exe.ps1 -Version 1.0.0.2`.
+
+> 2026-11-01: installer rebuilt (same version 1.0.0.2, 117.4 MB) with the redesigned Format-Factory UI and
+> top-bar Settings/About. Re-verified: install/launch/About version 1.0.0.2/E2E/uninstall.

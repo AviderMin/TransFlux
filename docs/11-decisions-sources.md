@@ -73,3 +73,10 @@
 ## M0 待验证清单
 
 精确 SDK/模板/Windows App SDK/Reactor 配对；是否需要额外 Windows SDK/签名工具；核心可信来源与完整许可；MSIX 核心进程与自包含依赖；虚拟列表/key/订阅桥；GPU 设备映射与质量档；SDR 色彩白名单；网络输出提交语义。以上都有默认方案，不需要在文档阶段先向用户索要硬件型号才能推进。
+
+## ADR 追加（2026-11-01）
+
+| ADR | 决策与理由 | 状态 |
+|---|---|---|
+| 011 | 转换工作台采用“格式工厂”式布局（左目标格式目录 / 右任务进度列表，开始/暂停），参数按任务项在独立窗口分组编辑（预设优先 + 允许具体数值），多选走批处理窗口；预设内嵌于参数窗口，不设独立预设页；设置(含诊断)与关于移入顶栏右侧（参照 SurgeLink）。理由：贴合用户第一直觉、降低导航层级。 | 采纳 |
+| 012 | 为满足“输入具体参数值”，在 ConversionRequest 增加可选显式覆盖（CrfOverride、VideoBitrateKbps、ResizeSpec.TargetWidth/Height、FrameRateOverride、AudioSpec.SampleRate/Channels），由 Engine 计划编译器在挡位之上优先采用；null 表示按挡位/源推导。 | 采纳；随 UI 落地 |

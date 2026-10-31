@@ -60,6 +60,8 @@ public sealed record ResizeSpec
 {
     public ResizeMode Mode { get; init; } = ResizeMode.KeepDisplaySize;
     public bool AllowUpscale { get; init; }
+    public int? TargetWidth { get; init; }
+    public int? TargetHeight { get; init; }
     public static ResizeSpec KeepDisplay() => new() { Mode = ResizeMode.KeepDisplaySize, AllowUpscale = false };
     public static ResizeSpec Max1080p() => new() { Mode = ResizeMode.Max1080p, AllowUpscale = false };
 }
@@ -69,6 +71,8 @@ public sealed record AudioSpec
     public AudioCodec Codec { get; init; } = AudioCodec.Aac;
     public int? BitRateKbps { get; init; } = 192;
     public bool KeepChannelLayout { get; init; } = true;
+    public int? SampleRate { get; init; }
+    public int? Channels { get; init; }
 }
 
 public sealed record HardwarePreference
@@ -105,6 +109,10 @@ public sealed record ConversionRequest
     public MetadataPolicy Metadata { get; init; } = MetadataPolicy.StripPersonalTags;
     public HardwarePreference Hardware { get; init; } = HardwarePreference.Auto;
     public OutputPolicy Output { get; init; } = new();
+    // Explicit user overrides (null = derive from tier / source).
+    public int? CrfOverride { get; init; }
+    public int? VideoBitrateKbps { get; init; }
+    public double? FrameRateOverride { get; init; }
 
     public VideoCodec EffectiveVideoCodec => Mode switch
     {

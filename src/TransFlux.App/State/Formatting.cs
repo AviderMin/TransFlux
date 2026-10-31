@@ -1,5 +1,6 @@
 using System.Globalization;
 using TransFlux.Domain.Media;
+using TransFlux.Domain.Plans;
 
 namespace TransFlux.App.State;
 
@@ -126,4 +127,35 @@ public static class Fmt
         TransFlux.Domain.Jobs.JobStage.Finalizing => "收尾",
         _ => stage.ToString(),
     };
+
+    public static string AudioCodecName(AudioCodec codec) => codec switch
+    {
+        AudioCodec.Aac => "AAC",
+        AudioCodec.Flac => "FLAC",
+        AudioCodec.PcmS16le => "PCM 16-bit",
+        AudioCodec.Copy => "复制",
+        _ => codec.ToString(),
+    };
+
+    /// <summary>Short "target format" line for a catalogue choice / task row.</summary>
+    public static string TargetSummary(ConversionOptions options) => options.Mode switch
+    {
+        ConversionMode.Remux => options.Container.DisplayName() + " · 转封装",
+        ConversionMode.AudioExtract => options.Container.DisplayName() + " · " + AudioCodecName(options.AudioCodec),
+        _ => options.Container.DisplayName() + " · H.264 / " + AudioCodecName(options.AudioCodec),
+    };
+
+    public static string FormatTimecode(TimeSpan? value)
+        => value is TimeSpan v
+            ? string.Format(CultureInfo.InvariantCulture, "{0:00}:{1:00}:{2:00}.{3:000}", (int)v.TotalHours, v.Minutes, v.Seconds, v.Milliseconds)
+            : string.Empty;
+
+    public static TimeSpan? ParseTimecode(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string[] formats = { @"hh\:mm\:ss\.fff", @"h\:mm\:ss\.fff", @"mm\:ss\.fff", @"hh\:mm\:ss", @"mm\:ss" };
+        return TimeSpan.TryParseExact(text.Trim(), formats, CultureInfo.InvariantCulture, out var result)
+            ? result
+            : TimeSpan.TryParse(text.Trim(), CultureInfo.InvariantCulture, out var loose) ? loose : null;
+    }
 }

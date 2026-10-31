@@ -94,4 +94,34 @@ public static class UiText
     public const string DiskFull = "输出磁盘空间不足。请选择其他文件夹或释放空间后重试。";
     public const string Interrupted = "上次转换未完成，可以从头重试。";
     public const string NoEstimate = "无法准确估计";
+
+    // ---- Format-Factory workbench (new) ----
+    public const string TargetFormat = "目标格式";
+    public const string TargetFormatHint = "选择输出格式，然后添加文件。";
+    public const string Start = "开始";
+    public const string Pause = "暂停";
+    public const string Resume = "恢复";
+    public const string DeleteSelected = "删除";
+    public const string BatchSettings = "批处理设置";
+    public const string ClearSelection = "取消选择";
+    public const string NoFilesTitle = "添加文件，开始转换";
+    public const string NoFilesHint = "将视频或音频拖放到这里，或使用左侧/上方按钮选择文件。";
+    public const string Ready = "待转换";
+    public const string Converting = "转换中";
+    public const string Done = "已完成";
+    public const string FailedText = "失败";
+    public const string InvalidText = "无法转换";
+    public const string AboutTitle = "关于 TransFlux";
+    public const string ParameterTitle = "转换参数";
+    public const string SavePreset = "保存为预设";
+    public const string PresetNamePlaceholder = "新预设名称";
+    public const string NoPresets = "暂无可用预设。";
+    public const string OutputDirectory = "输出目录";
+    public const string OutputFileName = "文件名";
+    public const string ChooseFolder = "选择…";
+    public const string DefaultOutput = "默认（源文件旁的 TransFlux Output）";
+    public const string LeaveAuto = "留空自动";
+    public const string DirtySelectionHint = "所选文件的设置不同，修改会同时应用到所有选中项。";
+    public const string BatchTitleFormat = "批处理设置（{0} 项）";
+    public const string SaveSettingsAction = "保存";
 }

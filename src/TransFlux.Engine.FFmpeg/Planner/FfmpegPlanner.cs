@@ -140,8 +140,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         }
 
         args.Add("-c:v"); args.Add(encoder);
-        AddVideoQuality(args, encoder, request.Quality, request.Speed);
+        AddVideoQuality(args, encoder, request);
         args.Add("-pix_fmt"); args.Add("yuv420p");
+        if (request.FrameRateOverride is double frameRate && frameRate > 0)
+        {
+            args.Add("-r"); args.Add(frameRate.ToString("0.###", CultureInfo.InvariantCulture));
+        }
 
         if (geometry.FilterChain.Count > 0)
         {
@@ -152,6 +156,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         {
             args.Add("-c:a"); args.Add("aac");
             args.Add("-b:a"); args.Add($"{request.Audio.BitRateKbps ?? 192}k");
+            if (request.Audio.SampleRate is int ar && ar > 0) { args.Add("-ar"); args.Add(ar.ToString(CultureInfo.InvariantCulture)); }
+            if (request.Audio.Channels is int ac && ac > 0) { args.Add("-ac"); args.Add(ac.ToString(CultureInfo.InvariantCulture)); }
         }
         else
         {
@@ -162,9 +168,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.Mp4);
         args.Add(PlanPlaceholders.Output);
 
+        var effectiveCrf = request.CrfOverride ?? CrfFor(request.Quality);
         var rationale = uncalibrated
             ? $"{backendLabel} {encoder}: hardware candidate; quality mapping unverified on this build."
-            : $"cpu libx264 crf {CrfFor(request.Quality)} preset {PresetFor(request.Speed)}; software baseline.";
+            : (request.VideoBitrateKbps is int vbr && vbr > 0
+                ? $"cpu libx264 {vbr}kbps preset {PresetFor(request.Speed)}; software baseline."
+                : $"cpu libx264 crf {effectiveCrf} preset {PresetFor(request.Speed)}; software baseline.");
 
         return new ExecutionCandidate
         {
@@ -212,6 +221,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
                 args.Add("-c:a"); args.Add("pcm_s16le");
                 break;
         }
+        if (request.Audio.SampleRate is int ar2 && ar2 > 0) { args.Add("-ar"); args.Add(ar2.ToString(CultureInfo.InvariantCulture)); }
+        if (request.Audio.Channels is int ac2 && ac2 > 0) { args.Add("-ac"); args.Add(ac2.ToString(CultureInfo.InvariantCulture)); }
         AddMetadataPolicy(args, request.Metadata);
         AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.M4a);
         args.Add(PlanPlaceholders.Output);
@@ -380,28 +391,32 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         }
     }
 
-    private static void AddVideoQuality(List<string> args, string encoder, QualityTier quality, SpeedTier speed)
+    private static void AddVideoQuality(List<string> args, string encoder, ConversionRequest request)
     {
+        var crf = request.CrfOverride ?? CrfFor(request.Quality);
+        var bitrate = request.VideoBitrateKbps;
         switch (encoder)
         {
             case "libx264":
-                args.Add("-preset"); args.Add(PresetFor(speed));
-                args.Add("-crf"); args.Add(CrfFor(quality).ToString(CultureInfo.InvariantCulture));
+                args.Add("-preset"); args.Add(PresetFor(request.Speed));
+                if (bitrate is int b1 && b1 > 0) { args.Add("-b:v"); args.Add($"{b1}k"); }
+                else { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
             case "h264_nvenc":
-                args.Add("-preset"); args.Add(speed switch { SpeedTier.Faster => "p2", SpeedTier.Slower => "p6", _ => "p4" });
+                args.Add("-preset"); args.Add(request.Speed switch { SpeedTier.Faster => "p2", SpeedTier.Slower => "p6", _ => "p4" });
                 args.Add("-rc"); args.Add("vbr");
-                args.Add("-cq"); args.Add(CrfFor(quality).ToString(CultureInfo.InvariantCulture));
+                if (bitrate is int b2 && b2 > 0) { args.Add("-b:v"); args.Add($"{b2}k"); }
+                else { args.Add("-cq"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
             case "h264_qsv":
-                args.Add("-preset"); args.Add(speed switch { SpeedTier.Faster => "fast", SpeedTier.Slower => "slow", _ => "medium" });
-                args.Add("-global_quality"); args.Add(CrfFor(quality).ToString(CultureInfo.InvariantCulture));
+                args.Add("-preset"); args.Add(request.Speed switch { SpeedTier.Faster => "fast", SpeedTier.Slower => "slow", _ => "medium" });
+                if (bitrate is int b3 && b3 > 0) { args.Add("-b:v"); args.Add($"{b3}k"); }
+                else { args.Add("-global_quality"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
             case "h264_amf":
-                args.Add("-quality"); args.Add(speed switch { SpeedTier.Faster => "speed", SpeedTier.Slower => "quality", _ => "balanced" });
-                args.Add("-rc"); args.Add("cqp");
-                args.Add("-qp_i"); args.Add(CrfFor(quality).ToString(CultureInfo.InvariantCulture));
-                args.Add("-qp_p"); args.Add(CrfFor(quality).ToString(CultureInfo.InvariantCulture));
+                args.Add("-quality"); args.Add(request.Speed switch { SpeedTier.Faster => "speed", SpeedTier.Slower => "quality", _ => "balanced" });
+                if (bitrate is int b4 && b4 > 0) { args.Add("-rc"); args.Add("cbr"); args.Add("-b:v"); args.Add($"{b4}k"); }
+                else { args.Add("-rc"); args.Add("cqp"); args.Add("-qp_i"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); args.Add("-qp_p"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
             default:
                 throw new DomainException($"Unsupported video encoder '{encoder}'.");
@@ -558,7 +573,19 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
         var targetW = orientW;
         var targetH = orientH;
-        if (resize.Mode == ResizeMode.Max1080p)
+        if (resize.TargetWidth is int tw && resize.TargetHeight is int th && tw > 0 && th > 0)
+        {
+            targetW = tw; targetH = th;
+        }
+        else if (resize.TargetWidth is int tw2 && tw2 > 0)
+        {
+            targetW = tw2; targetH = (int)Math.Round(orientH * (double)tw2 / Math.Max(1, orientW));
+        }
+        else if (resize.TargetHeight is int th2 && th2 > 0)
+        {
+            targetH = th2; targetW = (int)Math.Round(orientW * (double)th2 / Math.Max(1, orientH));
+        }
+        else if (resize.Mode == ResizeMode.Max1080p)
         {
             var scale = Math.Min(1.0, Math.Min(1920.0 / Math.Max(1, orientW), 1080.0 / Math.Max(1, orientH)));
             targetW = (int)Math.Round(orientW * scale);
