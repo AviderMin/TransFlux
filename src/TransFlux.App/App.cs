@@ -12,8 +12,8 @@ ReactorApp.Run<TransFluxRoot>(
         Title = "TransFlux",
         Width = 1280,
         Height = 820,
-        MinWidth = 1000,
-        MinHeight = 680,
+        MinWidth = 920,
+        MinHeight = 640,
     },
     configure: _ => { });
 

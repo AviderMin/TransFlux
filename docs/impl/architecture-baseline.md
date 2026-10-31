@@ -14,7 +14,7 @@ without the Lead's agreement.
 | Target (Domain/Application/Infrastructure) | `net10.0` |
 | Reactor | `Microsoft.UI.Reactor` 0.1.0-preview.16 |
 | Windows App SDK | 2.6.4 |
-| Media core | BtbN GPL static build (ffmpeg N-128212), pinned in `tools/ffmpeg/core-manifest.json` |
+| Media core | BtbN GPL shared build (ffmpeg N-128227), pinned in `tools/ffmpeg/core-manifest.json` |
 
 The full solution already builds. Keep it building after every change
 (`dotnet build TransFlux.sln -c Debug`).

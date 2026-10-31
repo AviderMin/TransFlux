@@ -80,19 +80,19 @@ public sealed class PresetsPage : Component<PresetsPageProps>
         {
             var actions = new List<Element> { Button(UiText.SaveAs, () => OpenSaveAs(preset)).AutomationName($"另存为 {preset.Name}") };
             if (!preset.BuiltIn) actions.Add(Button(UiText.Delete, () => setDeleteTarget(preset)).AutomationName($"删除 {preset.Name}"));
-            return Ui.Card(HStack(Space.Md,
+            return Ui.Card(Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
                 VStack(2,
                     HStack(Space.Sm, TextBlock(preset.Name).SemiBold(),
                         preset.BuiltIn ? Ui.Pill(UiText.BuiltIn, Theme.ControlFillSecondary, Theme.SecondaryText) : Ui.Pill(UiText.Custom, Theme.SystemAttentionBackground, Theme.SystemAttention)),
-                    Ui.Dim(DescribeTemplate(preset.Template))).Flex(grow: 1, basis: 0),
-                HStack(Space.Xs, actions.ToArray())))
+                    Ui.Dim(DescribeTemplate(preset.Template)).TextWrapping(TextWrapping.Wrap)).Grid(column: 0),
+                HStack(Space.Xs, actions.ToArray()).Margin(Space.Lg, 0, 0, 0).VerticalAlignment(VerticalAlignment.Center).Grid(column: 1)))
                 .WithKey(preset.PresetId.ToString());
         }
 
         var builtIns = presets.Where(p => p.BuiltIn).ToList();
         var customs = presets.Where(p => !p.BuiltIn).ToList();
 
-        var header = HStack(Space.Sm, Heading(UiText.PresetsTitle), Ui.Dim("内置预设不可直接覆盖，可另存为自建预设。"), Ui.Spacer(),
+        var header = Ui.PageHeader(UiText.PresetsTitle, "保存常用转换配置，下次直接使用。",
             Button("新建预设", OpenNew).AccentButton().AutomationName("新建预设"));
 
         var noticeBar = notice is { } msg ? InfoBar("提示", msg).Informational().IsClosable(true).Closed(() => setNotice(null)).Margin(0, 0, 0, Space.Sm) : null;
@@ -134,8 +134,7 @@ public sealed class PresetsPage : Component<PresetsPageProps>
         return FlexColumn(noticeBar, header,
             ScrollView(VStack(Space.Lg,
                 VStack(Space.Sm, builtInChildren.ToArray()),
-                VStack(Space.Sm, customChildren.ToArray()))
-                .Flex(grow: 1, basis: 0)),
+                VStack(Space.Sm, customChildren.ToArray())).Padding(0, Space.Sm)).Flex(grow: 1, basis: 0),
             editDialog, deleteDialog).Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch).FlexPadding(Space.PagePadding);
     }
 

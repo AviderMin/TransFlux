@@ -39,12 +39,12 @@ public static class MediaListRow
                 .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1),
             status);
 
-        var row = HStack(Space.Md,
+        var row = Grid(columns: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
             CheckBox(selected, v => { if (v != selected) onToggleSelect(draft.MediaId); }, label: null)
-                .AutomationName($"选择 {draft.FileName}"),
-            thumb,
-            middle.Flex(grow: 1, basis: 0),
-            Ui.IconButton("Cancel", "移除文件", "移除", () => onRemove(draft.MediaId)));
+                .AutomationName($"选择 {draft.FileName}").Grid(column: 0),
+            thumb.Margin(Space.Sm, 0, Space.Md, 0).Grid(column: 1),
+            middle.Grid(column: 2),
+            Ui.IconButton("Cancel", "移除文件", "移除", () => onRemove(draft.MediaId)).Margin(Space.Sm, 0, 0, 0).Grid(column: 3));
 
         return Border(row)
             .IsTabStop(true)

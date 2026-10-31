@@ -13,7 +13,7 @@ public class CoreLocatorTests
         Assert.True(File.Exists(core.FfprobePath), core.FfprobePath);
         Assert.False(string.IsNullOrWhiteSpace(core.CoreHash));
         Assert.Equal(64, core.CoreHash.Length);
-        Assert.Contains("N-128212", core.Version);
+        Assert.Matches(@"^N-\d+-g[0-9a-f]+-\d{8}$", core.Version);
     }
 
     [Fact]

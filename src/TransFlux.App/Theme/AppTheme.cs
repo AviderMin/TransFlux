@@ -14,8 +14,8 @@ public static class Space
 
     public const double PagePadding = 24;
     public const double CompactPadding = 16;
-    public const double SettingsPanelMin = 340;
-    public const double SettingsPanelMax = 380;
+    public const double SettingsPanelMin = 320;
+    public const double SettingsPanelMax = 340;
     public const double WindowMinWidth = 920;
     public const double WindowMinHeight = 640;
 }

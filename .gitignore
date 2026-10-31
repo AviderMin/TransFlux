@@ -61,6 +61,7 @@ nunit-*.xml
 tools/ffmpeg/**
 !tools/ffmpeg/core-manifest.json
 !tools/ffmpeg/README.md
+!tools/ffmpeg/LICENSE.txt
 
 # TransFlux workspace / attempt temp directories
 .transflux-work/
@@ -79,3 +80,5 @@ installer/dist/
 !artifacts/installer/
 artifacts/installer/stage/
 artifacts/installer/*.exe
+artifacts/installer/**/*.exe
+artifacts/installer/**/*.sha256

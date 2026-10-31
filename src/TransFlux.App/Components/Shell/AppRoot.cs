@@ -101,12 +101,19 @@ public sealed class AppRoot : Component<AppServices>
         };
 
         var navigation = (NavigationView(navItems, content) with { SelectedTag = page })
-            .PaneDisplayMode(NavigationViewPaneDisplayMode.Left)
-            .OpenPaneLength(220)
+            .PaneDisplayMode(NavigationViewPaneDisplayMode.LeftCompact)
+            .OpenPaneLength(200)
             .CompactModeThresholdWidth(Space.WindowMinWidth)
             .ExpandedModeThresholdWidth(1200)
             .PaneTitle(UiText.AppTitle)
-            .Set(nv => { nv.IsSettingsVisible = false; nv.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed; })
+            .Set(nv =>
+            {
+                nv.IsSettingsVisible = false;
+                nv.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed;
+                nv.SizeChanged -= OnNavigationSizeChanged;
+                nv.SizeChanged += OnNavigationSizeChanged;
+                UpdateNavigation(nv, nv.ActualWidth);
+            })
             .SelectedTagChanged(tag => { if (!string.IsNullOrEmpty(tag)) setPage(tag); })
             .Provide(UiContext.Shell, shell);
 
@@ -118,5 +125,17 @@ public sealed class AppRoot : Component<AppServices>
         return root
             .RequestedTheme(AppTheme.Resolve(effectiveSettings.Theme))
             .Background(Theme.SolidBackground);
+    }
+
+    private static void OnNavigationSizeChanged(object sender, SizeChangedEventArgs e)
+        => UpdateNavigation((Microsoft.UI.Xaml.Controls.NavigationView)sender, e.NewSize.Width);
+
+    private static void UpdateNavigation(Microsoft.UI.Xaml.Controls.NavigationView navigation, double width)
+    {
+        // Dock both modes: Auto's overlay pane can obscure the workbench.
+        var mode = width >= 1180 ? NavigationViewPaneDisplayMode.Left : NavigationViewPaneDisplayMode.LeftCompact;
+        if (navigation.PaneDisplayMode == mode) return;
+        navigation.PaneDisplayMode = mode;
+        navigation.IsPaneOpen = mode == NavigationViewPaneDisplayMode.Left;
     }
 }

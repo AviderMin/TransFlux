@@ -56,13 +56,13 @@ public static class AdvancedPanel
 
         children.Add(Ui.Divider());
         children.Add(TextBlock(UiText.Trim + "（格式 时:分:秒.毫秒）").SemiBold());
-        children.Add(HStack(Space.Sm,
+        children.Add(Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
             VStack(4, Ui.FieldLabel("开始"),
                 TextBox(FormatTimecode(current.TrimStart), t => apply(o => o with { TrimStart = ParseTimecode(t) }))
-                    .PlaceholderText("00:00:00.000").AutomationName("裁剪开始时间")).Flex(grow: 1, basis: 0),
+                    .PlaceholderText("00:00:00.000").AutomationName("裁剪开始时间")).Margin(0, 0, Space.Sm, 0).Grid(column: 0),
             VStack(4, Ui.FieldLabel("结束"),
                 TextBox(FormatTimecode(current.TrimEnd), t => apply(o => o with { TrimEnd = ParseTimecode(t) }))
-                    .PlaceholderText("00:00:10.000").AutomationName("裁剪结束时间")).Flex(grow: 1, basis: 0)));
+                    .PlaceholderText("00:00:10.000").AutomationName("裁剪结束时间")).Grid(column: 1)));
 
         children.Add(Ui.Divider());
         children.Add(TextBlock(UiText.Metadata).SemiBold());

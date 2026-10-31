@@ -61,7 +61,9 @@ public static class QueueTaskCard
             : row.Job.SourcePath is { } sp ? Ui.KeyValue("源文件", sp, 48) : Empty();
 
         return Ui.Card(VStack(Space.Sm,
-            HStack(Space.Sm, status, TextBlock(title).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).Flex(grow: 1, basis: 0)),
+            Grid(columns: [GridSize.Auto, GridSize.Star()], rows: [GridSize.Auto],
+                status.Margin(0, 0, Space.Sm, 0).Grid(column: 0),
+                TextBlock(title).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).Grid(column: 1)),
             progressBlock,
             pathLine,
             actions.Count > 0 ? HStack(Space.Xs, actions.ToArray()) : null))

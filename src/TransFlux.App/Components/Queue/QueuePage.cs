@@ -76,17 +76,14 @@ public sealed class QueuePage : Component<QueuePageProps>
         var activeRows = ordered.Where(r => !r.IsTerminal).ToList();
         var historyRows = ordered.Where(r => r.IsTerminal).ToList();
 
-        Element header = HStack(Space.Sm,
-            Heading(UiText.QueueTitle),
-            Ui.Dim($"{snapshot.RunningCount} 运行 · {snapshot.QueuedCount} 排队"),
-            Ui.Spacer(),
+        Element header = Ui.PageHeader(UiText.QueueTitle, $"{snapshot.RunningCount} 项运行中 · {snapshot.QueuedCount} 项排队中",
+            HStack(Space.Sm,
             DropDownButton("排序", flyout: MenuItems(
                 MenuItem("按加入顺序", () => setSort(QueueSort.EnqueueOrder)),
                 MenuItem("按创建时间", () => setSort(QueueSort.Created)),
                 MenuItem("按状态", () => setSort(QueueSort.State)))),
             Button(snapshot.Paused ? UiText.ResumeQueue : UiText.PauseQueue, () => _ = TogglePauseAsync())
-                .AutomationName(snapshot.Paused ? UiText.ResumeQueue : UiText.PauseQueue),
-            Ui.Dim(UiText.PauseHint));
+                .AutomationName(snapshot.Paused ? UiText.ResumeQueue : UiText.PauseQueue).ToolTip(UiText.PauseHint)));
 
         var tabs = SelectorBar(new[]
         {

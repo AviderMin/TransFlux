@@ -67,10 +67,10 @@ public sealed class SettingsPage : Component<SettingsPageProps>
 
         var output = Section(UiText.OutputRules,
             VStack(2, Ui.FieldLabel("默认输出位置（留空则使用源文件旁的 TransFlux Output）"),
-                HStack(Space.Sm,
+                Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
                     TextBlock(string.IsNullOrEmpty(draft.DefaultOutputDirectory) ? "源文件所在文件夹 / TransFlux Output" : draft.DefaultOutputDirectory!)
-                        .Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).Flex(grow: 1, basis: 0),
-                    Button("选择…", () => _ = PickDefaultOutputAsync()).AutomationName("选择默认输出位置"))),
+                        .Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).Grid(column: 0),
+                    Button("选择…", () => _ = PickDefaultOutputAsync()).AutomationName("选择默认输出位置").Grid(column: 1))),
             CheckBox(draft.PreserveTitleAndChaptersByDefault, v => Update(s => s with { PreserveTitleAndChaptersByDefault = v }), "默认保留标题与章节（可能含个人信息）"));
 
         var hardware = Section(UiText.Hardware,
@@ -94,9 +94,10 @@ public sealed class SettingsPage : Component<SettingsPageProps>
         var noticeBar = notice is { } msg ? InfoBar("提示", msg).Informational().IsClosable(true).Closed(() => setNotice(null)).Margin(0, 0, 0, Space.Sm) : null;
 
         return FlexColumn(noticeBar,
-            HStack(Space.Sm, Heading(UiText.SettingsTitle), Ui.Spacer(),
+            Ui.PageHeader(UiText.SettingsTitle, "管理外观、输出规则与转换资源。",
                 Button("保存设置", () => _ = SaveAsync()).AccentButton().IsEnabled(!saving).AutomationName("保存设置")),
-            ScrollView(VStack(Space.Lg, appearance, output, hardware, resources, privacy)).Flex(grow: 1, basis: 0))
+            ScrollView(VStack(Space.Lg, appearance, output, hardware, resources, privacy)
+                .MaxWidth(840).HorizontalAlignment(HorizontalAlignment.Left).Padding(0, Space.Sm)).Flex(grow: 1, basis: 0))
             .Set(f => f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Stretch).FlexPadding(Space.PagePadding);
     }
 }

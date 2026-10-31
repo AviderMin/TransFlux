@@ -1,6 +1,7 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
+using Windows.System;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Shared;
 using TransFlux.App.Resources;
@@ -14,18 +15,23 @@ public static class EmptyImport
 {
     public static Element Render(Action onAddFiles, Action onAddFolder, bool importing)
     {
-        return VStack(Space.Md,
-            Icon(SymbolIcon("Add")).HorizontalAlignment(HorizontalAlignment.Center),
-            TextBlock(UiText.EmptyTitle).SemiBold().FontSize(16).HorizontalAlignment(HorizontalAlignment.Center),
-            TextBlock(UiText.EmptyHint).Foreground(Theme.SecondaryText).FontSize(12)
-                .TextWrapping(TextWrapping.Wrap).HorizontalAlignment(HorizontalAlignment.Center).MaxWidth(420),
+        return VStack(Space.Lg,
+            Border(Icon(SymbolIcon("Video")).HorizontalAlignment(HorizontalAlignment.Center).VerticalAlignment(VerticalAlignment.Center))
+                .Width(56).Height(56).CornerRadius(16).Background(Theme.ControlFillSecondary).HorizontalAlignment(HorizontalAlignment.Center),
+            VStack(Space.Sm,
+                TextBlock("添加文件，开始转换").SemiBold().FontSize(20).HorizontalAlignment(HorizontalAlignment.Center),
+                TextBlock("将视频或音频拖放到这里，或选择本地文件。")
+                    .Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap).TextAlignment(TextAlignment.Center)),
             HStack(Space.Sm,
-                Button(UiText.AddFiles, onAddFiles).AccentButton().AutomationName(UiText.AddFiles).ToolTip("Ctrl+O"),
-                Button(UiText.AddFolder, onAddFolder).AutomationName(UiText.AddFolder).ToolTip("Ctrl+Shift+O"))
+                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFiles, onAddFiles).AccentButton().IsEnabled(!importing), VirtualKey.O, VirtualKeyModifiers.Control)
+                    .AutomationName(UiText.AddFiles).ToolTip("Ctrl+O"),
+                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFolder, onAddFolder).IsEnabled(!importing), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift)
+                    .AutomationName(UiText.AddFolder).ToolTip("Ctrl+Shift+O"))
                 .HorizontalAlignment(HorizontalAlignment.Center),
             importing
                 ? HStack(Space.Sm, ProgressRing().Width(16).Height(16), Ui.Dim("正在读取媒体信息…"))
                     .HorizontalAlignment(HorizontalAlignment.Center)
-                : Ui.Dim(UiText.EmptySecondary).HorizontalAlignment(HorizontalAlignment.Center));
+                : Ui.Dim("MP4 · MKV · MOV · M4A · FLAC · WAV").FontSize(12).HorizontalAlignment(HorizontalAlignment.Center))
+            .VerticalAlignment(VerticalAlignment.Center);
     }
 }

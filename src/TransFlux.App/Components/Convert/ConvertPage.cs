@@ -37,6 +37,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
     // Latest closures captured for the native drop handlers (stable across renders).
     private Func<IReadOnlyList<string>, Task>? _addPaths;
     private Action<NoticeModel>? _setNotice;
+    private Action<bool>? _setCompact;
 
     public override Element Render()
     {
@@ -55,6 +56,10 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         var (notice, setNotice) = UseState<NoticeModel?>(null);
         var (busyEnqueue, setBusyEnqueue) = UseState(false);
         var (detail, setDetail) = UseState<MediaDraft?>(null);
+        var (defaultOptions, setDefaultOptions) = UseState(ConversionOptions.Default);
+        var (compact, setCompact) = UseState(false);
+        var (compactTab, setCompactTab) = UseState(0);
+        _setCompact = value => { if (value != compact) setCompact(value); };
 
         var tokenSource = UseRef<CancellationTokenSource?>(null);
 
@@ -102,7 +107,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         var targets = selectedSet.Count > 0
             ? workbench.Items.Where(i => selectedSet.Contains(i.MediaId)).ToList()
             : workbench.Items.ToList();
-        var current = targets.FirstOrDefault()?.Options ?? ConversionOptions.FromTemplate(TemplateFor(selectedPresetId));
+        var current = targets.FirstOrDefault()?.Options ?? defaultOptions;
         var mixed = targets.Select(t => t.Options).Distinct().Count() > 1;
 
         var focused = workbench.Focused;
@@ -115,6 +120,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
             optionsForPreview.ResizeMode, optionsForPreview.AllowUpscale, optionsForPreview.AudioCodec,
             optionsForPreview.AudioBitRateKbps, optionsForPreview.MetadataPolicy, optionsForPreview.Hardware,
             string.Join(",", optionsForPreview.SelectedStreams), optionsForPreview.TrimStart?.Ticks, optionsForPreview.TrimEnd?.Ticks,
+            optionsForPreview.OutputDirectory, p.Settings.DefaultOutputDirectory,
         });
         var planKey = $"{focused?.MediaId}|{optionsKey}|{capabilities?.CapabilityHash}";
 
@@ -126,12 +132,14 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                 return static () => { };
             }
             var cts = new CancellationTokenSource();
-            var request = optionsForPreview.ToRequest(focused.MediaId, p.Settings.DefaultOutputDirectory);
+            setPreview(null);
+            var request = optionsForPreview.ToRequest(focused.MediaId, optionsForPreview.OutputDirectory ?? p.Settings.DefaultOutputDirectory);
             _ = Task.Run(async () =>
             {
                 try
                 {
                     var result = await p.Services.Planner.BuildAsync(request, focusSnapshot, capabilities, cts.Token);
+                    if (cts.IsCancellationRequested) return;
                     if (result.IsSuccess && result.Value is not null) setPreview(new PlanPreview(result.Value, null, null));
                     else setPreview(new PlanPreview(null, result.Failure, result.Failure?.TechnicalDetail));
                 }
@@ -151,7 +159,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         void ApplyToTargets(Func<ConversionOptions, ConversionOptions> mutate)
         {
             var ids = selectedSet.Count > 0 ? selectedSet : workbench.Items.Select(i => i.MediaId).ToList();
-            if (ids.Count == 0) return;
+            if (ids.Count == 0) { setDefaultOptions(mutate(defaultOptions)); return; }
             dispatch(new UpdateOptions(ids, mutate));
         }
 
@@ -179,7 +187,6 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         async Task AddPathsAsync(IReadOnlyList<string> rawPaths)
         {
             var existing = workbench.Items.Select(i => i.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var template = TemplateFor(selectedPresetId);
             var drafts = rawPaths
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -189,7 +196,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                     MediaId = Guid.NewGuid(),
                     Path = x,
                     Status = DraftStatus.Probing,
-                    Options = ConversionOptions.FromTemplate(template),
+                    Options = defaultOptions,
                 })
                 .ToList();
 
@@ -209,7 +216,11 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         {
             if (importing) return;
             setImporting(true);
-            try { await AddPathsAsync(await FilePickerInterop.PickFilesAsync(window)); }
+            try
+            {
+                var files = await FilePickerInterop.PickFilesAsync(window);
+                if (files.Count > 0) await AddPathsAsync(files);
+            }
             catch (Exception ex) { setNotice(new NoticeModel(false, "添加文件失败", ex.Message)); }
             finally { setImporting(false); }
         }
@@ -240,6 +251,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         {
             setSelectedPresetId(id);
             var template = TemplateFor(id);
+            setDefaultOptions(ConversionOptions.FromTemplate(template));
             ApplyToTargets(o => o with
             {
                 Mode = template.Mode,
@@ -281,7 +293,7 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                 foreach (var draft in ready)
                 {
                     if (draft.Snapshot is null) continue;
-                    var request = draft.Options.ToRequest(draft.MediaId);
+                    var request = draft.Options.ToRequest(draft.MediaId, draft.Options.OutputDirectory ?? p.Settings.DefaultOutputDirectory);
                     IReadOnlyList<CompatibilityIssue> draftIssues;
                     try { draftIssues = MediaCompatibility.Validate(request, draft.Snapshot); }
                     catch { draftIssues = Array.Empty<CompatibilityIssue>(); }
@@ -327,30 +339,22 @@ public sealed class ConvertPage : Component<ConvertPageProps>
         }
 
         // ---- layout ----
-        var outputDirText = targets
-            .Select(t => t.Options.OutputDirectory)
-            .FirstOrDefault(d => !string.IsNullOrEmpty(d))
+        var outputDirs = targets.Select(t => t.Options.OutputDirectory).Distinct().ToArray();
+        var outputDirText = outputDirs.Length > 1 ? "多个输出位置" : current.OutputDirectory
             ?? p.Settings.DefaultOutputDirectory
-            ?? "TransFlux Output（源文件所在文件夹）";
+            ?? "源文件旁的 TransFlux Output 文件夹";
 
-        Element headerTop = Grid(
-            columns: [GridSize.Star(), GridSize.Auto],
-            rows: [GridSize.Auto],
-            Heading(UiText.NavConvert).Grid(column: 0),
-            HStack(Space.Sm,
-                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton(), VirtualKey.O, VirtualKeyModifiers.Control).AutomationName(UiText.AddFiles),
+        Element headerTop = Ui.PageHeader("媒体转换", "添加文件，选择用途，然后开始转换。",
+            workbench.Items.Count == 0 ? null : HStack(Space.Sm,
+                Ui.WithAccelerator((ButtonElement)Button(UiText.AddFiles, () => _ = ImportFilesAsync()), VirtualKey.O, VirtualKeyModifiers.Control).AutomationName(UiText.AddFiles),
                 Ui.WithAccelerator((ButtonElement)Button(UiText.AddFolder, () => _ = ImportFolderAsync()), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift).AutomationName(UiText.AddFolder))
-                .Grid(column: 1));
+            );
 
         Element listArea;
         if (workbench.Items.Count == 0)
         {
             var dropBorder = Border(EmptyImport.Render(() => _ = ImportFilesAsync(), () => _ = ImportFolderAsync(), importing))
-                .Padding(Space.Xl)
-                .CornerRadius(12)
-                .Background(Theme.CardBackground)
-                .WithBorder(Theme.CardStroke, 1)
-                .MinHeight(260)
+                .Padding(Space.Lg)
                 .Set(ConfigureDrop);
             listArea = dropBorder;
         }
@@ -366,17 +370,20 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                     id => dispatch(new RemoveDrafts(new[] { id })))
                 .WithKey(draft.MediaId.ToString())).ToArray();
 
-            listArea = ScrollView(VStack(Space.Xs, rows));
+            listArea = ScrollViewer(VStack(Space.Sm, rows))
+                .HorizontalScrollMode(ScrollMode.Disabled).VerticalScrollMode(ScrollMode.Auto)
+                .Set(s => s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled);
         }
 
-        var summaryLine = $"{workbench.Items.Count} 项 · 已选 {selectedSet.Count} 项 · 约 {Fmt.Size(workbench.TotalReadyBytes)}";
+        var summaryLine = workbench.Items.Count == 0 ? "支持本地视频与音频文件"
+            : $"{workbench.Items.Count} 个文件 · {workbench.ReadyItems.Count} 项已读取 · {Fmt.Size(workbench.TotalReadyBytes)}";
 
-        Element summaryText = Ui.Dim(summaryLine);
-
-        Element headerActions = HStack(Space.Sm,
-            Ui.WithAccelerator((ButtonElement)Button(UiText.RemoveSelected, RemoveSelected).IsEnabled(workbench.Items.Count > 0), VirtualKey.Delete).AutomationName(UiText.RemoveSelected),
+        Element headerActions = HStack(Space.Xs,
             Ui.WithAccelerator((ButtonElement)Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).IsEnabled(workbench.Items.Count > 0), VirtualKey.A, VirtualKeyModifiers.Control).AutomationName(UiText.SelectAll),
-            Ui.WithAccelerator((ButtonElement)Button("详情", () => setDetail(workbench.Focused)).IsEnabled(workbench.Focused?.Snapshot is not null), VirtualKey.Enter, VirtualKeyModifiers.Menu).AutomationName("查看详情"));
+            Button("取消选择", () => dispatch(new ClearDraftSelection())).IsEnabled(selectedSet.Count > 0),
+            DropDownButton("更多", flyout: MenuItems(
+                MenuItem("查看详情", () => setDetail(workbench.Focused)),
+                MenuItem(UiText.RemoveSelected, RemoveSelected))));
 
         Element advanced = Expander(UiText.AdvancedSettings,
                 AdvancedPanel.Render(current, targets.FirstOrDefault(t => t.Snapshot is not null)?.Snapshot, ApplyToTargets),
@@ -384,32 +391,60 @@ public sealed class ConvertPage : Component<ConvertPageProps>
                 v => setAdvancedOpen(v));
 
         Element settingsCard = Ui.Card(VStack(Space.Md,
-            TextBlock(capabilityText).Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap).MaxWidth(Space.SettingsPanelMax - Space.Lg),
-            OutputSettingsPanel.Render(current, mixed, presets, selectedPresetId, ApplyPreset, ApplyToTargets, outputDirText, () => _ = PickOutputAsync()),
+            Ui.Dim(targets.Count == 0 ? "用于接下来添加的文件"
+                : selectedSet.Count > 0 ? $"应用于所选 {targets.Count} 个文件" : $"应用于全部 {targets.Count} 个文件").FontSize(12),
+            OutputSettingsPanel.Render(current, mixed, presets.Count > 0 ? presets : BuiltInPresets.All, selectedPresetId, ApplyPreset, ApplyToTargets),
             advanced,
-            Ui.Divider(),
-            PlanSummary.Render(preview, issues, workbench.ReadyItems.Count > 0, CopyPlanDetails),
-            HStack(Space.Sm,
-                Button(UiText.AddToQueue, () => _ = EnqueueAsync(false)).IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.AddToQueue),
-                Button(UiText.StartConvert, () => _ = EnqueueAsync(true)).AccentButton().IsEnabled(workbench.ReadyItems.Count > 0 && !busyEnqueue).AutomationName(UiText.StartConvert).Flex(grow: 1, basis: 0))));
+            Expander("转换计划与设备", VStack(Space.Md,
+                Ui.Dim(capabilityText).FontSize(12).TextWrapping(TextWrapping.Wrap),
+                PlanSummary.Render(preview, issues, focused?.IsReady == true, CopyPlanDetails)))));
 
-        Element rightPanel = ScrollViewer(VStack(Space.Md, settingsCard))
+        Element rightPanel = ScrollViewer(settingsCard)
             .HorizontalScrollMode(ScrollMode.Disabled)
             .VerticalScrollMode(ScrollMode.Auto)
-            .Flex(grow: 0, shrink: 0, basis: Space.SettingsPanelMax);
+            .Set(s => s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled);
 
-        Element leftContent = Grid(
+        Element leftContent = Ui.Card(Grid(
             columns: [GridSize.Star()],
-            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star()],
-            headerTop.Grid(row: 0),
-            summaryText.Grid(row: 1),
-            headerActions.Grid(row: 2),
-            listArea.Grid(row: 3)) with { RowSpacing = Space.Sm };
+            rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            (Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+                TextBlock("源文件").SemiBold().FontSize(16).VerticalAlignment(VerticalAlignment.Center).Grid(column: 0),
+                (workbench.Items.Count > 0 ? headerActions : Empty()).Grid(column: 1)))
+                .Margin(0, 0, 0, Space.Md).Grid(row: 0),
+            listArea.Grid(row: 1),
+            Ui.Dim(summaryLine).FontSize(12).Margin(0, Space.Md, 0, 0).Grid(row: 2)));
 
-        Element body = FlexRow(
-                leftContent.Flex(grow: 1, basis: 0),
-                rightPanel)
-            .Set(f => f.ColumnGap = Space.Lg);
+        Element body = compact
+            ? Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
+                SelectorBar(new[] { SelectorBarItem("源文件"), SelectorBarItem("转换设置") }, compactTab, setCompactTab)
+                    .Margin(0, 0, 0, Space.Md).Grid(row: 0),
+                (compactTab == 0 ? leftContent : rightPanel).Grid(row: 1))
+            : (Grid(columns: [GridSize.Star(), GridSize.Px(Space.SettingsPanelMax)], rows: [GridSize.Star()],
+                leftContent.Grid(column: 0), rightPanel.Grid(column: 1)) with { ColumnSpacing = Space.Lg });
+
+        var convertibleCount = workbench.ReadyItems.Count(d => d.Snapshot is not null &&
+            !MediaCompatibility.Validate(d.Options.ToRequest(d.MediaId), d.Snapshot).Any(i => i.Blocking));
+        var blockedCount = workbench.Items.Count - convertibleCount;
+        var canStart = convertibleCount > 0 && !busyEnqueue;
+        var footerStatus = busyEnqueue ? "正在加入队列…" : workbench.Items.Count == 0 ? "等待添加文件"
+            : $"{convertibleCount} 项可转换" + (blockedCount > 0 ? $" · {blockedCount} 项待读取或处理" : string.Empty);
+
+        Element footer = Border(Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto, GridSize.Auto],
+            (Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+                VStack(2, Ui.FieldLabel("输出位置"),
+                    TextBlock(outputDirText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(outputDirText))
+                    .Grid(column: 0),
+                Button("更改…", () => _ = PickOutputAsync()).AutomationName("选择输出位置")
+                    .Margin(Space.Md, 0, Space.Lg, 0).VerticalAlignment(VerticalAlignment.Center).Grid(column: 1)))
+                .Grid(row: 0, column: 0),
+            HStack(Space.Sm,
+                Button(UiText.AddToQueue, () => _ = EnqueueAsync(false)).IsEnabled(canStart).AutomationName(UiText.AddToQueue).MinHeight(40),
+                Button(convertibleCount > 0 ? $"开始转换 · {convertibleCount} 项" : UiText.StartConvert, () => _ = EnqueueAsync(true))
+                    .AccentButton().MinWidth(144).MinHeight(40).IsEnabled(canStart).AutomationName(UiText.StartConvert))
+                .VerticalAlignment(VerticalAlignment.Center).Grid(row: 0, column: 1),
+            Ui.Dim(footerStatus).FontSize(12).Margin(0, Space.Sm, 0, 0).Grid(row: 1, column: 0)))
+            .Background(Theme.CardBackground).WithBorder(Theme.CardStroke, 1).CornerRadius(8).Padding(Space.Lg)
+            .Margin(0, Space.Lg, 0, 0);
 
         Element noticeBar = notice is { } n
             ? InfoBar(n.Title, n.Message)
@@ -429,13 +464,24 @@ public sealed class ConvertPage : Component<ConvertPageProps>
 
         Element pageContent = (Grid(
                 columns: [GridSize.Star()],
-                rows: [GridSize.Auto, GridSize.Star()],
+                rows: [GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
                 noticeBar.Grid(row: 0),
-                body.Grid(row: 1)) with { RowSpacing = Space.Sm })
-            .Padding(Space.PagePadding);
+                headerTop.Grid(row: 1),
+                body.Grid(row: 2),
+                footer.Grid(row: 3)))
+            .Padding(Space.PagePadding)
+            .Set(grid =>
+            {
+                grid.SizeChanged -= OnPageSizeChanged;
+                grid.SizeChanged += OnPageSizeChanged;
+                if (grid.ActualWidth > 0) _setCompact?.Invoke(grid.ActualWidth < 800);
+            });
 
         return Grid(columns: [GridSize.Star()], rows: [GridSize.Star()], pageContent, detailDialog);
     }
+
+    private void OnPageSizeChanged(object sender, SizeChangedEventArgs e)
+        => _setCompact?.Invoke(e.NewSize.Width < 800);
 
     private void ConfigureDrop(Border border)
     {

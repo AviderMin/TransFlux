@@ -23,7 +23,7 @@ public static class Ui
     public static Element FieldLabel(string text)
         => TextBlock(text).Foreground(Theme.SecondaryText).FontSize(12);
 
-    public static Element Dim(string text) => TextBlock(text).Foreground(Theme.SecondaryText);
+    public static TextBlockElement Dim(string text) => TextBlock(text).Foreground(Theme.SecondaryText);
 
     public static Element Divider()
         => Border(Empty()).Height(1).Background(Theme.DividerStroke).Margin(0, Space.Sm);
@@ -46,9 +46,15 @@ public static class Ui
             .IsEnabled(enabled);
 
     public static Element KeyValue(string key, string value, double keyWidth = 84)
-        => HStack(Space.Sm,
-            TextBlock(key).Foreground(Theme.SecondaryText).Width(keyWidth).VerticalAlignment(VerticalAlignment.Top),
-            TextBlock(value).TextWrapping(TextWrapping.Wrap).Flex(grow: 1, basis: 0));
+        => Grid(columns: [GridSize.Px(keyWidth), GridSize.Star()], rows: [GridSize.Auto],
+            TextBlock(key).Foreground(Theme.SecondaryText).VerticalAlignment(VerticalAlignment.Top).Grid(column: 0),
+            TextBlock(value).TextWrapping(TextWrapping.Wrap).Grid(column: 1));
+
+    public static Element PageHeader(string title, string subtitle, Element? actions = null)
+        => Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+            VStack(Space.Xs, Heading(title), Dim(subtitle).TextWrapping(TextWrapping.Wrap)).Grid(column: 0),
+            (actions ?? Empty()).VerticalAlignment(VerticalAlignment.Center).Grid(column: 1))
+            .Margin(0, 0, 0, Space.Lg);
 
     public static Element ProgressBar(double fraction)
         => Progress(Math.Clamp(fraction, 0, 0.99) * 100).Height(6);
