@@ -104,3 +104,17 @@ Verified on the installed 1.0.0.2 build (117.4 MB): install exit 0, version 1.0.
 About shows “版本 1.0.0.2”, E2E with installed FFmpeg PASS, uninstall clean. Screenshots:
 [workbench-installed.png](screenshots/workbench-installed.png), [settings-dialog.png](screenshots/settings-dialog.png),
 [about-dialog.png](screenshots/about-dialog.png), [workbench.png](screenshots/workbench.png).
+
+## 2026-11-01 — P0 usability pass (Format-Factory workbench v2)
+
+- Task list is now an aligned **table**: 文件 / 目标格式 / 状态·进度 / 速度 / 输出 / 操作; filter tabs
+  全部 / 进行中 / 已完成 / 失败; 清除已完成; per-row gear opens parameters; completed rows offer open/reveal.
+- Layered toolbar: primary 添加文件/文件夹; selection group 全选/删除/批量设置(N); queue group 开始全部/暂停队列
+  (“仅暂停启动新任务，当前任务继续”).
+- Left panel = 输出设置: scrollable format catalogue + pinned quality chips (较小体积/均衡/更高画质, applies to selection)
+  + always-visible output location (更改/打开); main window also shows output folder at the bottom.
+- Parameter dialog split into **基本/高级** tabs; numeric validation (CRF 0–51, bitrate, W×H 2–16384, fps 1–240,
+  sample rate 8k–192k, channels 1–8), “清除具体数值”, and “同时应用到所有相同目标格式的任务”.
+- Verified: solution build 0/0, 171 tests pass, launched UI renders the new table/toolbar/output bar,
+  installer rebuilt and re-verified (install/launch/uninstall, version 1.0.0.2).
+  Screenshots: [workbench-v2.png](screenshots/workbench-v2.png), [workbench-p0-installed.png](screenshots/workbench-p0-installed.png).
