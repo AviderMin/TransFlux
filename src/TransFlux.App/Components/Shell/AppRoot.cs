@@ -51,6 +51,9 @@ public sealed class AppRoot : Component<AppServices>
         var (settingsError, setSettingsError) = UseState<string?>(null);
         var (presets, setPresets) = UseState<IReadOnlyList<Preset>>(Array.Empty<Preset>());
         var (targetKey, setTargetKey) = UseState(TargetFormats.Default.Key);
+        var (defaultQuality, setDefaultQuality) = UseState(QualityTier.Balanced);
+        var (defaultOutputDir, setDefaultOutputDir) = UseState<string?>(null);
+        var (filter, setFilter) = UseState(0);
         var (notice, setNotice) = UseState<NoticeModel?>(null);
         var (busyEnqueue, setBusyEnqueue) = UseState(false);
         var (paramRequest, setParamRequest) = UseState<ParamRequest?>(null);
@@ -104,10 +107,11 @@ public sealed class AppRoot : Component<AppServices>
         var selectedFormat = TargetFormats.Find(targetKey) ?? TargetFormats.Default;
         var defaultOptions = selectedFormat.ApplyTo(ConversionOptions.Default with
         {
+            Quality = defaultQuality,
             MetadataPolicy = effectiveSettings.PreserveTitleAndChaptersByDefault
                 ? MetadataPolicy.PreserveTitleAndChapters
                 : MetadataPolicy.StripPersonalTags,
-            OutputDirectory = effectiveSettings.DefaultOutputDirectory,
+            OutputDirectory = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory,
         });
 
         // ---- import / probe ----
@@ -176,8 +180,45 @@ public sealed class AppRoot : Component<AppServices>
             var fmt = TargetFormats.Find(key);
             if (fmt is null || !fmt.Enabled) return;
             setTargetKey(key);
-            if (workbench.Selected.Count > 0)
-                dispatch(new UpdateOptions(workbench.Selected, o => fmt.ApplyTo(o)));
+        }
+
+        void ApplyQualityToSelected(QualityTier quality)
+        {
+            if (workbench.Selected.Count == 0) return;
+            dispatch(new UpdateOptions(workbench.Selected, o => o with { Quality = quality }));
+        }
+
+        async Task PickDefaultOutputAsync()
+        {
+            try
+            {
+                var folder = await FilePickerInterop.PickFolderAsync(reactorWindow?.NativeWindow);
+                if (folder is null) return;
+                setDefaultOutputDir(folder);
+                if (workbench.Selected.Count > 0)
+                    dispatch(new UpdateOptions(workbench.Selected, o => o with { OutputDirectory = folder }));
+            }
+            catch (Exception ex) { setNotice(NoticeModel.Error("选择输出位置失败", ex.Message)); }
+        }
+
+        void OpenOutputDir()
+        {
+            var dir = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                setNotice(NoticeModel.Info("输出位置", "默认输出到源文件旁的 TransFlux Output 文件夹。"));
+                return;
+            }
+            _ = LauncherInterop.OpenAsync(dir);
+        }
+
+        void ClearCompleted()
+        {
+            var done = workbench.Items
+                .Where(d => JobFor(d.MediaId) is { State: JobState.Succeeded })
+                .Select(d => d.MediaId)
+                .ToList();
+            if (done.Count > 0) dispatch(new RemoveDrafts(done));
         }
 
         HashSet<Guid> EnqueuedIds() => snapshot.Rows
@@ -282,72 +323,130 @@ public sealed class AppRoot : Component<AppServices>
             () => { setSettingsReq(settingsReq + 1); setSettingsOpen(true); },
             () => { setAboutReq(aboutReq + 1); setAboutOpen(true); }));
 
-        // ---- left catalogue ----
-        var catalog = FormatCatalog.Render(targetKey, SelectFormat, () => _ = ImportFilesAsync(), () => _ = ImportFolderAsync());
+        // ---- left output settings ----
+        var selectedCount = workbench.Selected.Count;
+        var outputDirectoryText = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory ?? "源文件旁的 TransFlux Output";
+        var catalog = OutputSettingsPanel.Render(new OutputSettingsProps(
+            targetKey, defaultQuality, selectedCount, outputDirectoryText,
+            SelectFormat,
+            quality => { setDefaultQuality(quality); ApplyQualityToSelected(quality); },
+            () => ApplyQualityToSelected(defaultQuality),
+            () => _ = PickDefaultOutputAsync(),
+            OpenOutputDir));
 
         // ---- right task list ----
-        var selectedCount = workbench.Selected.Count;
+        bool MatchesFilter(MediaDraft d)
+        {
+            var job = JobFor(d.MediaId);
+            var done = job is { State: JobState.Succeeded };
+            var failed = d.Status == DraftStatus.Invalid
+                || job is { State: JobState.Failed or JobState.Interrupted or JobState.Canceled };
+            return filter switch
+            {
+                1 => !done && !failed,
+                2 => done,
+                3 => failed,
+                _ => true,
+            };
+        }
+
         Element listArea;
         if (workbench.Items.Count == 0)
         {
             listArea = Border(VStack(Space.Lg,
                     Border(Icon(SymbolIcon("Video")).HAlign(HorizontalAlignment.Center).VAlign(VerticalAlignment.Center))
-                        .Width(56).Height(56).CornerRadius(16).Background(Theme.ControlFillSecondary).HAlign(HorizontalAlignment.Center),
-                    VStack(Space.Sm,
-                        TextBlock(UiText.NoFilesTitle).SemiBold().FontSize(20).HAlign(HorizontalAlignment.Center),
-                        TextBlock(UiText.NoFilesHint).Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap).TextAlignment(TextAlignment.Center)),
-                    HStack(Space.Sm,
-                            Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton().AutomationName(UiText.AddFiles),
-                            Button(UiText.AddFolder, () => _ = ImportFolderAsync()).AutomationName(UiText.AddFolder))
-                        .HAlign(HorizontalAlignment.Center))
+                        .Width(64).Height(64).CornerRadius(16).Background(Theme.ControlFillSecondary).HAlign(HorizontalAlignment.Center),
+                    TextBlock(UiText.NoFilesTitle).SemiBold().FontSize(20).HAlign(HorizontalAlignment.Center),
+                    TextBlock("拖入文件即可开始（使用左侧当前输出设置）")
+                        .Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap).TextAlignment(TextAlignment.Center),
+                    Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton()
+                        .HAlign(HorizontalAlignment.Center).AutomationName(UiText.AddFiles))
                 .VerticalAlignment(VerticalAlignment.Center))
                 .Padding(Space.Lg);
         }
         else
         {
-            var rows = workbench.Items.Select((draft, index) =>
-                TaskRow.Render(
-                    draft,
-                    workbench.Selected.Contains(draft.MediaId),
-                    workbench.FocusedId == draft.MediaId || (workbench.FocusedId is null && index == 0),
-                    JobFor(draft.MediaId),
-                    id => dispatch(new ToggleSelect(id)),
-                    id => dispatch(new FocusDraft(id)),
-                    id => dispatch(new RemoveDrafts(new[] { id })),
-                    id => setParamRequest(new ParamRequest(Guid.NewGuid(), id)),
-                    OpenOutput,
-                    RevealOutput)
-                .WithKey(draft.MediaId.ToString())).ToArray();
+            var visible = workbench.Items.Where(MatchesFilter).ToList();
+            if (visible.Count == 0)
+            {
+                listArea = Border(Ui.Dim("当前筛选下没有任务。").HAlign(HorizontalAlignment.Center)
+                    .VAlign(VerticalAlignment.Center)).Padding(Space.Xl);
+            }
+            else
+            {
+                var rows = visible.Select((draft, index) =>
+                    TaskRow.Render(
+                        draft,
+                        workbench.Selected.Contains(draft.MediaId),
+                        workbench.FocusedId == draft.MediaId || (workbench.FocusedId is null && index == 0),
+                        JobFor(draft.MediaId),
+                        id => dispatch(new ToggleSelect(id)),
+                        id => dispatch(new FocusDraft(id)),
+                        id => dispatch(new RemoveDrafts(new[] { id })),
+                        id => setParamRequest(new ParamRequest(Guid.NewGuid(), id)),
+                        OpenOutput,
+                        RevealOutput)
+                    .WithKey(draft.MediaId.ToString())).ToArray();
 
-            listArea = ScrollViewer(VStack(Space.Xs, rows))
-                .HorizontalScrollMode(ScrollMode.Disabled)
-                .VerticalScrollMode(ScrollMode.Auto)
-                .Set(s =>
-                {
-                    s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                    s.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-                });
+                listArea = ScrollViewer(VStack(0, rows))
+                    .HorizontalScrollMode(ScrollMode.Disabled)
+                    .VerticalScrollMode(ScrollMode.Auto)
+                    .Set(s =>
+                    {
+                        s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                        s.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+                    });
+            }
         }
 
-        var toolbar = HStack(Space.Sm,
-            Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AutomationName(UiText.AddFiles),
-            Button(UiText.AddFolder, () => _ = ImportFolderAsync()).AutomationName(UiText.AddFolder),
-            Button(UiText.Start, () => _ = StartAsync()).AccentButton().MinWidth(96).AutomationName(UiText.Start),
-            Button(snapshot.Paused ? UiText.Resume : UiText.Pause, () => _ = TogglePauseAsync()).AutomationName(UiText.Pause),
-            Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).IsEnabled(workbench.Items.Count > 0).AutomationName(UiText.SelectAll),
-            Button(UiText.DeleteSelected, DeleteSelected).IsEnabled(selectedCount > 0 || workbench.FocusedId is not null).AutomationName(UiText.DeleteSelected),
+        Element selectionGroup = HStack(Space.Xs,
+            Button(UiText.SelectAll, () => dispatch(new SelectAllDrafts())).SubtleButton()
+                .IsEnabled(workbench.Items.Count > 0).AutomationName(UiText.SelectAll),
+            Button(UiText.DeleteSelected, DeleteSelected).SubtleButton()
+                .IsEnabled(selectedCount > 0 || workbench.FocusedId is not null).AutomationName(UiText.DeleteSelected),
             Button(selectedCount > 0 ? string.Format(UiText.BatchTitleFormat, selectedCount) : UiText.BatchSettings,
                     () => setBatchRequest(new BatchRequest(Guid.NewGuid())))
-                .IsEnabled(selectedCount > 0).AutomationName(UiText.BatchSettings));
+                .SubtleButton().IsEnabled(selectedCount > 0).AutomationName(UiText.BatchSettings));
 
-        var summary = workbench.Items.Count == 0
-            ? "支持本地视频与音频文件"
-            : $"{workbench.Items.Count} 个文件 · {workbench.ReadyItems.Count} 项已读取 · {Fmt.Size(workbench.TotalReadyBytes)} · 已选 {selectedCount} 项";
+        Element queueGroup = HStack(Space.Sm,
+            Button("开始全部", () => _ = StartAsync()).AccentButton().MinWidth(96).AutomationName("开始全部"),
+            Button(snapshot.Paused ? UiText.Resume : UiText.Pause, () => _ = TogglePauseAsync())
+                .AutomationName(UiText.Pause).ToolTip("仅暂停启动新任务，当前任务继续"));
 
-        var rightGrid = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
-            toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Md),
-            listArea.Grid(row: 1),
-            Ui.Dim(summary).FontSize(12).Margin(0, Space.Md, 0, 0).Grid(row: 2));
+        var toolbar = FlexRow(
+                HStack(Space.Sm,
+                    Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton().AutomationName(UiText.AddFiles),
+                    Button(UiText.AddFolder, () => _ = ImportFolderAsync()).AutomationName(UiText.AddFolder)),
+                Empty().Flex(grow: 1, basis: 0),
+                selectionGroup,
+                queueGroup)
+            .Set(f => { f.ColumnGap = Space.Md; f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Center; });
+
+        var filterBar = SelectorBar(new[]
+        {
+            SelectorBarItem("全部"), SelectorBarItem("进行中"), SelectorBarItem("已完成"), SelectorBarItem("失败"),
+        }, filter, i => setFilter(i));
+        var filterRow = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+            filterBar.Grid(column: 0),
+            Empty().Grid(column: 1),
+            Button("清除已完成", ClearCompleted).SubtleButton().Grid(column: 2));
+
+        var outputBar = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
+            Ui.FieldLabel("输出到").VAlign(VerticalAlignment.Center).Grid(column: 0),
+            TextBlock(outputDirectoryText).FontSize(12).Foreground(Theme.SecondaryText)
+                .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).VAlign(VerticalAlignment.Center)
+                .Margin(Space.Sm, 0, Space.Sm, 0).Grid(column: 1),
+            Button("更改", () => _ = PickDefaultOutputAsync()).SubtleButton().Grid(column: 2),
+            Button("打开", OpenOutputDir).SubtleButton().Grid(column: 3)) with { ColumnSpacing = Space.Xs };
+
+        var rightGrid = Grid(columns: [GridSize.Star()],
+            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Sm),
+            filterRow.Grid(row: 1).Margin(0, 0, 0, Space.Xs),
+            TaskRow.Header().Grid(row: 2),
+            listArea.Grid(row: 3),
+            outputBar.Grid(row: 4).Margin(0, Space.Sm, 0, 0));
+
 
         var rightSurface = Border(rightGrid)
             .Padding(Space.Lg)
@@ -356,12 +455,8 @@ public sealed class AppRoot : Component<AppServices>
             .WithBorder(Theme.CardStroke, 1)
             .Set(ConfigureDrop);
 
-        var catalogScroll = ScrollViewer(catalog)
-            .VerticalScrollMode(ScrollMode.Auto)
-            .HorizontalScrollMode(ScrollMode.Disabled)
-            .Set(s => { s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled; s.VerticalScrollBarVisibility = ScrollBarVisibility.Auto; });
         var workbenchArea = Grid(columns: [GridSize.Px(280), GridSize.Star()], rows: [GridSize.Star()],
-            catalogScroll.Grid(column: 0),
+            catalog.Grid(column: 0),
             rightSurface.Grid(column: 1)) with { ColumnSpacing = Space.Lg };
 
         var noticeRow = notice is { } n
@@ -390,7 +485,18 @@ public sealed class AppRoot : Component<AppServices>
             {
                 paramOverlay = Component<ParameterDialog, ParameterDialogProps>(
                         new ParameterDialogProps(services, draft, presets,
-                            opts => dispatch(new UpdateOptions(new[] { draft.MediaId }, _ => opts)),
+                            (opts, applyToSame) =>
+                            {
+                                dispatch(new UpdateOptions(new[] { draft.MediaId }, _ => opts));
+                                if (!applyToSame) return;
+                                var same = workbench.Items
+                                    .Where(i => i.MediaId != draft.MediaId
+                                        && i.Options.Mode == draft.Options.Mode
+                                        && i.Options.Container == draft.Options.Container
+                                        && i.Options.AudioCodec == draft.Options.AudioCodec)
+                                    .Select(i => i.MediaId).ToList();
+                                if (same.Count > 0) dispatch(new UpdateOptions(same, _ => opts));
+                            },
                             () => setParamRequest(null)))
                     .WithKey(req.RequestId.ToString("n"));
             }

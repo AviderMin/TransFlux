@@ -20,7 +20,8 @@ public sealed record ConversionFormProps(
     bool Mixed,
     IReadOnlyList<Preset> Presets,
     Action<Func<ConversionOptions, ConversionOptions>> Apply,
-    Func<string, Task> SavePreset);
+    Func<string, Task> SavePreset,
+    bool Advanced = false);
 
 /// <summary>
 /// Grouped conversion form used by both the per-item ParameterDialog and the
@@ -100,8 +101,6 @@ public sealed class ConversionForm : Component<ConversionFormProps>
             children.Add(SectionTitle("视频"));
             children.Add(Ui.FieldLabel("质量挡位"));
             children.Add(RadioButtons(QualityItems, (int)current.Quality, i => Apply(o => o with { Quality = (QualityTier)i })));
-            children.Add(NumField("具体 CRF（留空按挡位）", (double?)current.CrfOverride, v => Apply(o => o with { CrfOverride = v > 0 ? (int)Math.Round(v) : null })));
-            children.Add(NumField("目标码率 kbps（留空自动）", (double?)current.VideoBitrateKbps, v => Apply(o => o with { VideoBitrateKbps = v > 0 ? (int)Math.Round(v) : null })));
             children.Add(Ui.FieldLabel("分辨率"));
             var resizeIndex = current.TargetWidth.HasValue || current.TargetHeight.HasValue ? 2
                 : current.ResizeMode == ResizeMode.Max1080p ? 1 : 0;
@@ -114,12 +113,22 @@ public sealed class ConversionForm : Component<ConversionFormProps>
             if (resizeIndex == 2)
             {
                 children.Add(Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
-                    NumField("宽", (double?)current.TargetWidth, v => Apply(o => o with { TargetWidth = v > 0 ? (int)Math.Round(v) : null })).Margin(0, 0, Space.Sm, 0).Grid(column: 0),
-                    NumField("高", (double?)current.TargetHeight, v => Apply(o => o with { TargetHeight = v > 0 ? (int)Math.Round(v) : null })).Grid(column: 1)));
+                    NumField("宽", (double?)current.TargetWidth, v => Apply(o => o with { TargetWidth = v > 0 ? (int)Math.Clamp(Math.Round(v), 2, 16384) : null })).Margin(0, 0, Space.Sm, 0).Grid(column: 0),
+                    NumField("高", (double?)current.TargetHeight, v => Apply(o => o with { TargetHeight = v > 0 ? (int)Math.Clamp(Math.Round(v), 2, 16384) : null })).Grid(column: 1)));
             }
-            children.Add(NumField("帧率 fps（留空保持原始）", current.FrameRateOverride, v => Apply(o => o with { FrameRateOverride = v > 0 ? v : null })));
-            children.Add(Ui.FieldLabel("速度挡位"));
-            children.Add(RadioButtons(SpeedItems, (int)current.Speed, i => Apply(o => o with { Speed = (SpeedTier)i })));
+            if (p.Advanced)
+            {
+                children.Add(NumField("具体 CRF（0–51，留空按挡位）", (double?)current.CrfOverride, v => Apply(o => o with { CrfOverride = v > 0 ? (int)Math.Clamp(Math.Round(v), 0, 51) : null })));
+                children.Add(NumField("目标码率 kbps（16–100000，留空自动）", (double?)current.VideoBitrateKbps, v => Apply(o => o with { VideoBitrateKbps = v > 0 ? (int)Math.Clamp(Math.Round(v), 16, 100000) : null })));
+                children.Add(NumField("帧率 fps（1–240，留空保持原始）", current.FrameRateOverride, v => Apply(o => o with { FrameRateOverride = v > 0 ? Math.Clamp(v, 1, 240) : null })));
+                children.Add(Ui.FieldLabel("速度挡位"));
+                children.Add(RadioButtons(SpeedItems, (int)current.Speed, i => Apply(o => o with { Speed = (SpeedTier)i })));
+                children.Add(Button("清除具体数值（回到挡位推导）", () => Apply(o => o with
+                {
+                    CrfOverride = null, VideoBitrateKbps = null, FrameRateOverride = null,
+                    TargetWidth = null, TargetHeight = null, AudioSampleRate = null, AudioChannels = null,
+                })).SubtleButton().AutomationName("清除具体数值"));
+            }
         }
 
         // ---- 音频 ----
@@ -150,13 +159,16 @@ public sealed class ConversionForm : Component<ConversionFormProps>
                     return next;
                 });
             }).Header("编码").HAlign(HorizontalAlignment.Stretch));
-            children.Add(NumField("码率 kbps（留空自动）", (double?)current.AudioBitRateKbps, v => Apply(o => o with { AudioBitRateKbps = v > 0 ? (int)Math.Round(v) : null })));
-            children.Add(NumField("采样率 Hz（留空保持）", (double?)current.AudioSampleRate, v => Apply(o => o with { AudioSampleRate = v > 0 ? (int)Math.Round(v) : null })));
-            children.Add(NumField("声道数（留空保持）", (double?)current.AudioChannels, v => Apply(o => o with { AudioChannels = v > 0 ? (int)Math.Round(v) : null })));
+            children.Add(NumField("码率 kbps（16–512，留空自动）", (double?)current.AudioBitRateKbps, v => Apply(o => o with { AudioBitRateKbps = v > 0 ? (int)Math.Clamp(Math.Round(v), 16, 512) : null })));
+            if (p.Advanced)
+            {
+                children.Add(NumField("采样率 Hz（8000–192000，留空保持）", (double?)current.AudioSampleRate, v => Apply(o => o with { AudioSampleRate = v > 0 ? (int)Math.Clamp(Math.Round(v), 8000, 192000) : null })));
+                children.Add(NumField("声道数（1–8，留空保持）", (double?)current.AudioChannels, v => Apply(o => o with { AudioChannels = v > 0 ? (int)Math.Clamp(Math.Round(v), 1, 8) : null })));
+            }
         }
 
         // ---- 裁剪 ----
-        if (current.Mode != ConversionMode.Remux)
+        if (p.Advanced && current.Mode != ConversionMode.Remux)
         {
             children.Add(Ui.Divider());
             children.Add(SectionTitle("裁剪（时:分:秒.毫秒）"));
@@ -169,20 +181,22 @@ public sealed class ConversionForm : Component<ConversionFormProps>
                     .Grid(column: 1)));
         }
 
-        // ---- 元数据 ----
-        children.Add(Ui.Divider());
-        children.Add(SectionTitle("元数据"));
-        children.Add(RadioButtons(MetadataItems, (int)current.MetadataPolicy, i => Apply(o => o with
+        // ---- 元数据 / 硬件（高级） ----
+        if (p.Advanced)
         {
-            MetadataPolicy = i == 1 ? MetadataPolicy.PreserveTitleAndChapters : MetadataPolicy.StripPersonalTags,
-        })));
+            children.Add(Ui.Divider());
+            children.Add(SectionTitle("元数据"));
+            children.Add(RadioButtons(MetadataItems, (int)current.MetadataPolicy, i => Apply(o => o with
+            {
+                MetadataPolicy = i == 1 ? MetadataPolicy.PreserveTitleAndChapters : MetadataPolicy.StripPersonalTags,
+            })));
 
-        // ---- 硬件 ----
-        children.Add(Ui.Divider());
-        children.Add(SectionTitle("硬件"));
-        children.Add(ComboBox(HardwareItems, (int)current.Hardware, i => Apply(o => o with { Hardware = (HardwareBackend)i }))
-            .HAlign(HorizontalAlignment.Stretch));
-        children.Add(Ui.Dim(UiText.HardwareCaveat).FontSize(12).TextWrapping(TextWrapping.Wrap));
+            children.Add(Ui.Divider());
+            children.Add(SectionTitle("硬件"));
+            children.Add(ComboBox(HardwareItems, (int)current.Hardware, i => Apply(o => o with { Hardware = (HardwareBackend)i }))
+                .HAlign(HorizontalAlignment.Stretch));
+            children.Add(Ui.Dim(UiText.HardwareCaveat).FontSize(12).TextWrapping(TextWrapping.Wrap));
+        }
 
         // ---- 输出 ----
         children.Add(Ui.Divider());

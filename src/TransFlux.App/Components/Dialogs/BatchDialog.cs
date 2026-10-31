@@ -50,7 +50,7 @@ public sealed class BatchDialog : Component<BatchDialogProps>
         var body = VStack(Space.Md,
             Ui.Dim(p.Mixed ? UiText.DirtySelectionHint : "修改会应用到所有选中的文件。").FontSize(12).TextWrapping(TextWrapping.Wrap),
             Component<ConversionForm, ConversionFormProps>(
-                new ConversionFormProps(p.Current, p.Mixed, filtered, Apply, SavePresetAsync)).WithKey("batch-form"));
+                new ConversionFormProps(p.Current, p.Mixed, filtered, Apply, SavePresetAsync, Advanced: true)).WithKey("batch-form"));
 
         return DialogChrome.Render(
             string.Format(UiText.BatchTitleFormat, p.TargetIds.Count),
