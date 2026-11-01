@@ -11,7 +11,8 @@ using TransFlux.Domain.Plans;
 
 namespace TransFlux.App.Components.Workbench;
 
-/// <summary>A responsive card whose identity survives enqueue, cancel, retry and completion.</summary>
+/// <summary>A responsive card whose identity survives enqueue, cancel, retry and completion.
+/// The visual hierarchy is file -> source facts -> target facts -> live state -> actions.</summary>
 public static class TaskRow
 {
     public static Element Render(WorkbenchItem item, bool selected, bool paused,
@@ -24,67 +25,145 @@ public static class TaskRow
             : d.Submitting ? "正在加入队列" : d.IsProbing ? "读取中" : d.Status == DraftStatus.Invalid ? "读取失败"
             : item.Issues.Any(i => i.Blocking) ? "需要修改设置" : "待开始";
         if (job?.State == JobState.Queued && paused) stateText = "等待继续";
-        var status = TextBlock(stateText).SemiBold().FontSize(12)
-            .Foreground(job is not null ? Ui.StateColor(job.State) : Theme.SecondaryText);
-        var lines = new List<Element>();
-        lines.Add(Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+        var (statusBackground, statusForeground) = StatusColors(job?.State, d.Status, d.IsProbing, item.Issues.Any(i => i.Blocking));
+
+        var header = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
             CheckBox(selected, v => { if (v != selected) toggle(); }, string.Empty)
-                .Width(32).MinWidth(32).AutomationName("选择 " + d.FileName).Grid(column: 0),
-            Button(TextBlock(d.FileName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1), select)
+                .Width(36).MinWidth(36).VAlign(VerticalAlignment.Top)
+                .AutomationName("选择 " + d.FileName).Grid(column: 0),
+            Button(BodyLarge(d.FileName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1), select)
                 .SubtleButton().HAlign(HorizontalAlignment.Stretch).ToolTip(d.Path)
                 .Set(b => b.HorizontalContentAlignment = HorizontalAlignment.Left)
                 .AutomationName("任务 " + d.FileName).Grid(column: 1),
-            status.VAlign(VerticalAlignment.Center).Margin(Space.Sm, 0, 0, 0).Grid(column: 2)));
-        var source = d.Snapshot is { } s
-            ? $"{Fmt.Resolution(s.PrimaryVideo)} · {Fmt.DurationMicros(s.DurationUs)} · {Fmt.Size(s.SizeBytes)}"
+            StatusPill(stateText, statusBackground, statusForeground).VAlign(VerticalAlignment.Top).Grid(column: 2));
+
+        var sourceTitle = d.Snapshot is { } snapshot ? Fmt.TrackSummary(snapshot) : "正在读取媒体信息…";
+        var sourceMeta = d.Snapshot is { } source
+            ? $"{Fmt.Resolution(source.PrimaryVideo)} · {Fmt.DurationMicros(source.DurationUs)} · {Fmt.Size(source.SizeBytes)}"
             : d.Path;
-        lines.Add(Ui.Dim(source).FontSize(12).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(d.Path));
-        var quality = d.Options.Mode == ConversionMode.VideoTranscode
-            ? " · " + (d.Options.Quality switch { QualityTier.SmallerSize => "较小体积", QualityTier.HigherQuality => "更高质量", _ => "均衡" })
-                + (d.Options.TargetWidth is not null || d.Options.TargetHeight is not null ? $" · {d.Options.TargetWidth}×{d.Options.TargetHeight}"
-                    : d.Options.ResizeMode == ResizeMode.Max1080p ? " · 最高 1080p" : " · 保持原始") : string.Empty;
-        lines.Add(TextBlock("→ " + Fmt.TargetSummary(d.Options) + quality).FontSize(12).TextWrapping(TextWrapping.Wrap));
+        var targetTitle = Fmt.TargetSummary(d.Options);
+        var targetMeta = TargetMeta(d.Options);
+
+        var facts = Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
+            VStack(Space.Xs,
+                Caption("源文件").Foreground(Theme.SecondaryText),
+                Body(sourceTitle).TextWrapping(TextWrapping.Wrap).ToolTip(d.Path),
+                Body(sourceMeta).Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)).Grid(column: 0),
+            VStack(Space.Xs,
+                Caption("输出格式").Foreground(Theme.SecondaryText),
+                Body(targetTitle).TextWrapping(TextWrapping.Wrap),
+                Body(targetMeta).Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap)).Grid(column: 1))
+            with { ColumnSpacing = Space.Lg };
+
+        var lines = new List<Element> { header, facts };
 
         if (job is { IsActive: true } && job.State != JobState.CancelRequested)
         {
-            if (job.State is JobState.Running or JobState.Verifying or JobState.Committing)
-                lines.Add(Ui.ProgressBar(job.Progress?.Fraction ?? 0));
+            var fraction = Math.Clamp(job.Progress?.Fraction ?? 0, 0, 1);
+            var percent = Math.Clamp((int)Math.Round(fraction * 100), 0, 99);
             var activity = job.State == JobState.Running
-                ? $"{Math.Clamp((int)Math.Round((job.Progress?.Fraction ?? 0) * 100), 0, 99)}% · {Fmt.Speed(job.Progress?.Speed)} · 剩余 {Fmt.Eta(job.Progress?.Eta)}"
+                ? $"{percent}% · {Fmt.Speed(job.Progress?.Speed)} · 剩余 {Fmt.Eta(job.Progress?.Eta)}"
                 : job.State == JobState.Verifying ? "正在检查输出，检查通过后才会发布文件。"
-                : job.State == JobState.Committing ? "正在安全保存，请稍候。" : "正在准备转换。";
-            lines.Add(Ui.Dim(activity).FontSize(12).TextWrapping(TextWrapping.Wrap));
+                : job.State == JobState.Committing ? "正在安全保存，请稍候。"
+                : "正在准备转换。";
+            lines.Add(VStack(Space.Xs,
+                Body(activity).Foreground(Theme.SecondaryText),
+                (job.State is JobState.Running or JobState.Verifying or JobState.Committing
+                    ? Progress(fraction * 100).Height(8)
+                    : Empty())));
         }
         if (job is { State: JobState.Succeeded, Output: not null })
         {
             var inputSize = d.Snapshot?.SizeBytes ?? job.Job.SourceFingerprint.SizeBytes;
             var elapsed = job.Attempt?.EndedUtc - job.Attempt?.StartedUtc;
-            lines.Add(TextBlock($"{Fmt.Size(inputSize)} → {Fmt.Size(job.Output.Size)} · 用时 {Fmt.Duration(elapsed)}")
-                .FontSize(12).Foreground(Theme.SystemSuccess));
-            lines.Add(Ui.Dim(job.Output.FinalPath).FontSize(12).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath));
+            lines.Add(VStack(Space.Xs,
+                Body($"{Fmt.Size(inputSize)} → {Fmt.Size(job.Output.Size)} · 用时 {Fmt.Duration(elapsed)}")
+                    .Foreground(Theme.SystemSuccess),
+                Caption(job.Output.FinalPath).Foreground(Theme.SecondaryText)
+                    .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath)));
         }
         if (job is { State: JobState.Failed or JobState.Interrupted or JobState.NeedsAttention }
             || d.Status == DraftStatus.Invalid)
-            lines.Add(TextBlock(WorkbenchRules.FailureText(job?.Failure ?? d.Failure)).FontSize(12)
+            lines.Add(Body(WorkbenchRules.FailureText(job?.Failure ?? d.Failure))
                 .Foreground(Theme.SystemCritical).TextWrapping(TextWrapping.Wrap));
         if (item.CanEdit && d.IsReady)
             foreach (var issue in item.Issues.Take(2))
-                lines.Add(TextBlock(WorkbenchRules.IssueText(issue)).FontSize(12).TextWrapping(TextWrapping.Wrap)
-                    .Foreground(issue.Blocking ? Theme.SystemCritical : Theme.SystemAttention));
+                lines.Add(Body(WorkbenchRules.IssueText(issue))
+                    .Foreground(issue.Blocking ? Theme.SystemCritical : Theme.SystemAttention)
+                    .TextWrapping(TextWrapping.Wrap));
 
         var actions = new List<Element>();
-        void ActionButton(string label, Action action) => actions.Add(Button(label, action).SubtleButton().AutomationName(label + " " + d.FileName));
-        if (job is { State: JobState.Succeeded, Output: not null }) { ActionButton("打开文件", open); ActionButton("打开文件夹", reveal); }
-        if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", retry);
-        if (job?.State == JobState.Queued) ActionButton("移出队列并编辑", editQueued);
+        void ActionButton(string label, Action action, bool primary = false)
+        {
+            var button = Button(label, action).AutomationName(label + " " + d.FileName);
+            actions.Add(primary ? button.AccentButton() : button.SubtleButton());
+        }
+        if (job is { State: JobState.Succeeded, Output: not null })
+        {
+            ActionButton("打开文件", open, primary: true);
+            ActionButton("打开文件夹", reveal);
+        }
+        if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", retry, primary: true);
+        if (job?.State == JobState.Queued) ActionButton("移出队列并编辑", editQueued, primary: true);
         if (job?.CanCancel == true) ActionButton("取消任务", cancel);
         if (job is not null && job.State != JobState.NeedsAttention)
             ActionButton(job.State == JobState.Succeeded ? "再次转换" : "修改后转换", copy);
         if (job is not null || d.Status == DraftStatus.Invalid) ActionButton("技术详情", details);
         if (item.CanRemove) ActionButton("移除", remove);
-        if (actions.Count > 0) lines.Add(FlexRow(actions.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = 4, RowGap = 4 });
-        return Border(VStack(Space.Sm, lines.ToArray())).Padding(Space.Lg).CornerRadius(8)
+        if (actions.Count > 0)
+        {
+            lines.Add(Ui.Divider());
+            lines.Add(FlexRow(actions.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
+        }
+
+        return Border(VStack(Space.Md, lines.ToArray()))
+            .Padding(Space.Lg)
+            .CornerRadius(8)
             .Background(selected ? Theme.SubtleFill : Theme.CardBackground)
-            .WithBorder(selected ? Theme.Accent : Theme.CardStroke, 1).WithKey(item.Id.ToString());
+            .WithBorder(selected ? Theme.Accent : Theme.CardStroke, selected ? 2 : 1)
+            .WithKey(item.Id.ToString());
+    }
+
+    private static Element StatusPill(string text, ThemeRef background, ThemeRef foreground)
+        => Border(BodyStrong(text).Foreground(foreground))
+            .Background(background)
+            .CornerRadius(12)
+            .Padding(10, 4);
+
+    private static string TargetMeta(ConversionOptions options)
+    {
+        if (options.Mode != ConversionMode.VideoTranscode)
+            return options.Mode == ConversionMode.Remux ? "仅复制原始轨道" : "仅音频输出";
+        var quality = options.Quality switch
+        {
+            QualityTier.SmallerSize => "较小体积",
+            QualityTier.HigherQuality => "更高质量",
+            _ => "均衡",
+        };
+        var size = options.TargetWidth is not null || options.TargetHeight is not null
+            ? $"{options.TargetWidth}×{options.TargetHeight}"
+            : options.ResizeMode == ResizeMode.Max1080p ? "最高 1080p" : "保持原始";
+        return $"{quality} · {size}";
+    }
+
+    private static (ThemeRef Background, ThemeRef Foreground) StatusColors(
+        JobState? state, DraftStatus draftStatus, bool probing, bool blocked)
+    {
+        if (state is { } s)
+        {
+            return s switch
+            {
+                JobState.Succeeded => (Theme.SystemSuccessBackground, Theme.SystemSuccess),
+                JobState.Failed => (Theme.SystemCriticalBackground, Theme.SystemCritical),
+                JobState.Interrupted or JobState.NeedsAttention => (Theme.SystemCautionBackground, Theme.SystemCaution),
+                JobState.Canceled => (Theme.SystemNeutralBackground, Theme.SystemNeutral),
+                JobState.CancelRequested => (Theme.SystemCautionBackground, Theme.SystemCaution),
+                _ => (Theme.SystemAttentionBackground, Theme.SystemAttention),
+            };
+        }
+        if (draftStatus == DraftStatus.Invalid) return (Theme.SystemCriticalBackground, Theme.SystemCritical);
+        if (blocked) return (Theme.SystemCautionBackground, Theme.SystemCaution);
+        if (probing) return (Theme.SystemNeutralBackground, Theme.SystemNeutral);
+        return (Theme.SystemAttentionBackground, Theme.SystemAttention);
     }
 }
