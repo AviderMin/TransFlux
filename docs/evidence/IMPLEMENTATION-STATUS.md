@@ -5,7 +5,7 @@ Output targets now separate media form, container and codec; see [output format 
 See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
 Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
 
-Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.6 built and verified, signed MSIX pending. This is a real build, not a design document.
+Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.7 built and verified, signed MSIX pending. This is a real build, not a design document.
 
 ## What works (executed)
 
@@ -67,7 +67,7 @@ dotnet run --project tools/TransFlux.E2E/TransFlux.E2E.csproj -c Debug         #
 3. Real NVENC trial + measured performance/quality report on the RTX 4060 Laptop GPU; keep GPU backends explicitly unverified until signed off.
 4. Fix any P0 gaps found in a human walkthrough; record docs/06 performance budgets against a controlled benchmark.
 
-Completed 2026-11-01: Inno Setup **1.0.0.6** built from commit `862c5ef`, install/launch/E2E/uninstall verified — see [INSTALLER.md](INSTALLER.md).
+Completed 2026-11-01: Inno Setup **1.0.0.7** built from the current review-remediation workspace; install/launch/installed-core E2E/uninstall verified — see [INSTALLER.md](INSTALLER.md).
 
 ## Review remediation · 2026-11-01
 

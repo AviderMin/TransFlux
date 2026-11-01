@@ -1,8 +1,17 @@
 # Inno Setup installer — build & verification evidence
 
-Date: 2026-11-01. 当前构建：**1.0.0.6**；下方保留历史构建记录。
+Date: 2026-11-01. 当前构建：**1.0.0.7**；下方保留历史构建记录。
 
-## 当前构建 · 1.0.0.6（2026-11-01）
+## 当前构建 · 1.0.0.7（2026-11-01）
+
+- File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.7-x64.exe`
+- Size: **122.57 MiB**；FileVersion **1.0.0.7**
+- SHA-256: `641C6ACCBF6C388439C55981D8DD9F6E57086B79E984A20F8A9A73A31238EC0C`
+- Source base: `db8a06c`（工作区含审查修复：恢复边界、手动 GPU 回退、Remux 选流、源二次校验、输出身份、磁盘预检、批量扫描、未知进度、队列重排和脱敏诊断）
+- 全量 **281 项测试通过**（Domain 83、Application 63、Infrastructure 32、Engine 103），Debug 构建 0 警告 / 0 错误。
+- 实测（开发机）：静默安装到 `D:\tmp\TransFluxVerify-107` **exit 0** → `TransFlux.exe` FileVersion **1.0.0.7**、ProductVersion `1.0.0.7+ff4d8c17cb2bde437fe1fed58e4d7739075fddf8` → 使用安装目录 `ffmpeg\ffmpeg.exe` 运行真实 E2E **PASS**（2.57 s，源文件不变，CPU 路径）→ 静默卸载 **exit 0**，安装目录与 exe 清理干净。
+
+## 历史构建 · 1.0.0.6（2026-11-01）
 
 - File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.6-x64.exe`
 - Size: **122.6 MiB**；FileVersion / ProductVersion **1.0.0.6**
