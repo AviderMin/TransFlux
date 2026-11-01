@@ -33,14 +33,14 @@ public sealed class AboutDialog : Component<AboutDialogProps>
             icon,
             VStack(Space.Xs,
                 Subtitle(UiText.AppTitle),
-                Ui.Dim("版本 " + version).FontSize(12)),
+                Ui.DimCaption("版本 " + version)),
             Ui.Card(Body("TransFlux 是一个本地视频与音频转换工具，基于 WinUI 3 与 Reactor 构建，所有转换都在本机完成。")
                 .TextWrapping(TextWrapping.Wrap)),
             Ui.Card(VStack(Space.Xs,
                 TextBlock("开源许可").SemiBold(),
-                Ui.Dim("MIT License").FontSize(12),
-                Ui.Dim("内置 FFmpeg（GPL 许可）。FFmpeg 作为独立组件分发，其许可不改变本应用的 MIT 授权。")
-                    .FontSize(12).TextWrapping(TextWrapping.Wrap))));
+                Ui.DimCaption("MIT License"),
+                Ui.DimCaption("内置 FFmpeg（GPL 许可）。FFmpeg 作为独立组件分发，其许可不改变本应用的 MIT 授权。")
+                    .TextWrapping(TextWrapping.Wrap))));
 
         return DialogChrome.Render(
             UiText.AboutTitle,

@@ -82,6 +82,11 @@ public sealed record AudioSpec
 {
     public AudioCodec Codec { get; init; } = AudioCodec.Aac;
     public int? BitRateKbps { get; init; } = 192;
+    /// <summary>
+    /// Preserve the source channel layout. Honored implicitly: the planner only emits
+    /// -ac when <see cref="Channels"/> is explicitly set; with Channels null the source
+    /// layout flows through untouched. Kept as an explicit user-facing commitment.
+    /// </summary>
     public bool KeepChannelLayout { get; init; } = true;
     public int? SampleRate { get; init; }
     public int? Channels { get; init; }

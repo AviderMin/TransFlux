@@ -229,7 +229,10 @@ public sealed class FfmpegRunner : IMediaRunner
             || hardware && (lower.Contains("nvenc api version") || lower.Contains("open encoder")
                 || lower.Contains("no capable devices") || lower.Contains("no nvenc capable") || lower.Contains("no device")
                 || lower.Contains("unsupported device") || lower.Contains("error initializing") || lower.Contains("device failed")
-                || lower.Contains("device creation failed") || lower.Contains("failed to get adapter")))
+                || lower.Contains("device creation failed") || lower.Contains("failed to get adapter")
+                // QSV / AMF session and device failures (retriable via CPU fallback).
+                || lower.Contains("mfx session") || lower.Contains("qsv") || lower.Contains("amf")
+                || lower.Contains("no device available") || lower.Contains("cannot init")))
             return FailureInfo.Of(FailureCode.EncoderInitFailed, "run.encoder_init_failed", TailText(stderr), retryable: true);
         if (bytes is null or 0)
             return FailureInfo.Of(FailureCode.ProcessFailed, "run.no_output",
@@ -266,6 +269,13 @@ public sealed class FfmpegRunner : IMediaRunner
                 return;
             }
         }
+
+        try
+        {
+            if (File.Exists(path))
+                Trace.TraceWarning("TransFlux: failed to delete attempt residue '{0}' after retries.", path);
+        }
+        catch { /* tracing must never mask the original result */ }
     }
 
     private static async Task SafeAsync(Task task)

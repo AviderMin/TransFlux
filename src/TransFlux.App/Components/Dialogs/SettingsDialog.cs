@@ -36,8 +36,10 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         var (draft, setDraft) = UseState(p.Settings);
         var (open, setOpen) = UseState(true);
         var (saving, setSaving) = UseState(false);
-        var (notice, setNotice) = UseState<string?>(null);
+        var (notice, setNotice) = UseState<Notice?>(null);
+        var (confirmDiscard, setConfirmDiscard) = UseState(false);
         var (identity, setIdentity) = UseState<CoreIdentity?>(null);
+        var (engineCapabilities, setEngineCapabilities) = UseState<FfmpegCapabilityInfo?>(null);
         var (capabilities, setCapabilities) = UseState<CapabilitySnapshot?>(null);
         var (diagError, setDiagError) = UseState<string?>(null);
         var (probing, setProbing) = UseState(true);
@@ -54,6 +56,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
                 try
                 {
                     setIdentity(p.Services.Core.GetIdentity());
+                    setEngineCapabilities(await p.Services.Core.QueryAsync(cts.Token));
                     setCapabilities(await p.Services.Capabilities.GetAsync(new CapabilityQuery(), cts.Token));
                 }
                 catch (OperationCanceledException) { }
@@ -83,7 +86,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
                 var folder = await FilePickerInterop.PickFolderAsync(window);
                 if (folder is not null) Update(s => s with { DefaultOutputDirectory = folder });
             }
-            catch (Exception ex) { setNotice(ex.Message); }
+            catch (Exception ex) { setNotice(Notices.OperationFailed(ex.Message)); }
         }
 
         async Task<bool> CommitAsync(AppSettings final)
@@ -91,7 +94,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             if (saving) return false;
             setSaving(true);
             try { await p.Save(final); return true; }
-            catch (Exception ex) { setNotice("保存失败：" + ex.Message); return false; }
+            catch (Exception ex) { setNotice(Notices.SaveFailed(ex.Message)); return false; }
             finally { setSaving(false); }
         }
 
@@ -117,17 +120,18 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
 
         var resources = Section("转换资源",
             NumberBox(draft.MaxConcurrentTranscodes, v => Update(s => s with { MaxConcurrentTranscodes = Math.Clamp((int)Math.Round(v), 1, 4) }),
-                header: UiText.Concurrency + "（1–4）").MinWidth(200),
-            TextBlock("降低并发不会终止正在运行的任务，只影响新任务的开始。").Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap),
+                header: UiText.Concurrency + "（1–4）").MinWidth(200)
+                .Range(1, 4).SpinButtons().Set(n => n.SmallChange = 1),
+            Ui.DimCaption("降低并发不会终止正在运行的任务，只影响新任务的开始。").TextWrapping(TextWrapping.Wrap),
             ToggleSwitch(draft.AllowAutomaticFallback, v => Update(s => s with { AllowAutomaticFallback = v }),
                 onContent: "开启", offContent: "关闭", header: UiText.AutoFallback),
-            TextBlock(UiText.HardwareCaveat).Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap),
+            Ui.DimCaption(UiText.HardwareCaveat).TextWrapping(TextWrapping.Wrap),
             ToggleSwitch(draft.FullVerification, v => Update(s => s with { FullVerification = v }),
                 onContent: "全片校验", offContent: "抽样校验", header: "输出验证"));
 
         var privacy = Section("本地处理",
-            TextBlock("默认无遥测、无在线检查、无媒体上传。移除任务和清空历史均不删除源文件或输出文件。")
-                .Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap));
+            Ui.DimCaption("默认无遥测、无在线检查、无媒体上传。移除任务和清空历史均不删除源文件或输出文件。")
+                .TextWrapping(TextWrapping.Wrap));
 
         var diagChildren = new List<Element>
         {
@@ -154,23 +158,26 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             foreach (var adapter in capabilities.Adapters)
                 diagChildren.Add(VStack(Space.Xs,
                     TextBlock(adapter.Name).SemiBold().TextWrapping(TextWrapping.Wrap),
-                    Ui.Dim($"{adapter.Vendor} · 驱动 {adapter.DriverVersion ?? "未知"} · 显存 {Fmt.Size(adapter.DedicatedMemoryBytes)}").FontSize(12).TextWrapping(TextWrapping.Wrap),
-                    Ui.Dim($"设备 {adapter.DxgiIndex} · {adapter.AdapterId}" + (adapter.IsSoftware ? " · 软件适配器，不用于硬件编码" : ""))
-                        .FontSize(12).TextWrapping(TextWrapping.Wrap)));
+                    Ui.DimCaption($"{adapter.Vendor} · 驱动 {adapter.DriverVersion ?? "未知"} · 显存 {Fmt.Size(adapter.DedicatedMemoryBytes)}").TextWrapping(TextWrapping.Wrap),
+                    Ui.DimCaption($"设备 {adapter.DxgiIndex} · {adapter.AdapterId}" + (adapter.IsSoftware ? " · 软件适配器，不用于硬件编码" : ""))
+                        .TextWrapping(TextWrapping.Wrap)));
             diagChildren.Add(Ui.Divider());
             foreach (var candidate in capabilities.Candidates)
             {
                 var device = capabilities.Adapters.FirstOrDefault(a => a.AdapterId == candidate.DeviceId);
                 diagChildren.Add(VStack(Space.Xs,
                     TextBlock(candidate.EncoderName + (device is null ? "" : " · " + device.Name)).SemiBold().TextWrapping(TextWrapping.Wrap),
-                    TextBlock(candidate.Available ? (candidate.TrialCompleted ? "试编码通过，可用" : "编码器可用")
-                        : candidate.UnavailableReason ?? "不可用").FontSize(12).TextWrapping(TextWrapping.Wrap),
+                    Caption(candidate.Available ? (candidate.TrialCompleted ? "试编码通过，可用" : "编码器可用")
+                        : candidate.UnavailableReason ?? "不可用").TextWrapping(TextWrapping.Wrap),
                     showDiagnostics && candidate.DiagnosticDetail is { Length: > 0 } detail
-                        ? TextBlock(detail).FontSize(11).TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true) : null));
+                        ? Caption(detail).TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true) : null));
             }
             diagChildren.Add(Button(showDiagnostics ? "隐藏技术详情" : "显示技术详情", () => setShowDiagnostics(!showDiagnostics))
                 .AutomationName(showDiagnostics ? "隐藏技术详情" : "显示技术详情").SubtleButton());
         }
+        diagChildren.Add(Ui.Divider());
+        diagChildren.Add(TextBlock("编解码器支持").SemiBold());
+        diagChildren.Add(Component<CodecCatalogSection, CodecCatalogSectionProps>(new(engineCapabilities, capabilities)));
         diagChildren.Add(Ui.Divider());
         diagChildren.Add(Ui.KeyValue("并发转码", p.Services.Options.MaxConcurrentTranscodes.ToString()));
         diagChildren.Add(Ui.KeyValue("自动回退", p.Services.Options.AllowAutomaticFallback ? "开启" : "关闭"));
@@ -181,8 +188,9 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         var diagnostics = Section(UiText.Diagnostics, diagChildren.ToArray());
 
         var body = VStack(Space.Lg,
-            Ui.Dim("保存后，并发限制影响后续任务；回退与验证策略影响此后开始的任务。默认输出规则用于新增文件。").FontSize(12).TextWrapping(TextWrapping.Wrap),
-            notice is { } msg ? InfoBar("设置未保存", msg).Error().IsClosable(true).Closed(() => setNotice(null)) : null,
+            Ui.DimCaption("保存后，并发限制影响后续任务；回退与验证策略影响此后开始的任务。默认输出规则用于新增文件。").TextWrapping(TextWrapping.Wrap),
+            notice is { } shown ? Ui.NoticeBar(shown, () => setNotice(null)) : null,
+            confirmDiscard ? Ui.NoticeBar(Notice.Warning(UiText.PromptTitle, UiText.SettingsDirtyNotice)) : null,
             appearance,
             output,
             resources,
@@ -193,7 +201,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             UiText.SettingsTitle,
             body,
             saving ? "正在保存…" : UiText.SaveSettingsAction,
-            "取消",
+            confirmDiscard ? UiText.DiscardChanges : UiText.Cancel,
             result =>
             {
                 setOpen(false);
@@ -203,6 +211,13 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             maxHeight: 580,
             isOpen: open,
             beforePrimaryClose: () => CommitAsync(draft),
-            primaryEnabled: !saving);
+            primaryEnabled: !saving,
+            beforeSecondaryClose: () =>
+            {
+                // First cancel on unsaved edits keeps the dialog open and explains the choice.
+                if (draft.Equals(p.Settings) || confirmDiscard) return Task.FromResult(true);
+                setConfirmDiscard(true);
+                return Task.FromResult(false);
+            });
     }
 }

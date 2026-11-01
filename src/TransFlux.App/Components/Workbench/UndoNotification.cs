@@ -1,5 +1,6 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Xaml;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Shared;
 using TransFlux.App.Theming;
@@ -23,8 +24,11 @@ public sealed class UndoNotification : Component<UndoNotificationProps>
             .IsClosable(true)
             .Closed(p.Dismiss)
             .Content(HStack(Space.Sm,
-                Ui.Dim("需要恢复列表吗？").FontSize(12),
-                Button("撤销移除", p.Undo).SubtleButton().AutomationName("撤销移除")))
+                Ui.Dim("需要恢复列表吗？").FontSize(12).VAlign(VerticalAlignment.Center),
+                Button("撤销移除", p.Undo).SubtleButton().AutomationName("撤销移除")
+                    .MinWidth(0).MinHeight(24).Padding(8, 0).VAlign(VerticalAlignment.Center)
+                    .Set(b => b.HorizontalContentAlignment = HorizontalAlignment.Left))
+                .VAlign(VerticalAlignment.Center))
             .AutomationName("撤销移除提醒");
     }
 }

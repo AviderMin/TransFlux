@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using TransFlux.Domain.Common;
 using TransFlux.Domain.Media;
@@ -23,6 +24,22 @@ public static class FfprobeJsonParser
             {
                 var descriptor = ParseStream(s);
                 if (descriptor is not null) streams.Add(descriptor);
+            }
+        }
+
+        // FFmpeg 8 attaches HDR static metadata (mastering display / content light) to the
+        // decoded frame rather than the stream; merge the first-frame side data when present
+        // (FfmpegProbe requests -show_frames with a one-packet read interval).
+        if (root.TryGetProperty("frames", out var framesEl) && framesEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var fr in framesEl.EnumerateArray())
+            {
+                if (fr.ValueKind != JsonValueKind.Object) continue;
+                var index = Int(fr, "stream_index");
+                if (index is null) continue;
+                var at = streams.FindIndex(st => st.SourceIndex == index.Value);
+                if (at < 0) continue;
+                streams[at] = MergeSideInfo(streams[at], ParseSideData(fr));
             }
         }
 
@@ -90,8 +107,8 @@ public static class FfprobeJsonParser
 
         if (kind == MediaKind.Video)
         {
-            var (rotation, sideSummary, hasHdr) = ParseSideData(s);
-            if (rotation is null) rotation = ParseTagRotation(s);
+            var info = ParseSideData(s);
+            var rotation = info.Rotation ?? ParseTagRotation(s);
             var pixFmt = Str(s, "pix_fmt");
             var bitDepth = Int(s, "bits_per_raw_sample") ?? Int(s, "bits_per_sample") ?? ColorClassifier.InferBitDepth((pixFmt ?? string.Empty).ToLowerInvariant());
 
@@ -110,10 +127,17 @@ public static class FfprobeJsonParser
                 ColorSpace = Str(s, "color_space"),
                 ColorTransfer = Str(s, "color_transfer"),
                 ColorPrimaries = Str(s, "color_primaries"),
-                HasHdrSideData = hasHdr,
-                SideDataSummary = sideSummary,
+                HasHdrSideData = info.HasHdr,
+                SideDataSummary = info.Summary,
+                DvProfile = info.DvProfile,
+                DvBlSignalCompatibilityId = info.DvBlCompat,
+                MasterDisplay = info.MasterDisplay,
+                MaxCLL = info.MaxCLL,
+                MaxFALL = info.MaxFALL,
                 BitRate = Long(s, "bit_rate"),
                 DurationUs = SecondsToUs(Str(s, "duration")),
+                StartUs = SecondsToUs(Str(s, "start_time")),
+                TimeBase = ParseRational(Str(s, "time_base")),
             };
         }
         else if (kind == MediaKind.Audio)
@@ -125,6 +149,8 @@ public static class FfprobeJsonParser
                 SampleRate = Int(s, "sample_rate"),
                 BitRate = Long(s, "bit_rate"),
                 DurationUs = SecondsToUs(Str(s, "duration")),
+                StartUs = SecondsToUs(Str(s, "start_time")),
+                TimeBase = ParseRational(Str(s, "time_base")),
             };
         }
         else
@@ -133,19 +159,36 @@ public static class FfprobeJsonParser
             {
                 BitRate = Long(s, "bit_rate"),
                 DurationUs = SecondsToUs(Str(s, "duration")),
+                StartUs = SecondsToUs(Str(s, "start_time")),
+                TimeBase = ParseRational(Str(s, "time_base")),
+                AttachmentFileName = kind == MediaKind.Attachment ? Tag(s, "filename") : null,
+                AttachmentMimeType = kind == MediaKind.Attachment ? Tag(s, "mimetype") : null,
             };
         }
 
         return descriptor;
     }
 
-    private static (int? Rotation, string? SideSummary, bool HasHdr) ParseSideData(JsonElement s)
+    /// <summary>Structured view over one side_data_list (stream or frame level).</summary>
+    private sealed record SideInfo(
+        int? Rotation,
+        string? Summary,
+        bool HasHdr,
+        int? DvProfile,
+        int? DvBlCompat,
+        string? MasterDisplay,
+        int? MaxCLL,
+        int? MaxFALL);
+
+    private static SideInfo ParseSideData(JsonElement s)
     {
         int? rotation = null;
         var summary = new List<string>();
         var hasHdr = false;
+        int? dvProfile = null, dvBlCompat = null, maxCLL = null, maxFALL = null;
+        string? masterDisplay = null;
         if (!s.TryGetProperty("side_data_list", out var list) || list.ValueKind != JsonValueKind.Array)
-            return (rotation, null, hasHdr);
+            return new SideInfo(rotation, null, hasHdr, dvProfile, dvBlCompat, masterDisplay, maxCLL, maxFALL);
 
         foreach (var item in list.EnumerateArray())
         {
@@ -161,6 +204,19 @@ public static class FfprobeJsonParser
                 hasHdr = true;
             }
 
+            if (lower.Contains("dovi") || lower.Contains("dolby vision") || lower.Contains("dv configuration"))
+            {
+                dvProfile ??= Int(item, "dv_profile");
+                dvBlCompat ??= Int(item, "dv_bl_signal_compatibility_id") ?? Int(item, "bl_signal_compatibility_id");
+            }
+            if (lower.Contains("mastering display"))
+                masterDisplay ??= BuildMasterDisplay(item);
+            if (lower.Contains("content light"))
+            {
+                maxCLL ??= Int(item, "max_content");
+                maxFALL ??= Int(item, "max_average");
+            }
+
             if (lower.Contains("display matrix") && item.TryGetProperty("rotation", out var rotEl))
             {
                 if (rotEl.ValueKind == JsonValueKind.Number && rotEl.TryGetDouble(out var r))
@@ -170,7 +226,70 @@ public static class FfprobeJsonParser
             }
         }
 
-        return (rotation, summary.Count == 0 ? null : string.Join("; ", summary), hasHdr);
+        return new SideInfo(rotation, summary.Count == 0 ? null : string.Join("; ", summary), hasHdr,
+            dvProfile, dvBlCompat, masterDisplay, maxCLL, maxFALL);
+    }
+
+    /// <summary>
+    /// Builds the x265 -master-display syntax G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min):
+    /// chromaticities scaled to 50000, luminances in 0.0001 cd/m2 units.
+    /// </summary>
+    private static string? BuildMasterDisplay(JsonElement item)
+    {
+        var gx = ScaleFraction(Str(item, "green_x"), 50_000d);
+        var gy = ScaleFraction(Str(item, "green_y"), 50_000d);
+        var bx = ScaleFraction(Str(item, "blue_x"), 50_000d);
+        var by = ScaleFraction(Str(item, "blue_y"), 50_000d);
+        var rx = ScaleFraction(Str(item, "red_x"), 50_000d);
+        var ry = ScaleFraction(Str(item, "red_y"), 50_000d);
+        var wx = ScaleFraction(Str(item, "white_point_x"), 50_000d);
+        var wy = ScaleFraction(Str(item, "white_point_y"), 50_000d);
+        var maxL = ScaleFraction(Str(item, "max_luminance"), 10_000d);
+        var minL = ScaleFraction(Str(item, "min_luminance"), 10_000d);
+        if (gx is null || gy is null || bx is null || by is null || rx is null || ry is null
+            || wx is null || wy is null || maxL is null || minL is null) return null;
+        return FormattableString.Invariant(
+            $"G({gx},{gy})B({bx},{by})R({rx},{ry})WP({wx},{wy})L({maxL},{minL})");
+    }
+
+    /// <summary>Parses "num/den" or plain decimal into round(value * scale).</summary>
+    private static long? ScaleFraction(string? text, double scale)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var parts = text.Split('/');
+        double value;
+        if (parts.Length == 2
+            && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var num)
+            && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var den)
+            && den != 0)
+            value = num / den;
+        else if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var single))
+            value = single;
+        else
+            return null;
+        return (long)Math.Round(value * scale);
+    }
+
+    private static StreamDescriptor MergeSideInfo(StreamDescriptor s, SideInfo info)
+    {
+        var summary = s.SideDataSummary;
+        if (info.Summary is not null)
+        {
+            var parts = (summary ?? string.Empty).Split("; ", StringSplitOptions.RemoveEmptyEntries)
+                .Concat(info.Summary.Split("; ", StringSplitOptions.RemoveEmptyEntries))
+                .Distinct(StringComparer.Ordinal);
+            summary = string.Join("; ", parts);
+        }
+        return s with
+        {
+            DvProfile = s.DvProfile ?? info.DvProfile,
+            DvBlSignalCompatibilityId = s.DvBlSignalCompatibilityId ?? info.DvBlCompat,
+            MasterDisplay = s.MasterDisplay ?? info.MasterDisplay,
+            MaxCLL = s.MaxCLL ?? info.MaxCLL,
+            MaxFALL = s.MaxFALL ?? info.MaxFALL,
+            HasHdrSideData = s.HasHdrSideData || info.HasHdr,
+            SideDataSummary = summary,
+        };
     }
 
     private static int? ParseTagRotation(JsonElement s)

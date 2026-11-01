@@ -12,7 +12,7 @@ Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**:
 | Area | Status | Evidence |
 |---|---|---|
 | Solution builds (Domain, Application, Engine.FFmpeg, Hardware.Windows, Infrastructure, App, 4 test projects) | ✅ 0 warnings / 0 errors | `dotnet build TransFlux.slnx -c Debug` |
-| Unit + integration tests | ✅ **281 passed / 0 failed** | Domain 83, Application 63, Infrastructure 32, Engine 103 (build 0 warnings / 0 errors) |
+| Unit + integration tests | ✅ **282 passed / 0 failed** | Domain 83, Application 64, Infrastructure 32, Engine 103 (build 0 warnings / 0 errors) |
 | Real Reactor native window renders | ✅ | `docs/evidence/M4-ui-runtime.md`, `ui-tree.txt`, `screenshots/convert.png` |
 | Real end-to-end conversion (probe→plan→encode→verify→commit) | ✅ PASS, source unchanged | `docs/evidence/M1-E2E-runtime.md` |
 | Pinned GPL FFmpeg core (libx264/NVENC/QSV/AMF/AAC/FLAC) | ✅ hash-pinned | `tools/ffmpeg/core-manifest.json` |
@@ -71,6 +71,6 @@ Completed 2026-11-01: Inno Setup **1.0.0.7** built from the current review-remed
 
 ## Review remediation · 2026-11-01
 
-The follow-up review fixes are implemented: NeedsAttention manual-review boundary, queue reordering, manual-GPU fallback policy, remux stream selection, post-verification source recheck, dispatch-loop recovery, attempt/job recovery consistency, content-identity commit reconciliation, disk precheck and reservation cleanup, unknown-duration progress, settings-load gating, restored-card state, cancelable batched folder import, virtualized task list, multi-track selection, parameter reset, copy-path and redacted diagnostic export.
+The follow-up review fixes are implemented: NeedsAttention manual-review boundary, queue reordering, manual-GPU fallback policy, remux stream selection, post-verification source recheck, dispatch-loop recovery, attempt/job recovery consistency, content-identity commit reconciliation, disk precheck and reservation cleanup, unknown-duration progress, settings-load gating, restored-card state, cancelable batched folder import, virtualized task list, multi-track selection, parameter reset, copy-path, redacted diagnostic export, and a grouped codec catalog with hardware-encoder badges.
 
-Verification: Debug build **0 warnings / 0 errors**, **281 tests passed**, and real E2E **PASS** with unchanged source. Accessibility (Narrator/DPI/high-contrast), signed MSIX, and Intel/AMD hardware validation remain release acceptance items, not claims made by this record.
+Verification: Debug build **0 warnings / 0 errors**, **282 tests passed**, and real E2E **PASS** with unchanged source. Accessibility (Narrator/DPI/high-contrast), signed MSIX, and Intel/AMD hardware validation remain release acceptance items, not claims made by this record.

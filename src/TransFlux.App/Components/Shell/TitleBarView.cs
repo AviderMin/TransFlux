@@ -28,7 +28,7 @@ public static class TitleBarView
             .Margin(0, 0, Space.Sm, 0);
 
         var bar = TitleBar(UiText.AppTitle)
-            .Subtitle("格式转换工作台")
+            .Subtitle(UiText.AppSubtitle)
             .ToolTip(UiText.AppTitle)
             .RightHeader(right);
 
@@ -40,7 +40,7 @@ public static class TitleBarView
     private static Element TitleIconButton(string glyph, string automationName, string toolTip, Action onClick)
         => Button(Icon(FontIcon(glyph, fontSize: 14)), onClick)
             .SubtleButton()
-            .Width(32).Height(32).MinWidth(32).MinHeight(32)
+            .Width(40).Height(40).MinWidth(40).MinHeight(40)
             .Padding(0)
             .Set(button =>
             {

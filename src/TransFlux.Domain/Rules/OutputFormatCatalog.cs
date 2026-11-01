@@ -33,6 +33,36 @@ public static class OutputFormatCatalog
         ContainerFormat.Aac => [AudioCodec.Aac],
         _ => [],
     };
+    /// <summary>
+    /// Probe codec names accepted for stream-copy remux into the container. Wider than the
+    /// transcode matrix on purpose: remux copies whatever the container natively holds.
+    /// </summary>
+    public static IReadOnlyList<string> RemuxVideoCodecs(ContainerFormat container) => container switch
+    {
+        ContainerFormat.Mp4 => ["h264", "hevc", "av1", "mpeg4"],
+        ContainerFormat.Mov => ["h264", "hevc", "mpeg4", "prores"],
+        ContainerFormat.Mkv => ["h264", "hevc", "av1", "vp8", "vp9", "mpeg1video", "mpeg2video",
+            "mpeg4", "vc1", "prores", "theora", "h263", "msmpeg4v3", "ffv1"],
+        ContainerFormat.Webm => ["vp8", "vp9", "av1"],
+        _ => [],
+    };
+    /// <summary>Probe codec names accepted for stream-copy remux into the container.</summary>
+    public static IReadOnlyList<string> RemuxAudioCodecs(ContainerFormat container) => container switch
+    {
+        ContainerFormat.Mp4 => ["aac", "mp3", "alac", "ac3", "eac3"],
+        ContainerFormat.Mov => ["aac", "alac", "pcm_s16le", "pcm_s24le", "ac3", "eac3"],
+        ContainerFormat.Mkv => ["aac", "mp3", "opus", "vorbis", "flac", "pcm_s16le", "pcm_s24le",
+            "pcm_s32le", "ac3", "eac3", "truehd", "mlp", "dts", "mp2"],
+        ContainerFormat.Webm => ["opus", "vorbis"],
+        _ => [],
+    };
+    /// <summary>Bitmap subtitle codecs (probe names) allowed for stream-copy remux into the container.</summary>
+    public static IReadOnlyList<string> RemuxBitmapSubtitles(ContainerFormat container) => container switch
+    {
+        ContainerFormat.Mkv => ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub", "dvb_teletext"],
+        _ => [],
+    };
+
     public static string Name(this VideoCodec codec) => codec switch
     {
         VideoCodec.H264 => "H.264 / AVC", VideoCodec.Hevc => "H.265 / HEVC", VideoCodec.Av1 => "AV1",

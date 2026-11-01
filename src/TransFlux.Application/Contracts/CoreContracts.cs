@@ -20,6 +20,19 @@ public sealed record FfmpegCapabilityInfo
     public IReadOnlyList<string> Hwaccels { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> Filters { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> PixelFormats { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<FfmpegCodecInfo> Codecs { get; init; } = Array.Empty<FfmpegCodecInfo>();
+}
+
+/// <summary>One codec advertised by ffmpeg -codecs, with capability flags and hardware encoders.</summary>
+public sealed record FfmpegCodecInfo
+{
+    public required string Name { get; init; }
+    public string LongName { get; init; } = string.Empty;
+    public MediaKind Kind { get; init; } = MediaKind.Unknown;
+    public bool CanDecode { get; init; }
+    public bool CanEncode { get; init; }
+    /// <summary>Hardware encoder implementations compiled into this core (e.g. h264_nvenc).</summary>
+    public IReadOnlyList<string> HardwareEncoders { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>Engine-owned information about the pinned core, consumed by capability probing.</summary>

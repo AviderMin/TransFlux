@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Shared;
+using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
 using TransFlux.Domain.Jobs;
@@ -12,13 +13,16 @@ using TransFlux.Domain.Plans;
 
 namespace TransFlux.App.Components.Workbench;
 
+/// <summary>Callbacks for one task card; bundled so Render keeps its signature readable.</summary>
+public sealed record TaskRowActions(Action Select, Action ToggleSelect, Action Remove, Action Cancel, Action Copy,
+    Action MoveUp, Action MoveDown, Action Retry, Action EditQueued, Action Open, Action Reveal, Action CopyPath,
+    Action Details);
+
 /// <summary>A responsive card whose identity survives enqueue, cancel, retry and completion.
 /// The visual hierarchy is file -> source facts -> target facts -> live state -> actions.</summary>
 public static class TaskRow
 {
-    public static Element Render(WorkbenchItem item, bool selected, bool paused,
-        Action select, Action toggle, Action remove, Action cancel, Action copy,
-        Action moveUp, Action moveDown, Action retry, Action editQueued, Action open, Action reveal, Action copyPath, Action details)
+    public static Element Render(WorkbenchItem item, bool selected, bool paused, TaskRowActions actions)
     {
         var d = item.Draft;
         var job = item.Execution;
@@ -26,32 +30,38 @@ public static class TaskRow
             : d.Submitting ? "正在加入队列" : d.IsProbing ? "读取中" : d.Status == DraftStatus.Invalid ? "读取失败"
             : item.Issues.Any(i => i.Blocking) ? "需要修改设置" : "待开始";
         if (job?.State == JobState.Queued && paused) stateText = "等待继续";
-        var (statusBackground, statusForeground) = StatusColors(job?.State, d.Status, d.IsProbing, item.Issues.Any(i => i.Blocking));
+        var (statusBackground, statusForeground) = Ui.ToneColors(StatusTones.For(job?.State, d.Status,
+            d.IsProbing, item.Issues.Any(i => i.Blocking)));
 
         var header = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
-            CheckBox(selected, v => { if (v != selected) toggle(); }, string.Empty)
-                .Width(36).MinWidth(36).VAlign(VerticalAlignment.Top)
+            CheckBox(selected, v => { if (v != selected) actions.ToggleSelect(); }, string.Empty)
+                .Width(40).MinWidth(40).MinHeight(40).VAlign(VerticalAlignment.Top)
                 .AutomationName("选择 " + d.FileName).Grid(column: 0),
-            Button(BodyLarge(d.FileName).SemiBold().TextWrapping(TextWrapping.Wrap).MaxLines(2), select)
+            Button(BodyLarge(d.FileName).SemiBold().TextWrapping(TextWrapping.Wrap)
+                .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(2), actions.Select)
                 .SubtleButton().HAlign(HorizontalAlignment.Stretch).ToolTip(d.Path)
                 .Set(b => b.HorizontalContentAlignment = HorizontalAlignment.Left)
                 .AutomationName("任务 " + d.FileName).Grid(column: 1),
             StatusPill(stateText, statusBackground, statusForeground).VAlign(VerticalAlignment.Top).Grid(column: 2));
 
-        var sourceTitle = d.Snapshot is { } snapshot ? Fmt.TrackSummary(snapshot, d.Options)
-            : d.JobId is not null ? "已保留执行参数；源媒体信息尚未重新读取"
-            : d.IsProbing ? "正在读取媒体信息…" : "源媒体信息不可用";
+        var sourceLines = new List<Element>();
+        if (d.Snapshot is { } snapshot)
+            sourceLines.AddRange(Fmt.SourceStreamLines(snapshot, d.Options)
+                .Select(line => Body(line).TextWrapping(TextWrapping.Wrap).ToolTip(d.Path)));
+        else
+            sourceLines.Add(Body(d.JobId is not null ? "已保留执行参数；源媒体信息尚未重新读取"
+                : d.IsProbing ? "正在读取媒体信息…" : "源媒体信息不可用")
+                .TextWrapping(TextWrapping.Wrap).ToolTip(d.Path));
         var sourceMeta = d.Snapshot is { } source
-            ? $"{Fmt.Resolution(source.PrimaryVideo)} · {Fmt.DurationMicros(source.DurationUs)} · {Fmt.Size(source.SizeBytes)}"
+            ? $"{Fmt.DurationMicros(source.DurationUs)} · {Fmt.Size(source.SizeBytes)}"
             : d.Path;
+        sourceLines.Add(Body(sourceMeta).Foreground(Theme.SecondaryText)
+            .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(d.Path));
         var targetTitle = Fmt.TargetSummary(d.Options);
         var targetMeta = TargetMeta(d.Options);
 
         var facts = Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
-            VStack(Space.Xs,
-                Caption("源文件").Foreground(Theme.SecondaryText),
-                Body(sourceTitle).TextWrapping(TextWrapping.Wrap).ToolTip(d.Path),
-                Body(sourceMeta).Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)).Grid(column: 0),
+            VStack(Space.Xs, new[] { Caption("源文件").Foreground(Theme.SecondaryText) }.Concat(sourceLines).ToArray()).Grid(column: 0),
             VStack(Space.Xs,
                 Caption("输出格式").Foreground(Theme.SecondaryText),
                 Body(targetTitle).TextWrapping(TextWrapping.Wrap),
@@ -98,44 +108,50 @@ public static class TaskRow
             lines.Add(Body(WorkbenchRules.FailureText(job?.Failure ?? d.Failure))
                 .Foreground(Theme.SystemCritical).TextWrapping(TextWrapping.Wrap));
         if (item.CanEdit && d.IsReady)
+        {
             foreach (var issue in item.Issues.Take(2))
                 lines.Add(Body(WorkbenchRules.IssueText(issue))
                     .Foreground(issue.Blocking ? Theme.SystemCritical : Theme.SystemAttention)
                     .TextWrapping(TextWrapping.Wrap));
+            var hidden = item.Issues.Count - 2;
+            if (hidden > 0)
+                lines.Add(Body(string.Format(UiText.MoreIssuesFormat, hidden))
+                    .Foreground(Theme.SystemAttention).TextWrapping(TextWrapping.Wrap));
+        }
 
-        var actions = new List<Element>();
+        var buttons = new List<Element>();
         void ActionButton(string label, Action action, bool primary = false)
         {
             var button = Button(label, action).AutomationName(label + " " + d.FileName);
-            actions.Add(primary ? button.AccentButton() : button.SubtleButton());
+            buttons.Add(primary ? button.AccentButton() : button.SubtleButton());
         }
         if (job is { State: JobState.Succeeded, Output: not null })
         {
-            ActionButton("打开文件", open, primary: true);
-            ActionButton("打开文件夹", reveal);
-            ActionButton("复制路径", copyPath);
+            ActionButton("打开文件", actions.Open, primary: true);
+            ActionButton("打开文件夹", actions.Reveal);
+            ActionButton("复制路径", actions.CopyPath);
         }
-        if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", retry, primary: true);
+        if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", actions.Retry, primary: true);
         if (job?.State == JobState.Queued)
         {
-            ActionButton("上移", moveUp);
-            ActionButton("下移", moveDown);
-            ActionButton("移出队列并编辑", editQueued, primary: true);
+            buttons.Add(Ui.IconButton("\uE70E", "上移 " + d.FileName, UiText.MoveUpTip, actions.MoveUp));
+            buttons.Add(Ui.IconButton("\uE70D", "下移 " + d.FileName, UiText.MoveDownTip, actions.MoveDown));
+            ActionButton("移出队列并编辑", actions.EditQueued, primary: true);
         }
-        if (job?.CanCancel == true) ActionButton("取消任务", cancel);
+        if (job?.CanCancel == true) ActionButton("取消任务", actions.Cancel);
         if (job is not null)
             ActionButton(job.State switch
             {
                 JobState.Succeeded => "再次转换",
                 JobState.NeedsAttention => "核对后再次转换",
                 _ => "修改后转换",
-            }, copy);
-        if (job is not null || d.Status == DraftStatus.Invalid) ActionButton("技术详情", details);
-        if (item.CanRemove) ActionButton("移除", remove);
-        if (actions.Count > 0)
+            }, actions.Copy);
+        if (job is not null || d.Status == DraftStatus.Invalid || item.Issues.Count > 2) ActionButton("技术详情", actions.Details);
+        if (item.CanRemove) ActionButton("移除", actions.Remove);
+        if (buttons.Count > 0)
         {
             lines.Add(Ui.Divider());
-            lines.Add(FlexRow(actions.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
+            lines.Add(FlexRow(buttons.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
         }
 
         return Border(VStack(Space.Sm, lines.ToArray()))
@@ -166,26 +182,5 @@ public static class TaskRow
             ? $"{options.TargetWidth}×{options.TargetHeight}"
             : options.ResizeMode == ResizeMode.Max1080p ? "最高 1080p" : "保持原始";
         return $"{quality} · {size}";
-    }
-
-    private static (ThemeRef Background, ThemeRef Foreground) StatusColors(
-        JobState? state, DraftStatus draftStatus, bool probing, bool blocked)
-    {
-        if (state is { } s)
-        {
-            return s switch
-            {
-                JobState.Succeeded => (Theme.SystemSuccessBackground, Theme.SystemSuccess),
-                JobState.Failed => (Theme.SystemCriticalBackground, Theme.SystemCritical),
-                JobState.Interrupted or JobState.NeedsAttention => (Theme.SystemCautionBackground, Theme.SystemCaution),
-                JobState.Canceled => (Theme.SystemNeutralBackground, Theme.SystemNeutral),
-                JobState.CancelRequested => (Theme.SystemCautionBackground, Theme.SystemCaution),
-                _ => (Theme.SystemAttentionBackground, Theme.SystemAttention),
-            };
-        }
-        if (draftStatus == DraftStatus.Invalid) return (Theme.SystemCriticalBackground, Theme.SystemCritical);
-        if (blocked) return (Theme.SystemCautionBackground, Theme.SystemCaution);
-        if (probing) return (Theme.SystemNeutralBackground, Theme.SystemNeutral);
-        return (Theme.SystemAttentionBackground, Theme.SystemAttention);
     }
 }

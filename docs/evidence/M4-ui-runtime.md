@@ -107,15 +107,20 @@ About shows “版本 1.0.0.2”, E2E with installed FFmpeg PASS, uninstall clea
 
 ## 2026-11-01 — P0 usability pass (Format-Factory workbench v2)
 
-- Task list is now an aligned **table**: 文件 / 目标格式 / 状态·进度 / 速度 / 输出 / 操作; filter tabs
-  全部 / 进行中 / 已完成 / 失败; 清除已完成; per-row gear opens parameters; completed rows offer open/reveal.
-- Layered toolbar: primary 添加文件/文件夹; selection group 全选/删除/批量设置(N); queue group 开始全部/暂停队列
-  (“仅暂停启动新任务，当前任务继续”).
-- Left panel = 输出设置: scrollable format catalogue + pinned quality chips (较小体积/均衡/更高画质, applies to selection)
-  + always-visible output location (更改/打开); main window also shows output folder at the bottom.
-- Parameter dialog split into **基本/高级** tabs; numeric validation (CRF 0–51, bitrate, W×H 2–16384, fps 1–240,
-  sample rate 8k–192k, channels 1–8), “清除具体数值”, and “同时应用到所有相同目标格式的任务”.
-- Verified: solution build 0/0, 171 tests pass, launched UI renders the new table/toolbar/output bar,
+> 修正（2026-11-01 UI/UX 修复轮）：本节原按中间迭代的“任务表格”描述，与现行**任务卡片**布局漂移。
+> 现行实现以 [03 UI/UX](../03-ui-ux.md) 与 [UX 工作台重构](UX-workbench-redesign.md) 为准，本节已按现行卡片实现改写。
+
+- Task list is a stack of **task cards** (复选框 + 文件名 + 状态胶囊 → 源/输出事实 → 进度或结果 → 动作):
+  打开文件 / 打开文件夹 / 复制路径 / 重试 / 取消任务 / 修改后转换 / 技术详情 / 移除; queued cards additionally offer
+  上移 / 下移 / 移出队列并编辑; filter dropdown 全部 / 待开始 / 进行中 / 已完成 / 需要处理.
+- Layered toolbar: primary 添加文件/文件夹 (icon + label, Ctrl+O / Ctrl+Shift+O); folder-scan controls
+  包含子文件夹 / 取消扫描; selection group 全选 / 清除选择 / 移除已选 (with undo).
+- Right inspector = 输出设置: 媒体形式 → 容器格式 → 编码格式 cascade + 预设 + 质量/分辨率,
+  高级参数 Expander (CRF/码率/帧率/速度/硬件/音轨/采样率/声道/裁剪/元数据/文件名/预设),
+  保存位置 pinned at the panel bottom (更改… / 使用源文件旁 / 重置所选参数).
+- Numeric validation (CRF 0–51/63, bitrate, W×H 2–16384, fps 1–240, sample rate 8k–192k, channels 1–8);
+  multi-select fields show “多种值”; empty numeric fields mean 自动.
+- Verified at the time: solution build 0/0, 171 tests pass, launched UI renders the workbench,
   installer rebuilt and re-verified (install/launch/uninstall, version 1.0.0.2).
   Screenshots: [workbench-v2.png](screenshots/workbench-v2.png), [workbench-p0-installed.png](screenshots/workbench-p0-installed.png).
 

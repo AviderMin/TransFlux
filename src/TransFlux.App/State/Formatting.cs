@@ -64,14 +64,33 @@ public static class Fmt
     public static string TrackSummary(SourceSnapshot? snapshot, ConversionOptions? options = null)
     {
         if (snapshot is null) return "正在读取媒体信息…";
-        var v = VideoText(snapshot.PrimaryVideo);
-        var a = AudioText(snapshot.PrimaryAudio);
+        return string.Join(" · ", SourceStreamLines(snapshot, options));
+    }
+
+    /// <summary>One line per present stream category; absent categories are omitted.</summary>
+    public static IReadOnlyList<string> SourceStreamLines(SourceSnapshot snapshot, ConversionOptions? options = null)
+    {
+        var lines = new List<string>();
+        if (snapshot.PrimaryVideo is { } video)
+            lines.Add($"视频流：{VideoText(video)} · {ColorText(snapshot.ColorClassification)}");
+
         var audioTotal = snapshot.AudioStreams.Count();
-        var audioSelected = options?.SelectedStreams.Count is > 0 ? options.SelectedStreams.Count : Math.Min(1, audioTotal);
-        var audioMap = audioTotal > 0 ? $"输出 {audioSelected}/{audioTotal} 音轨" : "无音轨";
-        var subs = snapshot.SubtitleStreams.Count();
-        var subtitle = subs > 0 ? $" · 字幕 {subs} 未包含" : string.Empty;
-        return $"{v} · {a} · {ColorText(snapshot.ColorClassification)} · {audioMap}{subtitle}";
+        if (audioTotal > 0)
+        {
+            var selected = options?.SelectedStreams.Count is > 0 ? options.SelectedStreams.Count : Math.Min(1, audioTotal);
+            var trackInfo = audioTotal > 1 ? $" · 共 {audioTotal} 条，输出 {selected} 条" : string.Empty;
+            lines.Add($"音频流：{AudioText(snapshot.PrimaryAudio)}{trackInfo}");
+        }
+
+        var subtitles = snapshot.SubtitleStreams.ToArray();
+        if (subtitles.Length > 0)
+        {
+            var codecs = string.Join(" / ", subtitles.Select(s => CodecName(s.Codec)).Distinct(StringComparer.OrdinalIgnoreCase));
+            lines.Add($"字幕流：{codecs} · {subtitles.Length} 条");
+        }
+
+        if (lines.Count == 0) lines.Add("无可用媒体流信息");
+        return lines;
     }
 
     public static string CodecName(string? codec) => codec switch

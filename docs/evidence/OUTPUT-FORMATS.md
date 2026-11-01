@@ -74,8 +74,16 @@ dotnet test TransFlux.slnx -c Debug --no-restore --verbosity minimal
 ## 保留限制
 
 - 视频转码仍限定原有已支持的 8-bit SDR BT.709 输入；不代表新增了 HDR 色调映射或 10-bit 输出。
-- 视频转码仍提示字幕不输出；转封装检查原轨道是否能被目标容器直接复制。
 - MP3 仅支持单声道/立体声，多声道源要求用户显式选择 1/2 声道，避免无提示降混。
 - 文件选择器能选中某后缀不等于任何损坏或不兼容的文件都能转换；错误由探测/兼容性检查给出。
 - 无损编码不能恢复有损源丢失的信息；界面明确提示文件可能变大。
 - 未更新安装包，本次交付为源码及 Debug 构建。
+
+## 2026-11-01 管线修复（task-2）后的补充
+
+- 视频转码携带字幕：可复制者 -c:s copy，其余转 mov_text/srt/webvtt；位图字幕仅 MKV 直通，其余容器跳过并警告；烧录与外挂字幕暂缓。
+- 转封装白名单扩展：MKV 视频加 mpeg2video/mpeg4/vc1/prores/theora/vp8/ffv1 等，音频加 ac3/eac3/truehd/mlp/dts/mp2（DVD VOB→MKV 可用）；MP4/MOV 音频加 ac3/eac3；MKV 保留字体附件（filename/mimetype 显式重建）。
+- Dolby Vision 分级：P8（BL compatibility id>0）可 MKV 直通保留 RPU；P5/7 与未知 profile 阻断并说明；DCI-P3（smpte432）不再误判为 DV。
+- 多音轨：未显式选流时保留全部音轨，MP4 不再截断；语言与默认/强制轨标记在任何元数据策略下重建。
+- 色彩传递：setparams + 输出侧 -color_* 双通道，Verifier 抽查 color_primaries/transfer/space（range 的 tv/unspecified 等价处理，见 MEDIA-PIPELINE-FIXES.md）。
+- 全量测试：Domain 120、Application 96、Infrastructure 32、Engine.Integration 118，共 366 项通过（基线 265 项保持，其中 Remux_BitmapSubtitle_IsBlocked 按新行为拆分为 MKV 放行 + MP4 阻断两个用例）。

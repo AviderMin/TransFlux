@@ -87,12 +87,19 @@ public sealed class FfmpegVerifier : IOutputVerifier
             problems.Add($"video stream count {videoCount} != expected {expected.VideoStreamCount}");
         if (expected.AudioStreamCount != audioCount)
             problems.Add($"audio stream count {audioCount} != expected {expected.AudioStreamCount}");
+        var attachmentCount = actual.Streams.Count(s => s.Kind == MediaKind.Attachment);
+        if (expected.AttachmentStreamCount != attachmentCount)
+            problems.Add($"attachment stream count {attachmentCount} != expected {expected.AttachmentStreamCount}");
         if (expected.StreamCount != streamCount)
             problems.Add($"stream count {streamCount} != expected {expected.StreamCount}");
-        var expectedSubtitleCount = expected.StreamCount - expected.VideoStreamCount - expected.AudioStreamCount;
+        var expectedSubtitleCount = expected.StreamCount - expected.VideoStreamCount - expected.AudioStreamCount
+            - expected.AttachmentStreamCount;
         var subtitleCount = actual.SubtitleStreams.Count();
         if (expectedSubtitleCount >= 0 && expectedSubtitleCount != subtitleCount)
             problems.Add($"subtitle stream count {subtitleCount} != expected {expectedSubtitleCount}");
+
+        CheckLanguages(problems, "audio", expected.AudioLanguages, actual.AudioStreams.ToList());
+        CheckLanguages(problems, "subtitle", expected.SubtitleLanguages, actual.SubtitleStreams.ToList());
 
         if (expected.VideoCodec is { } videoCodec && videoCodec != VideoCodec.Copy)
         {
@@ -126,6 +133,15 @@ public sealed class FfmpegVerifier : IOutputVerifier
             && !string.Equals(video.PixelFormat, expected.PixelFormat, StringComparison.OrdinalIgnoreCase))
             problems.Add($"pixel format '{video.PixelFormat}' != expected '{expected.PixelFormat}'");
 
+        // Colour passthrough spot checks (null = not asserted).
+        if (video is not null)
+        {
+            CheckColour(problems, "color primaries", expected.ColorPrimaries, video.ColorPrimaries);
+            CheckColour(problems, "color transfer", expected.ColorTransfer, video.ColorTransfer);
+            CheckColour(problems, "color space", expected.ColorSpace, video.ColorSpace);
+            CheckColour(problems, "color range", expected.ColorRange, video.ColorRange);
+        }
+
         if (expected.FastStart && expected.Container is ContainerFormat.Mp4 or ContainerFormat.Mov or ContainerFormat.M4a
             && !IsMoovBeforeMdat(outputPath))
             problems.Add("ISO BMFF output is not faststart (moov box not before mdat)");
@@ -157,6 +173,30 @@ public sealed class FfmpegVerifier : IOutputVerifier
         }
 
         return problems;
+    }
+
+    private static void CheckColour(List<string> problems, string label, string? expectedValue, string? actualValue)
+    {
+        if (string.IsNullOrWhiteSpace(expectedValue)) return;
+        var actual = actualValue?.Trim();
+        if (string.Equals(actual, expectedValue.Trim(), StringComparison.OrdinalIgnoreCase)) return;
+        // "unspecified" range is treated as limited/tv by every decoder; the pinned core
+        // cannot always write the tv marker back for Matroska sources.
+        if (label == "color range" && expectedValue == "tv" && string.IsNullOrEmpty(actual)) return;
+        problems.Add($"{label} '{actualValue ?? "unspecified"}' != expected '{expectedValue}'");
+    }
+
+    private static void CheckLanguages(List<string> problems, string label, IReadOnlyList<string> expected, IReadOnlyList<StreamDescriptor> actual)
+    {
+        if (expected.Count == 0) return;
+        for (var i = 0; i < expected.Count; i++)
+        {
+            var want = expected[i];
+            if (string.IsNullOrWhiteSpace(want) || want == "und") continue;
+            var got = i < actual.Count ? actual[i].Language : null;
+            if (!string.Equals(got, want, StringComparison.OrdinalIgnoreCase))
+                problems.Add($"{label} track {i} language '{got ?? "und"}' != expected '{want}'");
+        }
     }
 
     private static bool RequiresKnownDuration(ContainerFormat container) =>

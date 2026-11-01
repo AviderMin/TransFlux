@@ -34,10 +34,7 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         var p = Props;
         var (open, setOpen) = UseState(true);
         var (entries, setEntries) = UseState<IReadOnlyList<HistoryEntry>?>(null);
-        var (error, setError) = UseState<string?>(null);
-        var (errorTitle, setErrorTitle) = UseState("历史记录读取失败");
-        var (notice, setNotice) = UseState<string?>(null);
-        var (noticeWarning, setNoticeWarning) = UseState(false);
+        var (banner, setBanner) = UseState<Notice?>(null);
         var (confirmClear, setConfirmClear) = UseState(false);
         var (busy, setBusy) = UseState(false);
 
@@ -50,7 +47,7 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    setError(ex.Message);
+                    setBanner(Notice.Error(UiText.HistoryLoadFailedTitle, ex.Message));
                     setEntries(Array.Empty<HistoryEntry>());
                 }
             });
@@ -66,10 +63,9 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
                 await p.Services.History.ClearAsync(CancellationToken.None);
                 setEntries(Array.Empty<HistoryEntry>());
                 setConfirmClear(false);
-                setNoticeWarning(false);
-                setNotice("已清空历史记录。");
+                setBanner(Notice.Success(UiText.PromptTitle, UiText.HistoryCleared));
             }
-            catch (Exception ex) { setErrorTitle("清空历史失败"); setError(ex.Message); }
+            catch (Exception ex) { setBanner(Notice.Error(UiText.HistoryClearFailedTitle, ex.Message)); }
             finally { setBusy(false); }
         }
 
@@ -79,23 +75,22 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
             try
             {
                 var added = await p.Rejoin(entry.SourcePath);
-                setNoticeWarning(!added);
-                setNotice(added
-                    ? "已重新加入工作台，正在读取媒体信息。"
-                    : "无法重新加入：文件不存在或已在任务列表中。");
+                setBanner(added
+                    ? Notice.Success(UiText.PromptTitle, UiText.RejoinDone)
+                    : Notice.Warning(UiText.PromptTitle, UiText.RejoinFailedExists));
             }
-            catch (Exception ex) { setErrorTitle("重新加入失败"); setError(ex.Message); }
+            catch (Exception ex) { setBanner(Notice.Error(UiText.RejoinFailedTitle, ex.Message)); }
         }
 
         async Task OpenOutputAsync(string path)
         {
             try { await LauncherInterop.OpenAsync(path); }
-            catch (Exception ex) { setErrorTitle("打开输出失败"); setError(ex.Message); }
+            catch (Exception ex) { setBanner(Notice.Error(UiText.OpenOutputFailedTitle, ex.Message)); }
         }
         void RevealOutput(string path)
         {
             try { LauncherInterop.RevealInExplorer(path); }
-            catch (Exception ex) { setErrorTitle("打开文件夹失败"); setError(ex.Message); }
+            catch (Exception ex) { setBanner(Notice.Error(UiText.RevealFailedTitle, ex.Message)); }
         }
 
         void Close()
@@ -110,7 +105,7 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         {
             children.Add(Ui.Card(VStack(Space.Sm,
                 TextBlock(UiText.HistoryClearConfirm).SemiBold(),
-                Ui.Dim(UiText.HistoryClearHint).FontSize(12).TextWrapping(TextWrapping.Wrap),
+                Ui.DimCaption(UiText.HistoryClearHint).TextWrapping(TextWrapping.Wrap),
                 HStack(Space.Sm,
                     Button(UiText.HistoryConfirmClear, () => _ = ClearAsync()).AccentButton()
                         .IsEnabled(!busy).AutomationName(UiText.HistoryConfirmClear),
@@ -118,26 +113,20 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
                         .AutomationName(UiText.Cancel)))));
         }
 
-        if (error is { } err)
-            children.Add(InfoBar(errorTitle, err).Error().IsClosable(true).Closed(() => setError(null)));
-        if (notice is { } msg)
-        {
-            var bar = InfoBar("历史记录", msg).IsClosable(true).Closed(() => setNotice(null));
-            children.Add(noticeWarning ? bar.Warning() : bar.Success());
-        }
+        if (banner is { } shown) children.Add(Ui.NoticeBar(shown, () => setBanner(null)));
 
         if (entries is null)
         {
-            children.Add(HStack(Space.Sm, ProgressRing().Width(16).Height(16), Ui.Dim(UiText.HistoryLoading).FontSize(12)));
+            children.Add(HStack(Space.Sm, ProgressRing().Width(16).Height(16), Ui.DimCaption(UiText.HistoryLoading)));
         }
         else if (entries.Count == 0)
         {
-            children.Add(Ui.Card(Ui.Dim(UiText.HistoryEmpty).FontSize(12).HAlign(HorizontalAlignment.Center)));
+            children.Add(Ui.Card(Ui.DimCaption(UiText.HistoryEmpty).HAlign(HorizontalAlignment.Center)));
         }
         else
         {
             children.Add(Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
-                Ui.Dim($"共 {entries.Count} 条记录").FontSize(12).VAlign(VerticalAlignment.Center).Grid(column: 0),
+                Ui.DimCaption($"共 {entries.Count} 条记录").VAlign(VerticalAlignment.Center).Grid(column: 0),
                 Button(UiText.HistoryClear, () => setConfirmClear(true)).SubtleButton()
                     .IsEnabled(!busy).AutomationName(UiText.HistoryClear).Grid(column: 1)));
 
@@ -169,7 +158,7 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         var sourcePath = entry.SourcePath ?? "—";
         var canOpenOutput = !string.IsNullOrWhiteSpace(entry.OutputPath);
         var canRejoin = !string.IsNullOrWhiteSpace(entry.SourcePath);
-        var (stateBackground, stateForeground) = StateColors(entry.State);
+        var (stateBackground, stateForeground) = Ui.ToneColors(StatusTones.For(entry.State));
 
         var actions = new List<Element>
         {
@@ -190,14 +179,14 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         var details = VStack(Space.Xs,
             TextBlock(sourceName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)
                 .ToolTip(sourcePath),
-            TextBlock("来源：" + sourcePath).FontSize(12).Foreground(Theme.SecondaryText)
+            Caption("来源：" + sourcePath).Foreground(Theme.SecondaryText)
                 .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(sourcePath),
-            TextBlock("输出：" + outputPath).FontSize(12).Foreground(Theme.SecondaryText)
+            Caption("输出：" + outputPath).Foreground(Theme.SecondaryText)
                 .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(outputPath),
             HStack(Space.Sm,
                 Ui.Pill(Fmt.JobStateText(entry.State), stateBackground, stateForeground),
-                Ui.Dim(time).FontSize(12).VAlign(VerticalAlignment.Center),
-                Ui.Dim(Fmt.Size(entry.OutputSizeBytes)).FontSize(12).VAlign(VerticalAlignment.Center)));
+                Ui.DimCaption(time).VAlign(VerticalAlignment.Center),
+                Ui.DimCaption(Fmt.Size(entry.OutputSizeBytes)).VAlign(VerticalAlignment.Center)));
 
         return Border(Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
                 details.Grid(column: 0),
@@ -209,12 +198,4 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
             .WithKey(entry.JobId.ToString("n"));
     }
 
-    private static (ThemeRef Background, ThemeRef Foreground) StateColors(JobState state) => state switch
-    {
-        JobState.Succeeded => (Theme.SystemSuccessBackground, Theme.SystemSuccess),
-        JobState.Failed => (Theme.SystemCriticalBackground, Theme.SystemCritical),
-        JobState.Interrupted or JobState.NeedsAttention => (Theme.SystemCautionBackground, Theme.SystemCaution),
-        JobState.Canceled => (Theme.SystemNeutralBackground, Theme.SystemNeutral),
-        _ => (Theme.SystemAttentionBackground, Theme.SystemAttention),
-    };
 }

@@ -299,6 +299,28 @@ public sealed class WorkbenchTests
     }
 
     [Fact]
+    public void SourceStreamLinesSeparatePresentCategoriesAndOmitMissingOnes()
+    {
+        var source = TestData.MakeSource();
+        var lines = Fmt.SourceStreamLines(source);
+        Assert.Equal(2, lines.Count);
+        Assert.StartsWith("视频流：", lines[0]);
+        Assert.StartsWith("音频流：", lines[1]);
+        Assert.DoesNotContain(lines, line => line.StartsWith("字幕流："));
+
+        var withSubtitle = source with
+        {
+            Streams = [.. source.Streams, new StreamDescriptor
+            {
+                SourceIndex = 2, Kind = MediaKind.Subtitle, Codec = "subrip",
+            }],
+        };
+        var withSubtitleLines = Fmt.SourceStreamLines(withSubtitle);
+        Assert.Equal(3, withSubtitleLines.Count);
+        Assert.StartsWith("字幕流：SRT", withSubtitleLines[2]);
+    }
+
+    [Fact]
     public void ApplyingPresetRetainsTrimTracksAndOutputLocation()
     {
         var source = ConversionOptions.Default with

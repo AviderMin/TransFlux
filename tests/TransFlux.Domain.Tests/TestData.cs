@@ -17,7 +17,9 @@ internal static class TestData
         int? rotationDegrees = null,
         string? colorSpace = "bt709",
         string? colorTransfer = "bt709",
-        string? colorPrimaries = "bt709")
+        string? colorPrimaries = "bt709",
+        int? dvProfile = null,
+        int? dvBlCompat = null)
         => new()
         {
             SourceIndex = index,
@@ -32,6 +34,8 @@ internal static class TestData
             ColorSpace = colorSpace,
             ColorTransfer = colorTransfer,
             ColorPrimaries = colorPrimaries,
+            DvProfile = dvProfile,
+            DvBlSignalCompatibilityId = dvBlCompat,
         };
 
     public static StreamDescriptor Audio(
@@ -40,7 +44,9 @@ internal static class TestData
         int? channels = 2,
         string? channelLayout = "stereo",
         int? sampleRate = 48000,
-        bool isDefault = true)
+        bool isDefault = true,
+        string? language = null,
+        bool isForced = false)
         => new()
         {
             SourceIndex = index,
@@ -50,10 +56,21 @@ internal static class TestData
             ChannelLayout = channelLayout,
             SampleRate = sampleRate,
             IsDefault = isDefault,
+            Language = language,
+            IsForced = isForced,
         };
 
-    public static StreamDescriptor Subtitle(int index = 2, string codec = "subrip", bool isDefault = false)
-        => new() { SourceIndex = index, Kind = MediaKind.Subtitle, Codec = codec, IsDefault = isDefault };
+    public static StreamDescriptor Subtitle(int index = 2, string codec = "subrip", bool isDefault = false,
+        string? language = null, bool isForced = false)
+        => new()
+        {
+            SourceIndex = index,
+            Kind = MediaKind.Subtitle,
+            Codec = codec,
+            IsDefault = isDefault,
+            Language = language,
+            IsForced = isForced,
+        };
 
     public static SourceSnapshot Source(
         IReadOnlyList<StreamDescriptor> streams,

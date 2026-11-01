@@ -25,6 +25,12 @@
     <Compile Include="..\..\src\TransFlux.App\State\WorkbenchRules.cs" Link="Workbench\WorkbenchRules.cs" />
     <Compile Include="..\..\src\TransFlux.App\State\WorkbenchStore.cs" Link="Workbench\WorkbenchStore.cs" />
     <Compile Include="..\..\src\TransFlux.App\State\Formatting.cs" Link="Workbench\Formatting.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\NoticeModel.cs" Link="Workbench\NoticeModel.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\StatusTone.cs" Link="Workbench\StatusTone.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\DebouncedAction.cs" Link="Workbench\DebouncedAction.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\FieldValues.cs" Link="Workbench\FieldValues.cs" />
+    <Compile Include="..\..\src\TransFlux.App\Resources\UiText.cs" Link="Workbench\UiText.cs" />
+    <Compile Include="..\..\src\TransFlux.App\Theme\Space.cs" Link="Workbench\Space.cs" />
     <Compile Include="..\..\src\TransFlux.App\State\DiagnosticReport.cs" Link="Workbench\DiagnosticReport.cs" />
   </ItemGroup>
 </Project>

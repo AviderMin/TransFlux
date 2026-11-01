@@ -11,6 +11,8 @@ public sealed class FfmpegProbe : IMediaProbe
 {
     public const int MaxJsonChars = 8 * 1024 * 1024;
     public const int MaxStderrChars = 64 * 1024;
+    /// <summary>docs/05: UNC/network paths get a larger default budget than local files.</summary>
+    public static readonly TimeSpan UncTimeout = TimeSpan.FromSeconds(30);
 
     private readonly FfmpegCorePaths _core;
     private readonly TimeSpan _timeout;
@@ -38,14 +40,19 @@ public sealed class FfmpegProbe : IMediaProbe
             "-hide_banner", "-v", "error",
             "-print_format", "json",
             "-show_format", "-show_streams", "-show_chapters",
+            // FFmpeg 8 reports HDR static metadata (mastering display / content light) and
+            // some dynamic metadata on decoded frames; one packet of frames is enough.
+            "-show_frames", "-read_intervals", "%+#1",
             "-protocol_whitelist", "file",
             path,
         };
 
+        var timeout = IsUncPath(path) && _timeout < UncTimeout ? UncTimeout : _timeout;
+
         CaptureResult capture;
         try
         {
-            capture = await ProcessCapture.RunAsync(_core.FfprobePath, arguments, _timeout, MaxJsonChars, MaxStderrChars, ct);
+            capture = await ProcessCapture.RunAsync(_core.FfprobePath, arguments, timeout, MaxJsonChars, MaxStderrChars, ct);
         }
         catch (OperationCanceledException)
         {
@@ -58,7 +65,7 @@ public sealed class FfmpegProbe : IMediaProbe
 
         if (capture.TimedOut)
             return Result<SourceSnapshot>.Operational(FailureInfo.Of(
-                FailureCode.ProbeFailed, "probe.timeout", $"ffprobe timed out after {_timeout.TotalSeconds:0}s."));
+                FailureCode.ProbeFailed, "probe.timeout", $"ffprobe timed out after {timeout.TotalSeconds:0}s."));
         if (capture.ExitCode != 0)
             return Result<SourceSnapshot>.Operational(FailureInfo.Of(
                 FailureCode.ProbeFailed, "probe.exit_nonzero", Trim(capture.Stderr)));
@@ -79,6 +86,9 @@ public sealed class FfmpegProbe : IMediaProbe
                 FailureCode.ProbeFailed, "probe.parse_failed", ex.Message));
         }
     }
+
+    private static bool IsUncPath(string path) =>
+        path.StartsWith("\\", StringComparison.Ordinal);
 
     private static string Trim(string value) =>
         value.Length <= 4000 ? value : value[^4000..];

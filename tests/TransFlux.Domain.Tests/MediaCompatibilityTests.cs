@@ -244,7 +244,7 @@ public class MediaCompatibilityTests
     }
 
     [Fact]
-    public void Remux_BitmapSubtitle_IsBlocked()
+    public void Remux_BitmapSubtitle_ToMkv_IsAllowed()
     {
         var src = TestData.Source(new[]
         {
@@ -252,6 +252,18 @@ public class MediaCompatibilityTests
         });
         var issues = MediaCompatibility.Validate(
             TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
+        Assert.Empty(issues);
+    }
+
+    [Fact]
+    public void Remux_BitmapSubtitle_ToMp4_IsBlocked()
+    {
+        var src = TestData.Source(new[]
+        {
+            TestData.Video(), TestData.Audio(), TestData.Subtitle(codec: "hdmv_pgs_subtitle"),
+        });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mp4), src);
         Assert.True(Has(issues, "REMUX_SUBTITLE_BITMAP"));
     }
 

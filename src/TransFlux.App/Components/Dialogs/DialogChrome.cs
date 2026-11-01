@@ -4,6 +4,7 @@ using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System.Runtime.CompilerServices;
+using TransFlux.App.Theming;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace TransFlux.App.Components.Dialogs;
@@ -21,6 +22,7 @@ public static class DialogChrome
         public bool Busy { get; set; }
     }
     private static readonly ConditionalWeakTable<ContentDialog, PrimaryAction> PrimaryActions = new();
+    private static readonly ConditionalWeakTable<ContentDialog, PrimaryAction> SecondaryActions = new();
     public static ContentDialogElement Render(
         string title,
         Element body,
@@ -31,9 +33,10 @@ public static class DialogChrome
         double maxHeight = 520,
         bool isOpen = true,
         Func<Task<bool>>? beforePrimaryClose = null,
-        bool primaryEnabled = true)
+        bool primaryEnabled = true,
+        Func<Task<bool>>? beforeSecondaryClose = null)
     {
-        var scroll = ScrollViewer(Border(body).Padding(0, 0, 16, 24))
+        var scroll = ScrollViewer(Border(body).Padding(0, 0, Space.Lg, Space.Xl))
             .Width(contentWidth)
             .MaxHeight(maxHeight)
             .HorizontalScrollMode(ScrollMode.Disabled)
@@ -76,6 +79,21 @@ public static class DialogChrome
                 return holder;
             });
             action.Invoke = beforePrimaryClose;
+            SecondaryActions.GetValue(control, c =>
+            {
+                var holder = new PrimaryAction();
+                c.SecondaryButtonClick += async (_, args) =>
+                {
+                    if (holder.Invoke is null) return;
+                    args.Cancel = true;
+                    if (holder.Busy) return;
+                    var deferral = args.GetDeferral();
+                    holder.Busy = true;
+                    try { args.Cancel = !await holder.Invoke(); }
+                    finally { holder.Busy = false; deferral.Complete(); }
+                };
+                return holder;
+            }).Invoke = beforeSecondaryClose;
         });
     }
 

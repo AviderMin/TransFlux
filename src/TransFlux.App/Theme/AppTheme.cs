@@ -2,22 +2,11 @@ using Microsoft.UI.Xaml;
 
 namespace TransFlux.App.Theming;
 
-/// <summary>Layout constants (DIP) from docs/03 spacing scale (4/8/12/16/24/32).</summary>
-public static class Space
+/// <summary>Window chrome facts shared by the host and the root component.</summary>
+public static class AppChrome
 {
-    public const double Xs = 4;
-    public const double Sm = 8;
-    public const double Md = 12;
-    public const double Lg = 16;
-    public const double Xl = 24;
-    public const double Xxl = 32;
-
-    public const double PagePadding = 24;
-    public const double CompactPadding = 16;
-    public const double SettingsPanelMin = 320;
-    public const double SettingsPanelMax = 340;
-    public const double WindowMinWidth = 920;
-    public const double WindowMinHeight = 640;
+    /// <summary>Windows 11 ships the Mica backdrop; older systems fall back to an opaque root background.</summary>
+    public static bool MicaEnabled { get; } = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
 }
 
 /// <summary>Maps the persisted theme preference to a WinUI <see cref="ElementTheme"/>.</summary>

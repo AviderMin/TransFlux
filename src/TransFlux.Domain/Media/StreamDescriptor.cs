@@ -31,6 +31,20 @@ public sealed record StreamDescriptor
     public string? ColorPrimaries { get; init; }
     public bool HasHdrSideData { get; init; }
 
+    // HDR static metadata (structured from mastering-display / content-light side data).
+    // MasterDisplay uses the x265 -master-display syntax: G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min).
+    public string? MasterDisplay { get; init; }
+    /// <summary>MaxCLL in cd/m2 (content light level max_content).</summary>
+    public int? MaxCLL { get; init; }
+    /// <summary>MaxFALL in cd/m2 (content light level max_average).</summary>
+    public int? MaxFALL { get; init; }
+
+    // Dolby Vision configuration record (dvhe/dvh1 streams).
+    /// <summary>DV profile (5/7/8...), null when no DOVI configuration record was found.</summary>
+    public int? DvProfile { get; init; }
+    /// <summary>BL signal compatibility id (1=HDR10, 2=SDR, 4=HLG for profile 8); 0/absent = no compatible base layer.</summary>
+    public int? DvBlSignalCompatibilityId { get; init; }
+
     // Audio-specific
     public int? Channels { get; init; }
     public string? ChannelLayout { get; init; }
@@ -39,7 +53,13 @@ public sealed record StreamDescriptor
     // Generic
     public long? BitRate { get; init; }
     public long? DurationUs { get; init; }
+    public long? StartUs { get; init; }
+    public Rational? TimeBase { get; init; }
     public string? SideDataSummary { get; init; }
+
+    // Attachment-specific (font/data streams; filename+mimetype are structural for Matroska).
+    public string? AttachmentFileName { get; init; }
+    public string? AttachmentMimeType { get; init; }
 
     public bool IsTextSubtitle => Kind == MediaKind.Subtitle &&
         (Codec is "subrip" or "srt" or "ass" or "ssa" or "webvtt" or "mov_text" or "text");

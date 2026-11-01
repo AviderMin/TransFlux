@@ -78,11 +78,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             throw new PlanValidationException(FailureInfo.Of(FailureCode.PlanInvalid, "plan.unknown_dimensions", "Video dimensions are unknown."));
 
         var primaryAudio = MediaCompatibility.SelectPrimaryAudio(request, source);
-        var audioIndices = SelectAudioIndices(request, source, primaryAudio);
+        var audioStreams = SelectAudioStreams(request, source, primaryAudio);
+        var subtitles = SubtitlePolicy.SelectForTranscode(request, source);
         var geometry = ComputeGeometry(video, request.Resize);
-        var expected = BuildVideoExpectedOutput(request, source, geometry, audioIndices.Count);
+        var expected = BuildVideoExpectedOutput(request, source, geometry, video, audioStreams, subtitles.Included);
 
-        var warnings = BuildWarnings(request, source);
+        var warnings = BuildWarnings(request, source, subtitles.Warnings);
         var candidates = new List<ExecutionCandidate>();
 
         var cpuEncoder = request.VideoCodec switch
@@ -90,7 +91,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             VideoCodec.H264 => "libx264", VideoCodec.Hevc => "libx265", VideoCodec.Av1 => "libaom-av1", VideoCodec.Vp9 => "libvpx-vp9",
             _ => throw new DomainException("Unsupported video codec."),
         };
-        var cpu = BuildVideoCandidate(request, video, audioIndices, geometry, HardwareBackend.Cpu, cpuEncoder, "cpu", usesGpu: false, uncalibrated: false);
+        var cpu = BuildVideoCandidate(request, video, audioStreams, subtitles.Included, geometry, HardwareBackend.Cpu, cpuEncoder, "cpu", uncalibrated: false);
         candidates.Add(cpu);
 
         var requested = request.Hardware.Backend;
@@ -104,8 +105,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         foreach (var cap in hw)
         {
             var backend = MapBackend(cap.Backend);
-            candidates.Add(BuildVideoCandidate(request, video, audioIndices, geometry, backend, cap.EncoderName, cap.Backend,
-                usesGpu: false, uncalibrated: true, cap.Direct3DAdapterIndex, cap.DeviceId));
+            candidates.Add(BuildVideoCandidate(request, video, audioStreams, subtitles.Included, geometry, backend, cap.EncoderName, cap.Backend,
+                uncalibrated: true, cap.Direct3DAdapterIndex, cap.DeviceId));
         }
 
         if (requested is HardwareBackend.NvidiaNvenc or HardwareBackend.IntelQsv or HardwareBackend.AmdAmf)
@@ -133,12 +134,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
     private static ExecutionCandidate BuildVideoCandidate(
         ConversionRequest request,
         StreamDescriptor video,
-        IReadOnlyList<int> audioIndices,
+        IReadOnlyList<StreamDescriptor> audioStreams,
+        IReadOnlyList<SubtitlePolicy.SubtitleTarget> subtitles,
         Geometry geometry,
         HardwareBackend backend,
         string encoder,
         string backendLabel,
-        bool usesGpu,
         bool uncalibrated,
         int? adapterIndex = null,
         string? deviceId = null)
@@ -149,9 +150,13 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         AddTrimDuration(args, request.Trim);
 
         args.Add("-map"); args.Add($"0:{video.SourceIndex}");
-        foreach (var audioIndex in audioIndices)
+        foreach (var audio in audioStreams)
         {
-            args.Add("-map"); args.Add($"0:{audioIndex}");
+            args.Add("-map"); args.Add($"0:{audio.SourceIndex}");
+        }
+        foreach (var sub in subtitles)
+        {
+            args.Add("-map"); args.Add($"0:{sub.Stream.SourceIndex}");
         }
 
         args.Add("-c:v"); args.Add(encoder);
@@ -159,19 +164,22 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         if (request.VideoCodec == VideoCodec.Hevc && request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov)
         { args.Add("-tag:v"); args.Add("hvc1"); }
         if (adapterIndex is null) { args.Add("-pix_fmt"); args.Add("yuv420p"); }
+        AddColorOutputArgs(args, video);
         if (request.FrameRateOverride is double frameRate && frameRate > 0)
         {
             args.Add("-r"); args.Add(frameRate.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
         var filters = geometry.FilterChain.ToList();
+        var setparams = SetparamsFilter(video);
+        if (setparams is not null) filters.Add(setparams);
         if (adapterIndex is not null) filters.Add(HardwareEncoding.UploadFilter(encoder));
         if (filters.Count > 0)
         {
             args.Add("-vf"); args.Add(string.Join(",", filters));
         }
 
-        if (audioIndices.Count > 0)
+        if (audioStreams.Count > 0)
         {
             AddAudioEncoding(args, request);
         }
@@ -180,6 +188,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             args.Add("-an");
         }
 
+        for (var i = 0; i < subtitles.Count; i++)
+        {
+            args.Add($"-c:s:{i}"); args.Add(subtitles[i].Encoder);
+        }
+
+        AddStreamIdentity(args, audioStreams, subtitles.Select(s => s.Stream).ToList());
         AddMetadataPolicy(args, request.Metadata);
         AddContainer(args, request.Container, faststart: request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov);
         args.Add(PlanPlaceholders.Output);
@@ -196,8 +210,10 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             CandidateId = $"{backendLabel}-{encoder}" + (deviceId is null ? "" : ":" + deviceId),
             Backend = backend,
             EncoderName = encoder,
-            UsesGpuDecode = usesGpu,
-            UsesGpuFilter = false,
+            // Decode is always software in the current pipeline; only hardware candidates
+            // run GPU filters (format=nv12,hwupload).
+            UsesGpuDecode = false,
+            UsesGpuFilter = adapterIndex is not null,
             DeviceId = deviceId,
             Arguments = args,
             Rationale = rationale,
@@ -219,6 +235,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         args.Add("-map"); args.Add($"0:{audio.SourceIndex}");
         args.Add("-vn");
         AddAudioEncoding(args, request);
+        AddStreamIdentity(args, new[] { audio }, Array.Empty<StreamDescriptor>());
         AddMetadataPolicy(args, request.Metadata);
         AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.M4a);
         args.Add(PlanPlaceholders.Output);
@@ -235,7 +252,9 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             StreamCount = 1,
             VideoStreamCount = 0,
             AudioStreamCount = 1,
+            AttachmentStreamCount = 0,
             FastStart = request.Container == ContainerFormat.M4a,
+            AudioLanguages = new[] { audio.Language ?? string.Empty },
         };
 
         var candidate = new ExecutionCandidate
@@ -249,7 +268,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             Rationale = $"audio extract to {request.Container.DisplayName()} ({codec}).",
         };
 
-        var warnings = BuildWarnings(request, source);
+        var warnings = BuildWarnings(request, source, Array.Empty<string>());
         return Assemble(request, source, capabilities, new[] { candidate }, expected, warnings, args.ToList());
     }
 
@@ -260,18 +279,25 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         var args = GlobalPrefix(null);
         AddInput(args);
 
-        int mapped = 0, videoMapped = 0, audioMapped = 0;
+        int mapped = 0, videoMapped = 0, audioMapped = 0, subtitleMapped = 0, attachmentMapped = 0;
         var selectedStreams = MediaCompatibility.SelectRemuxStreams(request, source);
+        var mappedAudio = new List<StreamDescriptor>();
+        var mappedSubtitles = new List<StreamDescriptor>();
+        var mappedAttachments = new List<StreamDescriptor>();
         foreach (var stream in selectedStreams)
         {
             args.Add("-map"); args.Add($"0:{stream.SourceIndex}");
             mapped++;
             if (stream.Kind == MediaKind.Video) videoMapped++;
-            if (stream.Kind == MediaKind.Audio) audioMapped++;
+            if (stream.Kind == MediaKind.Audio) { audioMapped++; mappedAudio.Add(stream); }
+            if (stream.Kind == MediaKind.Subtitle) { subtitleMapped++; mappedSubtitles.Add(stream); }
+            if (stream.Kind == MediaKind.Attachment) { attachmentMapped++; mappedAttachments.Add(stream); }
         }
 
         args.Add("-c"); args.Add("copy");
+        AddStreamIdentity(args, mappedAudio, mappedSubtitles);
         AddMetadataPolicy(args, request.Metadata);
+        AddAttachmentIdentity(args, mappedAttachments);
         AddContainer(args, request.Container, faststart: request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov);
         args.Add(PlanPlaceholders.Output);
 
@@ -287,7 +313,10 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             StreamCount = mapped,
             VideoStreamCount = videoMapped,
             AudioStreamCount = audioMapped,
+            AttachmentStreamCount = attachmentMapped,
             FastStart = request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov,
+            AudioLanguages = mappedAudio.Select(a => a.Language ?? string.Empty).ToList(),
+            SubtitleLanguages = mappedSubtitles.Select(s => s.Language ?? string.Empty).ToList(),
         };
 
         var candidate = new ExecutionCandidate
@@ -301,7 +330,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             Rationale = $"remux to {request.Container.DisplayName()} with stream copy (whitelist enforced by compatibility matrix).",
         };
 
-        var warnings = BuildWarnings(request, source);
+        var warnings = BuildWarnings(request, source, Array.Empty<string>());
         return Assemble(request, source, capabilities, new[] { candidate }, expected, warnings, args.ToList());
     }
 
@@ -352,6 +381,94 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         }
     }
 
+    /// <summary>
+    /// Rebuilds per-track language and default/forced markers that global metadata
+    /// stripping would otherwise lose (docs/05: language and disposition survive every
+    /// metadata policy).
+    /// </summary>
+    private static void AddStreamIdentity(List<string> args, IReadOnlyList<StreamDescriptor> audio, IReadOnlyList<StreamDescriptor> subtitles)
+    {
+        for (var i = 0; i < audio.Count; i++) AddOneStreamIdentity(args, "a", i, audio[i]);
+        for (var i = 0; i < subtitles.Count; i++) AddOneStreamIdentity(args, "s", i, subtitles[i]);
+    }
+
+    private static void AddOneStreamIdentity(List<string> args, string kind, int index, StreamDescriptor stream)
+    {
+        if (!string.IsNullOrEmpty(stream.Language) && stream.Language != "und")
+        {
+            args.Add($"-metadata:s:{kind}:{index}");
+            args.Add("language=" + stream.Language);
+        }
+        var flags = new List<string>();
+        if (stream.IsDefault) flags.Add("default");
+        if (stream.IsForced) flags.Add("forced");
+        args.Add($"-disposition:{kind}:{index}");
+        args.Add(flags.Count == 0 ? "0" : string.Join("+", flags));
+    }
+
+    /// <summary>
+    /// Attachment filename/mimetype are structural for Matroska attachments (fonts);
+    /// rebuild them because metadata stripping removes the original stream tags.
+    /// </summary>
+    private static void AddAttachmentIdentity(List<string> args, IReadOnlyList<StreamDescriptor> attachments)
+    {
+        for (var i = 0; i < attachments.Count; i++)
+        {
+            var att = attachments[i];
+            if (!string.IsNullOrEmpty(att.AttachmentFileName))
+            {
+                args.Add($"-metadata:s:t:{i}"); args.Add("filename=" + att.AttachmentFileName);
+            }
+            if (!string.IsNullOrEmpty(att.AttachmentMimeType))
+            {
+                args.Add($"-metadata:s:t:{i}"); args.Add("mimetype=" + att.AttachmentMimeType);
+            }
+        }
+    }
+
+    private static readonly string[] UnusableColourValues = { "unknown", "unspecified", "reserved", "n/a" };
+
+    private static bool UsableColour(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var v = value.Trim();
+        if (UnusableColourValues.Contains(v, StringComparer.OrdinalIgnoreCase)) return false;
+        // Colour values are ffprobe enum tokens; keep them inert inside filter strings.
+        foreach (var c in v)
+        {
+            if (!(char.IsLetterOrDigit(c) || c is '-' or '_')) return false;
+        }
+        return v.Length <= 32;
+    }
+
+    /// <summary>
+    /// Standard output-side colour options. Kept for portability; on the pinned FFmpeg
+    /// 8.0.1 core only -colorspace/-color_range survive this route, so the verified carrier
+    /// is the setparams segment (see SetparamsFilter).
+    /// </summary>
+    private static void AddColorOutputArgs(List<string> args, StreamDescriptor video)
+    {
+        if (UsableColour(video.ColorPrimaries)) { args.Add("-color_primaries"); args.Add(video.ColorPrimaries!); }
+        if (UsableColour(video.ColorTransfer)) { args.Add("-color_trc"); args.Add(video.ColorTransfer!); }
+        if (UsableColour(video.ColorSpace)) { args.Add("-colorspace"); args.Add(video.ColorSpace!); }
+        if (UsableColour(video.ColorRange)) { args.Add("-color_range"); args.Add(video.ColorRange!); }
+    }
+
+    /// <summary>
+    /// Colour passthrough verified end to end on the pinned core: frame colour properties
+    /// set by setparams reach the encoder VUI/colour metadata for libx264, libx265,
+    /// libvpx-vp9, libaom-av1 and h264_nvenc alike.
+    /// </summary>
+    private static string? SetparamsFilter(StreamDescriptor video)
+    {
+        var parts = new List<string>();
+        if (UsableColour(video.ColorPrimaries)) parts.Add("color_primaries=" + video.ColorPrimaries);
+        if (UsableColour(video.ColorTransfer)) parts.Add("color_trc=" + video.ColorTransfer);
+        if (UsableColour(video.ColorSpace)) parts.Add("colorspace=" + video.ColorSpace);
+        if (UsableColour(video.ColorRange)) parts.Add("range=" + video.ColorRange);
+        return parts.Count == 0 ? null : "setparams=" + string.Join(":", parts);
+    }
+
     private static void AddContainer(List<string> args, ContainerFormat container, bool faststart)
     {
         switch (container)
@@ -400,15 +517,23 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         {
             case "libx265":
                 args.Add("-preset"); args.Add(PresetFor(request.Speed));
-                args.Add("-x265-params"); args.Add("pools=4:frame-threads=2:log-level=error");
+                // Thread pools stay with x265 defaults so small machines are not oversubscribed.
+                args.Add("-x265-params"); args.Add("log-level=error");
                 if (bitrate is > 0) { args.Add("-b:v"); args.Add($"{bitrate}k"); }
                 else { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
             case "libaom-av1":
-            case "libvpx-vp9":
                 args.Add("-threads"); args.Add("4");
                 args.Add("-row-mt"); args.Add("1");
                 args.Add("-cpu-used"); args.Add(request.Speed switch { SpeedTier.Faster => "8", SpeedTier.Slower => "4", _ => "6" });
+                args.Add("-b:v"); args.Add(bitrate is > 0 ? $"{bitrate}k" : "0");
+                if (bitrate is not > 0) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                break;
+            case "libvpx-vp9":
+                args.Add("-threads"); args.Add("4");
+                args.Add("-row-mt"); args.Add("1");
+                // libvpx good-deadline cpu-used tops out at 5; never share the aom mapping.
+                args.Add("-cpu-used"); args.Add(request.Speed switch { SpeedTier.Faster => "5", SpeedTier.Slower => "2", _ => "4" });
                 args.Add("-b:v"); args.Add(bitrate is > 0 ? $"{bitrate}k" : "0");
                 if (bitrate is not > 0) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
                 break;
@@ -419,9 +544,18 @@ public sealed class FfmpegPlanner : IExecutionPlanner
                 break;
             case "h264_nvenc":
                 args.Add("-preset"); args.Add(request.Speed switch { SpeedTier.Faster => "p2", SpeedTier.Slower => "p6", _ => "p4" });
-                args.Add("-rc"); args.Add("vbr");
-                if (bitrate is int b2 && b2 > 0) { args.Add("-b:v"); args.Add($"{b2}k"); }
-                else { args.Add("-cq"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                if (bitrate is int b2 && b2 > 0)
+                {
+                    args.Add("-rc"); args.Add("vbr");
+                    args.Add("-b:v"); args.Add($"{b2}k");
+                }
+                else
+                {
+                    // constqp maps quality tiers to a fixed QP; "vbr -cq" without a target
+                    // bitrate leaves the rate target undefined on the pinned core.
+                    args.Add("-rc"); args.Add("constqp");
+                    args.Add("-qp"); args.Add(crf.ToString(CultureInfo.InvariantCulture));
+                }
                 break;
             case "h264_qsv":
                 args.Add("-preset"); args.Add(request.Speed switch { SpeedTier.Faster => "fast", SpeedTier.Slower => "slow", _ => "medium" });
@@ -431,7 +565,13 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             case "h264_amf":
                 args.Add("-quality"); args.Add(request.Speed switch { SpeedTier.Faster => "speed", SpeedTier.Slower => "quality", _ => "balanced" });
                 if (bitrate is int b4 && b4 > 0) { args.Add("-rc"); args.Add("cbr"); args.Add("-b:v"); args.Add($"{b4}k"); }
-                else { args.Add("-rc"); args.Add("cqp"); args.Add("-qp_i"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); args.Add("-qp_p"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                else
+                {
+                    args.Add("-rc"); args.Add("cqp");
+                    args.Add("-qp_i"); args.Add(crf.ToString(CultureInfo.InvariantCulture));
+                    args.Add("-qp_p"); args.Add(crf.ToString(CultureInfo.InvariantCulture));
+                    args.Add("-qp_b"); args.Add(crf.ToString(CultureInfo.InvariantCulture));
+                }
                 break;
             default:
                 throw new DomainException($"Unsupported video encoder '{encoder}'.");
@@ -478,21 +618,24 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         _ => HardwareBackend.Cpu,
     };
 
-    private static List<int> SelectAudioIndices(ConversionRequest request, SourceSnapshot source, StreamDescriptor? primaryAudio)
+    /// <summary>Selected audio streams in source order. Without an explicit selection every
+    /// audio track is kept for every container, including MP4 — nothing is silently dropped.</summary>
+    private static List<StreamDescriptor> SelectAudioStreams(ConversionRequest request, SourceSnapshot source, StreamDescriptor? primaryAudio)
     {
-        var selected = new List<int>();
+        var selected = new List<StreamDescriptor>();
         foreach (var index in request.SelectedStreamIndices)
         {
             var stream = source.Streams.FirstOrDefault(s => s.SourceIndex == index);
-            if (stream is { Kind: MediaKind.Audio }) selected.Add(index);
+            if (stream is { Kind: MediaKind.Audio }) selected.Add(stream);
         }
-        if (selected.Count == 0 && primaryAudio is not null) selected.Add(primaryAudio.SourceIndex);
-        if (request.Container == ContainerFormat.Mp4 && selected.Count > 1)
-            selected = selected.Take(1).ToList(); // MP4 first-release default: single audio track
+        if (selected.Count == 0)
+            selected.AddRange(source.AudioStreams);
+        if (selected.Count == 0 && primaryAudio is not null) selected.Add(primaryAudio);
         return selected;
     }
 
-    private static ExpectedOutput BuildVideoExpectedOutput(ConversionRequest request, SourceSnapshot source, Geometry geometry, int audioCount)
+    private static ExpectedOutput BuildVideoExpectedOutput(ConversionRequest request, SourceSnapshot source, Geometry geometry,
+        StreamDescriptor video, IReadOnlyList<StreamDescriptor> audioStreams, IReadOnlyList<SubtitlePolicy.SubtitleTarget> subtitles)
     {
         long? durationUs = request.Trim is { } trim
             ? (long)trim.Duration.TotalMicroseconds
@@ -501,27 +644,44 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         {
             Container = request.Container,
             VideoCodec = request.VideoCodec,
-            AudioCodec = audioCount > 0 ? request.Audio.Codec : (AudioCodec?)null,
+            AudioCodec = audioStreams.Count > 0 ? request.Audio.Codec : (AudioCodec?)null,
             Width = geometry.TargetWidth,
             Height = geometry.TargetHeight,
             PixelFormat = "yuv420p",
             DurationUs = durationUs,
-            StreamCount = 1 + audioCount,
+            StreamCount = 1 + audioStreams.Count + subtitles.Count,
             VideoStreamCount = 1,
-            AudioStreamCount = audioCount,
+            AudioStreamCount = audioStreams.Count,
+            AttachmentStreamCount = 0,
             FastStart = request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov,
+            ColorPrimaries = UsableColour(video.ColorPrimaries) ? video.ColorPrimaries : null,
+            ColorTransfer = UsableColour(video.ColorTransfer) ? video.ColorTransfer : null,
+            ColorSpace = UsableColour(video.ColorSpace) ? video.ColorSpace : null,
+            ColorRange = UsableColour(video.ColorRange) ? video.ColorRange : null,
+            AudioLanguages = audioStreams.Select(a => a.Language ?? string.Empty).ToList(),
+            SubtitleLanguages = subtitles.Select(s => s.Stream.Language ?? string.Empty).ToList(),
         };
     }
 
-    private static List<string> BuildWarnings(ConversionRequest request, SourceSnapshot source)
+    private static List<string> BuildWarnings(ConversionRequest request, SourceSnapshot source, IReadOnlyList<string> subtitleWarnings)
     {
         var warnings = new List<string>();
-        if (request.Mode == ConversionMode.VideoTranscode && source.SubtitleStreams.Any())
-            warnings.Add("Subtitles are not included in the first-release video transcode output.");
+        warnings.AddRange(subtitleWarnings);
+        if (request.Mode == ConversionMode.VideoTranscode && source.SubtitleStreams.Any() && subtitleWarnings.Count == 0)
+            warnings.Add("字幕随输出保留：可复制的流直接复制，其余转为目标容器的字幕编码（不做烧录）。");
         if (request.Metadata == MetadataPolicy.StripPersonalTags)
-            warnings.Add("Free-form metadata and chapters are stripped.");
+            warnings.Add("自由标签与章节已清除；音轨/字幕的语言与默认轨、强制轨标记保留。");
         else
-            warnings.Add("Title/chapters preserved; metadata may contain private tags.");
+            warnings.Add("标题/章节与流标签已保留；元数据可能包含隐私信息。");
+        if (request.Mode == ConversionMode.Remux && source.Format.ChapterCount is > 0
+            && request.Metadata == MetadataPolicy.StripPersonalTags)
+            warnings.Add($"章节（{source.Format.ChapterCount} 个）已按元数据策略清除。");
+        if (request.Mode == ConversionMode.Remux)
+        {
+            var attachments = source.Streams.Count(s => s.Kind == MediaKind.Attachment);
+            if (attachments > 0 && request.Container != ContainerFormat.Mkv)
+                warnings.Add($"字体/附件流（{attachments} 条）无法写入 {request.Container.DisplayName()}，未随转封装保留。");
+        }
         if (request.Mode == ConversionMode.VideoTranscode && source.ColorClassification != ColorClassification.SdrBt709)
             warnings.Add($"Source colour classified as {source.ColorClassification}.");
         return warnings;
@@ -561,7 +721,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         return new ValidatedPlan
         {
             PlanId = Guid.NewGuid(),
-            PlanSchemaVersion = 1,
+            PlanSchemaVersion = 2,
             RequestHash = requestHash,
             CoreHash = _core.CoreHash,
             CapabilityHash = capabilities.CapabilityHash,

@@ -13,6 +13,7 @@ using TransFlux.App.Components.Dialogs;
 using TransFlux.App.Components.Shared;
 using TransFlux.App.Components.Workbench;
 using TransFlux.App.Interop;
+using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
 using TransFlux.Application.Contracts;
@@ -27,8 +28,10 @@ public sealed class AppRoot : Component<AppServices>
 {
     private Func<IReadOnlyList<string>, Task<int>>? _import;
     private Func<string, Task>? _importFolder;
-    private Action<string?>? _error;
+    private Action<Notice?>? _notice;
+    private Action<bool>? _dropChanged;
     private CancellationTokenSource? _folderScan;
+    private DebouncedAction? _saveDebounce;
     private bool _allowClose, _modal;
 
     public override Element Render()
@@ -40,6 +43,8 @@ public sealed class AppRoot : Component<AppServices>
         var store = UseMemo(() => new WorkbenchStore(services.Jobs, services.Probe, services.Workspace,
             action => { if (dispatcher is null || dispatcher.HasThreadAccess) action(); else dispatcher.TryEnqueue(() => action()); },
             services.Options.MaxConcurrentProbes), services);
+        var saveDebounce = UseMemo(() => new DebouncedAction(TimeSpan.FromMilliseconds(400)), services);
+        _saveDebounce = saveDebounce;
         var snapshot = UseExternalStore(store.Subscribe, store.GetSnapshot);
         var initialSettings = UseMemo(() => new AppSettings(), Array.Empty<object>());
         var (settings, setSettings) = UseState(initialSettings);
@@ -53,15 +58,19 @@ public sealed class AppRoot : Component<AppServices>
         var (dialog, setDialog) = UseState<string?>(null);
         var (dialogKey, setDialogKey) = UseState(0);
         var (detailsId, setDetailsId) = UseState<Guid?>(null);
+        var (cancelId, setCancelId) = UseState<Guid?>(null);
+        var (resetOpen, setResetOpen) = UseState(false);
+        var (dragOver, setDragOver) = UseState(false);
         var (exitOpen, setExitOpen) = UseState(false);
         var (exiting, setExiting) = UseState(false);
-        _modal = dialog is not null || detailsId is not null;
-        _error = store.SetError;
+        _modal = dialog is not null || detailsId is not null || cancelId is not null || resetOpen || exitOpen;
+        _notice = store.SetNotice;
+        _dropChanged = setDragOver;
 
         UseEffect(() =>
         {
             store.Start();
-            return () => { _folderScan?.Cancel(); _folderScan?.Dispose(); store.Dispose(); };
+            return () => { _folderScan?.Cancel(); _folderScan?.Dispose(); saveDebounce.Dispose(); store.Dispose(); };
         }, store);
         UseEffect(() =>
         {
@@ -86,7 +95,7 @@ public sealed class AppRoot : Component<AppServices>
                 {
                     // Fall back to in-memory defaults rather than leaving the workbench permanently disabled.
                     setSettingsLoaded(true);
-                    store.SetError("设置或预设读取失败，已使用默认设置：" + ex.Message);
+                    store.SetNotice(Notices.SettingsLoadFailed(ex.Message));
                 }
             }
             return () => cts.Cancel();
@@ -99,7 +108,7 @@ public sealed class AppRoot : Component<AppServices>
             {
                 if (_allowClose) return;
                 e.Cancel = true;
-                if (_modal) { store.SetError("请先关闭当前对话框，再退出应用。"); return; }
+                if (_modal) { store.SetNotice(Notices.CloseDialogFirst()); return; }
                 var current = store.GetSnapshot();
                 if (!current.Loaded) { _allowClose = true; window.Close(); return; }
                 if (current.Busy || current.Items.Any(i => i.Execution?.IsActive == true)) setExitOpen(true);
@@ -107,6 +116,7 @@ public sealed class AppRoot : Component<AppServices>
             }
             async Task CloseSafelyAsync()
             {
+                await saveDebounce.FlushAsync();
                 await services.Jobs.PauseQueueAsync(CancellationToken.None);
                 if (!await store.PersistAsync()) return;
                 _allowClose = true; window.Close();
@@ -119,7 +129,7 @@ public sealed class AppRoot : Component<AppServices>
         {
             try { await action(); }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { store.SetError(ex.Message); }
+            catch (Exception ex) { store.SetNotice(Notices.OperationFailed(ex.Message)); }
         }
         void Run(Func<Task> action) => _ = RunAsync(action);
         void OpenDialog(string name)
@@ -132,11 +142,11 @@ public sealed class AppRoot : Component<AppServices>
         {
             if (!settingsLoaded)
             {
-                if (notifyEmpty) store.SetError("设置仍在加载，请稍后重试。");
+                if (notifyEmpty) store.SetNotice(Notices.SettingsStillLoading());
                 return 0;
             }
             var count = await store.ImportAsync(paths, defaults);
-            if (count == 0 && notifyEmpty) store.SetError("未添加文件：文件可能已在待开始列表中、已不存在，或工作台仍在恢复。");
+            if (count == 0 && notifyEmpty) store.SetNotice(Notices.NothingImported());
             else if (count > 0) setFilter(0);
             return count;
         }
@@ -150,7 +160,7 @@ public sealed class AppRoot : Component<AppServices>
         {
             if (!settingsLoaded || _folderScan is not null)
             {
-                store.SetError(_folderScan is not null ? "正在扫描文件夹，请先取消或等待完成。" : "设置仍在加载，请稍后重试。");
+                store.SetNotice(_folderScan is not null ? Notices.ScanBusy() : Notices.SettingsStillLoading());
                 return;
             }
             var cts = new CancellationTokenSource();
@@ -170,15 +180,13 @@ public sealed class AppRoot : Component<AppServices>
                         setScanFound(discovered);
                         imported += await ImportAsync(batch, notifyEmpty: false);
                     }, cts.Token, excluded));
-                store.SetError(imported == 0
-                    ? discovered == 0 ? "未发现支持的媒体文件。" : "未发现新的媒体文件；文件可能已在待开始列表中。"
-                    : null);
+                store.SetNotice(imported == 0 ? discovered == 0 ? Notices.NoMediaFound() : Notices.NoNewMedia() : null);
             }
             catch (OperationCanceledException)
             {
-                store.SetError(imported > 0 ? $"已取消文件夹扫描；已添加的 {imported} 项保留。" : "已取消文件夹扫描。");
+                store.SetNotice(Notices.ScanCanceled(imported));
             }
-            catch (Exception ex) { store.SetError("文件夹导入失败：" + ex.Message); }
+            catch (Exception ex) { store.SetNotice(Notices.FolderScanFailed(ex.Message)); }
             finally
             {
                 if (ReferenceEquals(_folderScan, cts)) _folderScan = null;
@@ -204,7 +212,12 @@ public sealed class AppRoot : Component<AppServices>
             var target = TargetFormats.Find(nextDefaults);
             var remembered = settings with { LastTargetFormatKey = target?.Key, LastQuality = nextDefaults.Quality.ToString() };
             setSettings(remembered);
-            await services.Settings.SaveAsync(remembered, CancellationToken.None);
+            // Per-keystroke edits coalesce into one save; exit paths flush the pending run.
+            saveDebounce.Schedule(async () =>
+            {
+                try { await services.Settings.SaveAsync(remembered, CancellationToken.None); }
+                catch (Exception ex) { store.SetNotice(Notices.SaveFailed(ex.Message)); }
+            });
         }
         async Task PickOutputAsync()
         {
@@ -224,6 +237,7 @@ public sealed class AppRoot : Component<AppServices>
         }
         async Task SaveSettingsAsync(AppSettings next)
         {
+            await saveDebounce.FlushAsync();
             await services.Settings.SaveAsync(next, CancellationToken.None);
             services.Jobs.ConfigureExecution(next.MaxConcurrentTranscodes, next.AllowAutomaticFallback, next.FullVerification);
             setSettings(next);
@@ -245,22 +259,30 @@ public sealed class AppRoot : Component<AppServices>
                 $"TransFlux-diagnostic-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
             if (string.IsNullOrWhiteSpace(path)) return;
             await File.WriteAllTextAsync(path, DiagnosticReport.Build(item), CancellationToken.None);
-            store.SetError("诊断报告已保存。");
+            store.SetNotice(Notices.DiagnosticSaved());
+        }
+        async Task<bool> WaitUntilAsync(Func<bool> done)
+        {
+            // Bounded wait: a stuck pipeline must not leave the exit flow spinning forever.
+            for (var i = 0; i < 300; i++) { if (done()) return true; await Task.Delay(100); }
+            return done();
         }
         async Task CancelAndExitAsync()
         {
             setExiting(true);
             try
             {
-                while (store.GetSnapshot().Busy) await Task.Delay(100);
+                if (!await WaitUntilAsync(() => !store.GetSnapshot().Busy)) { store.SetNotice(Notices.ExitTimeout()); setExiting(false); return; }
                 await services.Jobs.PauseQueueAsync(CancellationToken.None);
                 foreach (var item in store.GetSnapshot().Items.Where(i => i.Execution?.CanCancel == true))
                     await store.CancelAsync(item.Id);
-                while (store.GetSnapshot().Items.Any(i => i.Execution?.IsActive == true)) await Task.Delay(100);
+                if (!await WaitUntilAsync(() => !store.GetSnapshot().Items.Any(i => i.Execution?.IsActive == true)))
+                { store.SetNotice(Notices.ExitTimeout()); setExiting(false); return; }
+                await saveDebounce.FlushAsync();
                 if (!await store.PersistAsync()) { setExiting(false); return; }
                 _allowClose = true; window?.Close();
             }
-            catch (Exception ex) { store.SetError("退出前停止任务失败：" + ex.Message); setExiting(false); }
+            catch (Exception ex) { store.SetNotice(Notices.ExitStopFailed(ex.Message)); setExiting(false); }
         }
 
         bool Matches(WorkbenchItem i) => filter switch
@@ -276,38 +298,40 @@ public sealed class AppRoot : Component<AppServices>
         Element listContent;
         if (!snapshot.Loaded) listContent = Ui.Dim("正在恢复工作台和未完成任务…").Margin(Space.Xl);
         else if (snapshot.Items.Count == 0)
-            listContent = VStack(Space.Lg, TextBlock("放入文件，开始转换").SemiBold().FontSize(24),
+            listContent = VStack(Space.Lg, Title("放入文件，开始转换"),
                 Ui.Dim("拖入文件或文件夹，然后在右侧选择输出格式。").TextWrapping(TextWrapping.Wrap),
                 Button("添加文件", () => Run(ImportFilesAsync)).AccentButton().HAlign(HorizontalAlignment.Left)
+                    .ToolTip(UiText.AddFilesTip)
                     .IsEnabled(settingsLoaded && !exiting && !folderScanning))
                 .Margin(Space.Xl).VAlign(VerticalAlignment.Center);
         else if (visible.Count == 0) listContent = Ui.Dim("此筛选下没有任务。").Margin(Space.Xl);
         else
-            listContent = LazyVStack(visible, item => item.Id.ToString(), (item, _) =>
+            listContent = (LazyVStack(visible, item => item.Id.ToString(), (item, _) =>
             {
                 var id = item.Id;
                 return TaskRow.Render(item, snapshot.Selected.Contains(id), snapshot.Paused,
-                    () => store.Select(id), () => store.Select(id, true),
-                    () => Run(() => store.RemoveAsync([id])), () => Run(() => store.CancelAsync(id)),
-                    () => Run(async () => { await store.CopyAsync(id); setFilter(0); }),
-                    () => Run(() => store.MoveQueuedAsync(id, -1)), () => Run(() => store.MoveQueuedAsync(id, 1)),
-                    () => Run(() => store.RetryAsync(id)), () => Run(() => store.EditQueuedAsync(id)),
-                    () => { if (item.Execution?.Output?.FinalPath is { } path) Run(() => LauncherInterop.OpenAsync(path)); },
-                    () =>
-                    {
-                        if (item.Execution?.Output?.FinalPath is { } path)
-                            Run(() => { LauncherInterop.RevealInExplorer(path); return Task.CompletedTask; });
-                    },
-                    () => { if (item.Execution?.Output?.FinalPath is { } path) Run(() => { LauncherInterop.CopyText(path); return Task.CompletedTask; }); },
-                    () => setDetailsId(id));
-            }) with { Spacing = Space.Md };
+                    new TaskRowActions(
+                        () => store.Select(id), () => store.Select(id, true),
+                        () => Run(() => store.RemoveAsync([id])), () => setCancelId(id),
+                        () => Run(async () => { await store.CopyAsync(id); setFilter(0); }),
+                        () => Run(() => store.MoveQueuedAsync(id, -1)), () => Run(() => store.MoveQueuedAsync(id, 1)),
+                        () => Run(() => store.RetryAsync(id)), () => Run(() => store.EditQueuedAsync(id)),
+                        () => { if (item.Execution?.Output?.FinalPath is { } path) Run(() => LauncherInterop.OpenAsync(path)); },
+                        () =>
+                        {
+                            if (item.Execution?.Output?.FinalPath is { } path)
+                                Run(() => { LauncherInterop.RevealInExplorer(path); return Task.CompletedTask; });
+                        },
+                        () => { if (item.Execution?.Output?.FinalPath is { } path) Run(() => { LauncherInterop.CopyText(path); return Task.CompletedTask; }); },
+                        () => setDetailsId(id)));
+            }) with { Spacing = Space.Md }).LayoutAnimation();
 
         var canImport = snapshot.Loaded && settingsLoaded && !exiting;
         var toolbar = FlexRow(
-            Ui.WithAccelerator(Button("添加文件", () => Run(ImportFilesAsync)).AutomationName("添加文件")
-                .IsEnabled(canImport && !folderScanning), VirtualKey.O, VirtualKeyModifiers.Control),
-            Ui.WithAccelerator(Button("添加文件夹", () => Run(ImportFolderAsync)).AutomationName("添加文件夹")
-                .IsEnabled(canImport && !folderScanning), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift),
+            Ui.WithAccelerator(Ui.IconTextButton("\uE8A5", UiText.AddFiles, () => Run(ImportFilesAsync))
+                .ToolTip(UiText.AddFilesTip).IsEnabled(canImport && !folderScanning), VirtualKey.O, VirtualKeyModifiers.Control),
+            Ui.WithAccelerator(Ui.IconTextButton("\uE8F4", UiText.AddFolder, () => Run(ImportFolderAsync))
+                .ToolTip(UiText.AddFolderTip).IsEnabled(canImport && !folderScanning), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift),
             CheckBox(recursiveFolderImport, setRecursiveFolderImport, "包含子文件夹")
                 .AutomationName("递归扫描子文件夹").IsEnabled(canImport && !folderScanning),
             Button("取消扫描", () => _folderScan?.Cancel()).SubtleButton().IsEnabled(folderScanning)
@@ -318,18 +342,18 @@ public sealed class AppRoot : Component<AppServices>
         var filters = ComboBox(new[] { "全部", "待开始", "进行中", "已完成", "需要处理" }, filter, setFilter)
             .Width(140).AutomationName("筛选任务");
         var selectionBar = Grid(columns: [GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
-            Ui.Dim($"{snapshot.Items.Count} 个项目 · 已选 {selected.Count} 项").FontSize(12).VAlign(VerticalAlignment.Center).Grid(column: 0),
+            Ui.DimCaption($"{snapshot.Items.Count} 个项目 · 已选 {selected.Count} 项").VAlign(VerticalAlignment.Center).Grid(column: 0),
             Button("移除已选", () => Run(() => store.RemoveAsync(selectedIds))).SubtleButton()
                 .IsEnabled(selected.Any(i => i.CanRemove)).ToolTip("仅移除待开始或已经结束的项目；运行中的任务请取消。").Grid(column: 1),
             filters.Grid(column: 2));
         var taskSurface = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Auto, GridSize.Star()],
             toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Md),
-            selectionBar.Grid(row: 1).Margin(0, 0, 0, Space.Md), listContent.Grid(row: 2)).Set(ConfigureDrop);
+            selectionBar.Grid(row: 1).Margin(0, 0, 0, Space.Md), listContent.Grid(row: 2));
         var inspector = Component<OutputSettingsPanel, OutputSettingsProps>(new OutputSettingsProps(selected, presets,
             mutate => Run(() => ApplyAsync(mutate)), () => Run(PickOutputAsync),
             () => Run(() => ApplyAsync(o => o with { OutputDirectory = null })), SavePresetAsync,
-            () => Run(ResetOptionsAsync)));
-        var main = Grid(columns: [GridSize.Star(), GridSize.Px(320)], rows: [GridSize.Star()],
+            () => setResetOpen(true)));
+        var main = Grid(columns: [GridSize.Star(3), GridSize.Star(2)], rows: [GridSize.Star()],
             taskSurface.Grid(column: 0), inspector.Grid(column: 1)) with { ColumnSpacing = Space.Lg };
 
         var startItems = snapshot.Items.Where(i => i.CanStart && (selectedIds.Length == 0 || selectedIds.Contains(i.Id))).ToArray();
@@ -339,7 +363,7 @@ public sealed class AppRoot : Component<AppServices>
         var active = snapshot.Items.Count(i => i.Execution?.IsActive == true);
         var footer = Grid(columns: [GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
             VStack(2, TextBlock($"{completed} 项完成 · {failed} 项需处理 · {active} 项转换中 · {queued} 项等待").SemiBold(),
-                Ui.Dim(snapshot.Paused ? "后续任务已暂停，当前转换继续。" : "源文件始终保留；同名输出自动使用新名称。").FontSize(12)).Grid(column: 0),
+                Ui.DimCaption(snapshot.Paused ? "后续任务已暂停，当前转换继续。" : "源文件始终保留；同名输出自动使用新名称。")).Grid(column: 0),
             Button(snapshot.Paused ? "继续队列" : "暂停后续任务", () => Run(store.TogglePauseAsync))
                 .AutomationName("队列控制").IsEnabled(snapshot.Loaded && !snapshot.Busy && !exiting).Margin(Space.Sm, 0).Grid(column: 1),
             Button(snapshot.Busy ? "正在加入…" : $"开始转换 {startItems.Length} 项", () => Run(() => store.StartAsync(startItems.Select(i => i.Id).ToArray())))
@@ -354,12 +378,13 @@ public sealed class AppRoot : Component<AppServices>
         if (folderScanning)
             banners.Add(InfoBar("正在扫描文件夹", $"已发现 {scanFound} 个媒体文件；可通过工具栏取消扫描。")
                 .Informational().IsClosable(false));
-        if (snapshot.Error is { } error) banners.Add(InfoBar("提示", error).Warning().IsClosable(true).Closed(() => store.SetError(null)));
+        if (snapshot.Notice is { } shown) banners.Add(Ui.NoticeBar(shown, () => store.SetNotice(null)));
         if (snapshot.CanUndo)
             banners.Add(Component<UndoNotification, UndoNotificationProps>(
                 new(snapshot.UndoCount, () => Run(store.UndoAsync), () => store.DismissUndo())));
         var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
-            VStack(Space.Sm, banners.ToArray()).Grid(row: 0).Margin(0, 0, 0, Space.Sm), main.Grid(row: 1), footer.Grid(row: 2)).Padding(Space.Lg);
+            VStack(Space.Sm, banners.ToArray()).LayoutAnimation().Grid(row: 0).Margin(0, 0, 0, Space.Sm),
+            main.Grid(row: 1), footer.Grid(row: 2)).Padding(Space.Lg);
         var top = TitleBarView.Render(new TitleBarProps(() => OpenDialog("settings"), () => OpenDialog("about"), () => OpenDialog("history"), SettingsEnabled: settingsLoaded));
         Element overlay = Empty();
         if (dialog == "settings") overlay = Component<SettingsDialog, SettingsDialogProps>(new(services, settings, SaveSettingsAsync, () => setDialog(null))).WithKey("settings-" + dialogKey);
@@ -385,40 +410,95 @@ public sealed class AppRoot : Component<AppServices>
             Detail("流映射", expected is null ? null : $"{expected.VideoStreamCount} 视频 / {expected.AudioStreamCount} 音频 / {expected.StreamCount} 总流");
             Detail("核心哈希", attempt?.CoreHash);
             Detail("验证", row?.Output?.VerificationSummary);
+            if (entry.Issues.Count > 0)
+                Detail(UiText.CompatibilityLabel, string.Join("\n", entry.Issues.Select(WorkbenchRules.IssueText)));
             Detail("错误", failure is null ? null : $"{failure.Code}: {failure.TechnicalDetail}");
             if (candidate?.Arguments.Count > 0)
-                details.Add(TextBlock("只读参数：\n" + string.Join(" ", candidate.Arguments))
-                    .FontSize(12).TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true));
+                details.Add(Caption("只读参数：\n" + string.Join(" ", candidate.Arguments))
+                    .TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true));
             if (!string.IsNullOrWhiteSpace(attempt?.StderrTail))
-                details.Add(TextBlock("FFmpeg 尾部：\n" + attempt.StderrTail)
-                    .FontSize(12).TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true));
+                details.Add(Caption("FFmpeg 尾部：\n" + attempt.StderrTail)
+                    .TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true));
             details.Add(Button("导出脱敏诊断报告", () => Run(() => ExportDiagnosticsAsync(entry))).SubtleButton()
                 .AutomationName("导出脱敏诊断报告"));
             overlay = DialogChrome.Render("技术详情", VStack(Space.Md, details.ToArray()), "关闭", null,
                 _ => DialogChrome.DeferClose(() => setDetailsId(null)), contentWidth: 620, maxHeight: 560);
+        }
+        if (cancelId is Guid cancelTarget && snapshot.Items.FirstOrDefault(i => i.Id == cancelTarget) is { } cancelEntry)
+        {
+            overlay = DialogChrome.Render(UiText.CancelConfirmTitle, VStack(Space.Md,
+                TextBlock(UiText.CancelConfirmBody).TextWrapping(TextWrapping.Wrap),
+                Ui.DimCaption(cancelEntry.Draft.FileName)),
+                UiText.Confirm, UiText.CancelAction,
+                result =>
+                {
+                    if (result == ContentDialogResult.Primary)
+                    {
+                        Run(() => store.CancelAsync(cancelTarget));
+                        store.SetNotice(Notices.CancelRequested());
+                    }
+                    DialogChrome.DeferClose(() => setCancelId(null));
+                }, contentWidth: 480);
+        }
+        if (resetOpen)
+        {
+            overlay = DialogChrome.Render(UiText.ResetConfirmTitle, VStack(Space.Md,
+                TextBlock(UiText.ResetConfirmBody).TextWrapping(TextWrapping.Wrap)),
+                UiText.ResetConfirmAction, UiText.Cancel,
+                result =>
+                {
+                    if (result == ContentDialogResult.Primary) Run(ResetOptionsAsync);
+                    DialogChrome.DeferClose(() => setResetOpen(false));
+                }, contentWidth: 480);
         }
         if (exitOpen) overlay = DialogChrome.Render("退出转换器？", VStack(Space.Md,
             TextBlock(exiting ? "正在停止任务并安全保存，请稍候…" : "仍有任务在执行。取消后临时输出会清理，源文件和已完成结果均保留。")
                 .TextWrapping(TextWrapping.Wrap),
             Button("取消任务并退出", () => Run(CancelAndExitAsync)).IsEnabled(!exiting)), "继续转换", null,
             _ => { if (!exiting) DialogChrome.DeferClose(() => setExitOpen(false)); }, contentWidth: 480, primaryEnabled: !exiting);
-        return Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
-            top.Grid(row: 0), content.Grid(row: 1), overlay.Grid(row: 1)).RequestedTheme(AppTheme.Resolve(settings.Theme)).Background(Theme.SolidBackground);
+        var windowRoot = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
+                top.Grid(row: 0), content.Grid(row: 1), overlay.Grid(row: 1))
+            .RequestedTheme(AppTheme.Resolve(settings.Theme));
+        // Mica follows the OS theme, so it may only show through in follow-system mode where text
+        // contrast holds; an explicit Light/Dark choice paints the theme's solid base instead.
+        var micaShows = AppChrome.MicaEnabled && settings.Theme is null or "" or "System";
+        if (!micaShows) windowRoot = windowRoot.Background(Theme.SolidBackground);
+        Element dropHint = dragOver
+            ? Border(VStack(Space.Sm, Icon(FontIcon("\uE898", fontSize: 24)),
+                    TextBlock(UiText.DropHint).SemiBold()).HAlign(HorizontalAlignment.Center))
+                .Background(Theme.LayerFill).WithBorder(Theme.Accent, 2).CornerRadius(8).Padding(Space.Xl)
+                .VAlign(VerticalAlignment.Center).HAlign(HorizontalAlignment.Center).IsHitTestVisible(false)
+            : Empty();
+        return Grid(columns: [GridSize.Star()], rows: [GridSize.Star()],
+            windowRoot.Grid(row: 0), dropHint.Grid(row: 1)).Set(ConfigureDrop);
     }
 
     private void ConfigureDrop(FrameworkElement target)
     {
         target.AllowDrop = true;
+        target.DragEnter -= DragEnter; target.DragEnter += DragEnter;
+        target.DragLeave -= DragLeave; target.DragLeave += DragLeave;
         target.DragOver -= DragOver; target.DragOver += DragOver;
         target.Drop -= Drop; target.Drop += Drop;
     }
+    private void DragEnter(object sender, DragEventArgs e)
+    {
+        if (e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            _dropChanged?.Invoke(true);
+        }
+    }
+    private void DragLeave(object sender, DragEventArgs e) => _dropChanged?.Invoke(false);
     private static void DragOver(object sender, DragEventArgs e)
     { if (e.DataView.Contains(StandardDataFormats.StorageItems)) e.AcceptedOperation = DataPackageOperation.Copy; }
     private async void Drop(object sender, DragEventArgs e)
     {
+        _dropChanged?.Invoke(false);
         var deferral = e.GetDeferral();
         try
         {
+            if (_modal) return;
             if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
             var items = await e.DataView.GetStorageItemsAsync();
             var paths = new List<string>();
@@ -428,7 +508,7 @@ public sealed class AppRoot : Component<AppServices>
                     await _importFolder(folder.Path);
             if (_import is not null) await _import(paths);
         }
-        catch (Exception ex) { _error?.Invoke("导入失败：" + ex.Message); }
+        catch (Exception ex) { _notice?.Invoke(Notices.ImportFailed(ex.Message)); }
         finally { deferral.Complete(); }
     }
 }

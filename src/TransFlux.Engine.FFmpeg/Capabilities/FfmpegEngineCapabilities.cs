@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using TransFlux.Application.Contracts;
+using TransFlux.Domain.Media;
 using TransFlux.Engine.FFmpeg.Core;
 using TransFlux.Engine.FFmpeg.Processes;
 
@@ -89,6 +90,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
 
             var encoders = await RunListAsync(new[] { "-encoders" }, timeout, ct).ConfigureAwait(false);
             var decoders = await RunListAsync(new[] { "-decoders" }, timeout, ct).ConfigureAwait(false);
+            var codecs = await RunCodecsAsync(encoders, timeout, ct).ConfigureAwait(false);
             var hwaccels = await RunHwaccelsAsync(timeout, ct).ConfigureAwait(false);
             var filters = await RunListAsync(new[] { "-filters" }, timeout, ct).ConfigureAwait(false);
             var pixelFormats = await RunListAsync(new[] { "-pix_fmts" }, timeout, ct).ConfigureAwait(false);
@@ -97,6 +99,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             {
                 Encoders = encoders,
                 Decoders = decoders,
+                Codecs = codecs,
                 Hwaccels = hwaccels,
                 Filters = filters,
                 PixelFormats = pixelFormats,
@@ -115,9 +118,16 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-n", "-loglevel", "error" };
         if (request.Direct3DAdapterIndex is < 0)
             return new HardwareValidationResult { FailureReason = "显卡索引无效。" };
-        HardwareEncoding.AddDevice(arguments, request.EncoderName, request.Direct3DAdapterIndex);
+        try
+        {
+            HardwareEncoding.AddDevice(arguments, request.EncoderName, request.Direct3DAdapterIndex);
+        }
+        catch (Exception ex)
+        {
+            return new HardwareValidationResult { FailureReason = ex.Message };
+        }
         arguments.Add("-f"); arguments.Add("lavfi");
-        arguments.Add("-i"); arguments.Add($"testsrc2=duration=1:size={Math.Max(2, request.Width)}x{Math.Max(2, request.Height)}:rate=30");
+        arguments.Add("-i"); arguments.Add($"testsrc2=duration=1:size={Evenize(request.Width)}x{Evenize(request.Height)}:rate=30");
         if (request.Direct3DAdapterIndex is not null)
         {
             arguments.Add("-vf"); arguments.Add(HardwareEncoding.UploadFilter(request.EncoderName));
@@ -127,9 +137,9 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             arguments.Add("-pix_fmt"); arguments.Add(request.PixelFormat!);
         }
         arguments.Add("-c:v"); arguments.Add(request.EncoderName);
-        if (request.EncoderName == "h264_nvenc") arguments.AddRange(["-preset", "p4", "-rc", "vbr", "-cq", "23"]);
+        if (request.EncoderName == "h264_nvenc") arguments.AddRange(["-preset", "p4", "-rc", "constqp", "-qp", "23"]);
         if (request.EncoderName == "h264_qsv") arguments.AddRange(["-preset", "medium", "-global_quality", "23"]);
-        if (request.EncoderName == "h264_amf") arguments.AddRange(["-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"]);
+        if (request.EncoderName == "h264_amf") arguments.AddRange(["-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23", "-qp_b", "23"]);
         arguments.Add("-t"); arguments.Add("1");
         arguments.Add("-f"); arguments.Add("null"); arguments.Add("-");
 
@@ -165,6 +175,62 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         return ParseNames(result.Stdout, skipFirstToken: true);
     }
 
+    private async Task<IReadOnlyList<FfmpegCodecInfo>> RunCodecsAsync(IReadOnlyList<string> encoders, TimeSpan timeout, CancellationToken ct)
+    {
+        var arguments = new List<string> { "-hide_banner", "-nostdin", "-codecs" };
+        var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 8 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        return ParseCodecs(result.Stdout, encoders);
+    }
+
+    internal static IReadOnlyList<FfmpegCodecInfo> ParseCodecs(string output, IReadOnlyList<string> encoders)
+    {
+        var codecs = new List<FfmpegCodecInfo>();
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('-')) continue;
+            var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 3) continue;
+            var flags = parts[0];
+            if (flags.Length < 3 || !IsFlagToken(flags)) continue;
+            if (flags[0] != 'D' && flags[1] != 'E') continue;
+            var kind = flags[2] switch
+            {
+                'V' => MediaKind.Video,
+                'A' => MediaKind.Audio,
+                'S' => MediaKind.Subtitle,
+                'D' => MediaKind.Data,
+                'T' => MediaKind.Attachment,
+                _ => MediaKind.Unknown,
+            };
+            if (kind == MediaKind.Unknown) continue;
+            var name = parts[1];
+            var description = parts[2];
+            var marker = description.IndexOf(" (encoders:", StringComparison.Ordinal);
+            if (marker >= 0) description = description[..marker];
+            var hardware = encoders
+                .Where(encoder => encoder.StartsWith(name + "_", StringComparison.OrdinalIgnoreCase))
+                .Where(encoder => HardwareEncoderSuffixes.Contains(encoder[(name.Length + 1)..]))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            codecs.Add(new FfmpegCodecInfo
+            {
+                Name = name,
+                LongName = description,
+                Kind = kind,
+                CanDecode = flags[0] == 'D',
+                CanEncode = flags[1] == 'E',
+                HardwareEncoders = hardware,
+            });
+        }
+        return codecs;
+    }
+
+    private static readonly HashSet<string> HardwareEncoderSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "nvenc", "qsv", "amf", "vaapi", "videotoolbox", "v4l2m2m", "d3d12va", "mf", "vulkan",
+    };
+
     private async Task<IReadOnlyList<string>> RunHwaccelsAsync(TimeSpan timeout, CancellationToken ct)
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-hwaccels" };
@@ -194,6 +260,8 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             if (tokens.Length < 2) continue;
             if (skipFirstToken)
             {
+                // Flag legend lines like "V..... = Video" put "=" in the name slot.
+                if (tokens[1] == "=") continue;
                 var name = tokens[1];
                 if (IsFlagToken(tokens[0]) && !names.Contains(name)) names.Add(name);
             }
@@ -209,6 +277,13 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             if (!(char.IsLetter(c) || c == '.' || c == '_' || c == '-')) return false;
         }
         return true;
+    }
+
+    /// <summary>Clamps to at least 2 and rounds down to even for yuv420 test patterns.</summary>
+    private static int Evenize(int value)
+    {
+        value = Math.Max(2, value);
+        return value - (value & 1);
     }
 
     private static string Trim(string value) => value.Length <= 1000 ? value : value[^1000..];

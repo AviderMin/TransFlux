@@ -99,8 +99,7 @@ public static class MediaCompatibility
 
         foreach (var v in selected.Where(st => st.Kind == MediaKind.Video))
         {
-            bool ok = OutputFormatCatalog.VideoCodecs(r.Container).Any(codec => codec.ProbeName() == v.Codec)
-                || r.Container is ContainerFormat.Mkv or ContainerFormat.Webm && v.Codec == "vp8";
+            bool ok = OutputFormatCatalog.RemuxVideoCodecs(r.Container).Contains(v.Codec);
             if (!ok)
                 issues.Add(CompatibilityIssue.Block("REMUX_VIDEO",
                     $"Video codec {v.Codec} cannot be remuxed to {r.Container.DisplayName()}."));
@@ -109,8 +108,7 @@ public static class MediaCompatibility
         }
         foreach (var a in selected.Where(st => st.Kind == MediaKind.Audio))
         {
-            bool ok = OutputFormatCatalog.AudioCodecs(r.Container).Any(codec => codec.ProbeName() == a.Codec)
-                || r.Container == ContainerFormat.Mkv && a.Codec is "pcm_s32le" or "ac3" or "eac3";
+            bool ok = OutputFormatCatalog.RemuxAudioCodecs(r.Container).Contains(a.Codec);
             if (!ok)
                 issues.Add(CompatibilityIssue.Block("REMUX_AUDIO",
                     $"Audio codec {a.Codec} cannot be remuxed to {r.Container.DisplayName()}."));
@@ -118,15 +116,49 @@ public static class MediaCompatibility
         foreach (var sub in selected.Where(st => st.Kind == MediaKind.Subtitle))
         {
             if (sub.IsBitmapSubtitle)
-                issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE_BITMAP",
-                    "Bitmap subtitles are not supported in the first release."));
+            {
+                if (!OutputFormatCatalog.RemuxBitmapSubtitles(r.Container).Contains(sub.Codec))
+                    issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE_BITMAP",
+                        $"Bitmap subtitle {sub.Codec} cannot be copied to {r.Container.DisplayName()}."));
+            }
             else if (r.Container is ContainerFormat.Mp4 or ContainerFormat.Mov && sub.Codec != "mov_text"
                 || r.Container == ContainerFormat.Webm && sub.Codec != "webvtt")
+            {
                 issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE",
                     $"Subtitle codec {sub.Codec} cannot be copied to {r.Container.DisplayName()}."));
+            }
         }
-        if (s.ColorClassification is ColorClassification.DolbyVision)
-            issues.Add(CompatibilityIssue.Block("REMUX_DV", "Dolby Vision remux is blocked in the first release."));
+        if (s.ColorClassification is ColorClassification.DolbyVision && !CanRemuxDolbyVision(s.PrimaryVideo, r.Container, out var dvReason))
+            issues.Add(CompatibilityIssue.Block("REMUX_DV", dvReason!));
+    }
+
+    /// <summary>
+    /// Graded Dolby Vision rule: stream-copy remux to MKV is allowed when the DOVI
+    /// configuration record shows a backward-compatible base layer (profile 8 / BL
+    /// compatibility id &gt; 0) so the RPU survives via copy. Profile 5/7 (no compatible
+    /// base layer) and unknown profiles are refused with a specific reason.
+    /// </summary>
+    public static bool CanRemuxDolbyVision(StreamDescriptor? video, ContainerFormat container, out string? reason)
+    {
+        if (container != ContainerFormat.Mkv)
+        {
+            reason = "Dolby Vision 目前仅支持转封装到 MKV（stream copy 保留 RPU），其他容器已阻止。";
+            return false;
+        }
+        if (video is null)
+        {
+            reason = "无法识别 Dolby Vision 配置（缺少 DOVI configuration record），已阻止转封装。";
+            return false;
+        }
+        if (video.DvProfile == 8 || video.DvBlSignalCompatibilityId is > 0)
+        {
+            reason = null;
+            return true;
+        }
+        reason = video.DvProfile is 5 or 7
+            ? $"Dolby Vision Profile {video.DvProfile} 无兼容基底（BL compatibility id=0），暂不支持转封装，请使用专业工具处理。"
+            : "无法识别 Dolby Vision profile（缺少 DOVI configuration record），已阻止转封装。";
+        return false;
     }
 
     /// <summary>
@@ -135,17 +167,22 @@ public static class MediaCompatibility
     /// </summary>
     public static IReadOnlyList<StreamDescriptor> SelectRemuxStreams(ConversionRequest r, SourceSnapshot s)
     {
+        // Matroska keeps font/attachment streams (ASS/SSA styling depends on them);
+        // other containers cannot carry them, so they are dropped there.
+        bool KeepAttachments(ContainerFormat c) => c == ContainerFormat.Mkv;
+
         if (r.SelectedStreamIndices.Count == 0)
         {
-            return s.Streams.Where(IsRemuxStream).ToList();
+            return s.Streams.Where(st => IsRemuxStream(st, KeepAttachments(r.Container))).ToList();
         }
 
         var indices = r.SelectedStreamIndices.ToHashSet();
-        return s.Streams.Where(st => indices.Contains(st.SourceIndex) && IsRemuxStream(st)).ToList();
+        return s.Streams.Where(st => indices.Contains(st.SourceIndex) && IsRemuxStream(st, KeepAttachments(r.Container))).ToList();
     }
 
-    private static bool IsRemuxStream(StreamDescriptor st) =>
+    private static bool IsRemuxStream(StreamDescriptor st, bool keepAttachments) =>
         st.Kind is MediaKind.Audio or MediaKind.Subtitle
+        || st.Kind == MediaKind.Attachment && keepAttachments
         || st.Kind == MediaKind.Video && !st.IsAttachedPicture;
 
     public static StreamDescriptor? SelectPrimaryVideo(ConversionRequest r, SourceSnapshot s)

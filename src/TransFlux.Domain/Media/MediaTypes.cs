@@ -11,7 +11,9 @@ public enum MediaKind
 }
 
 /// <summary>Colour classification derived from transfer/bit-depth/side data.
-/// Unknown or conflicting values must never be treated as SDR.</summary>
+/// Streams with no explicit colour tags are classified by a documented heuristic
+/// (plain 8-bit 4:2:0 is treated as SDR BT.709); genuinely unknown or conflicting
+/// values are never forced into an SDR class.</summary>
 public enum ColorClassification
 {
     Unknown = 0,
@@ -23,4 +25,6 @@ public enum ColorClassification
     DolbyVision = 6,
     WideGamut = 7,
     Conflicting = 8,
+    /// <summary>HLG (ARIB STD-B67) transfer. HDR; only stream-copy remux is allowed.</summary>
+    Hlg = 9,
 }

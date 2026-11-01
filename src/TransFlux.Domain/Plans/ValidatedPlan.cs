@@ -25,7 +25,16 @@ public sealed record ExpectedOutput
     public int StreamCount { get; init; }
     public int VideoStreamCount { get; init; }
     public int AudioStreamCount { get; init; }
+    public int AttachmentStreamCount { get; init; }
     public bool FastStart { get; init; }
+    // Colour passthrough expectations (null = not asserted).
+    public string? ColorPrimaries { get; init; }
+    public string? ColorTransfer { get; init; }
+    public string? ColorSpace { get; init; }
+    public string? ColorRange { get; init; }
+    /// <summary>Per-output-track language tags in mapping order ("und"/empty = not asserted).</summary>
+    public IReadOnlyList<string> AudioLanguages { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> SubtitleLanguages { get; init; } = Array.Empty<string>();
 }
 
 public sealed record ResourceNeeds
@@ -40,7 +49,7 @@ public sealed record ResourceNeeds
 public sealed record ValidatedPlan
 {
     public required Guid PlanId { get; init; }
-    public int PlanSchemaVersion { get; init; } = 1;
+    public int PlanSchemaVersion { get; init; } = 2;
     public required string RequestHash { get; init; }
     public required string CoreHash { get; init; }
     public required string CapabilityHash { get; init; }

@@ -2,6 +2,7 @@ using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using TransFlux.App.Components;
 using TransFlux.App.Hosting;
+using TransFlux.App.Theming;
 
 // TransFlux entry point. The composition root is built before the window opens; the
 // Reactor shell is the single root component (docs/04: Reactor is the UI core).
@@ -12,10 +13,10 @@ ReactorApp.Run<TransFluxRoot>(
         Title = "TransFlux",
         Width = 1280,
         Height = 820,
-        MinWidth = 920,
-        MinHeight = 640,
+        MinWidth = Space.WindowMinWidth,
+        MinHeight = Space.WindowMinHeight,
         ExtendsContentIntoTitleBar = true,
-        Backdrop = BackdropChoice.Of(OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? BackdropKind.Mica : BackdropKind.None),
+        Backdrop = BackdropChoice.Of(AppChrome.MicaEnabled ? BackdropKind.Mica : BackdropKind.None),
     },
     configure: _ => { });
 

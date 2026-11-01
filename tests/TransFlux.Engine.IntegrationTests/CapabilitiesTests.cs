@@ -28,6 +28,12 @@ public class CapabilitiesTests
         Assert.Contains("yuv420p", info.PixelFormats);
         Assert.NotEmpty(info.Filters);
         Assert.NotEmpty(info.Hwaccels);
+        Assert.NotEmpty(info.Codecs);
+        var h264 = Assert.Single(info.Codecs, c => c.Name == "h264");
+        Assert.True(h264.CanDecode);
+        Assert.True(h264.CanEncode);
+        Assert.Contains("h264_nvenc", h264.HardwareEncoders);
+        Assert.Contains(info.Codecs, c => c.Name == "aac" && c.Kind == TransFlux.Domain.Media.MediaKind.Audio);
     }
 
     [Fact]

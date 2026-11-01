@@ -141,4 +141,76 @@ public static class UiText
     public const string HistoryConfirmClear = "确认清空";
     public const string Rejoin = "重新加入";
     public const string OpenFolder = "打开文件夹";
+
+    // ---- UI/UX fix round (2026-11-01) ----
+    // Notice titles and bodies shared by the four-level notification channel.
+    public const string PromptTitle = "提示";
+    public const string ErrorTitle = "出错";
+    public const string PresetTitle = "预设";
+    public const string SaveFailedTitle = "保存失败";
+    public const string SaveFailedPrefix = "保存失败：";
+    public const string SettingsLoadFailedTitle = "设置读取失败";
+    public const string SettingsLoadFailedBody = "已使用默认设置：";
+    public const string ImportFailedTitle = "导入失败";
+    public const string ImportFailedPrefix = "导入失败：";
+    public const string FolderScanFailedTitle = "文件夹导入失败";
+    public const string FolderScanFailedPrefix = "文件夹导入失败：";
+    public const string ExitStopFailedTitle = "退出失败";
+    public const string ExitStopFailedPrefix = "退出前停止任务失败：";
+    public const string ExitTimeout = "停止任务超时，仍有任务未结束。请稍后重试，或使用任务卡片逐项取消。";
+    public const string WorkbenchRestoreFailedTitle = "工作台恢复失败";
+    public const string WorkbenchRestoreFailedPrefix = "工作台恢复失败：";
+    public const string JobWatchFailedTitle = "任务状态读取失败";
+    public const string JobWatchFailedPrefix = "任务状态读取失败，请重新打开应用：";
+    public const string EnqueueFailedTitle = "任务加入失败";
+    public const string EnqueueFailedPrefix = "任务加入失败：";
+    public const string PersistFailedTitle = "工作台保存失败";
+    public const string PersistFailedPrefix = "工作台保存失败：";
+    public const string CancelRejectedTitle = "无法取消";
+    public const string CancelRejected = "任务已进入保存阶段或已经结束，无法取消；请等待状态更新。";
+    public const string CancelRequestedInfo = "已请求取消；卡片会保持到任务停止。";
+    public const string EditQueuedRejectedTitle = "无法移出队列";
+    public const string EditQueuedRejected = "任务已经开始，无法移出队列；可取消或复制为新任务。";
+    public const string SettingsStillLoading = "设置仍在加载，请稍后重试。";
+    public const string NothingImported = "未添加文件：文件可能已在待开始列表中、已不存在，或工作台仍在恢复。";
+    public const string ScanBusy = "正在扫描文件夹，请先取消或等待完成。";
+    public const string NoMediaFound = "未发现支持的媒体文件。";
+    public const string NoNewMedia = "未发现新的媒体文件；文件可能已在待开始列表中。";
+    public const string ScanCanceledFormat = "已取消文件夹扫描；已添加的 {0} 项保留。";
+    public const string ScanCanceled = "已取消文件夹扫描。";
+    public const string DiagnosticSaved = "诊断报告已保存。";
+    public const string CloseDialogFirst = "请先关闭当前对话框，再退出应用。";
+
+    // Workbench chrome copy.
+    public const string AppSubtitle = "格式转换工作台";
+    public const string DropHint = "松开以添加文件和文件夹";
+    public const string AddFilesTip = "添加文件（Ctrl+O）";
+    public const string AddFolderTip = "添加文件夹（Ctrl+Shift+O）";
+    public const string MoveUpTip = "在队列中上移";
+    public const string MoveDownTip = "在队列中下移";
+    public const string MoreIssuesFormat = "另有 {0} 条提示，请打开“技术详情”查看。";
+    public const string CompatibilityLabel = "兼容性提示";
+    public const string ResetConfirmTitle = "重置所选参数？";
+    public const string ResetConfirmBody = "将所选项目的输出参数恢复为默认值，并清除输出文件名、裁剪范围与音轨选择。";
+    public const string ResetConfirmAction = "重置参数";
+
+    // Settings dialog copy.
+    public const string SettingsDirtyNotice = "更改尚未保存。再次点击“放弃更改”将丢弃这些更改。";
+    public const string DiscardChanges = "放弃更改";
+
+    // Preset copy.
+    public const string PresetHint = "预设只填入参数；手动改动后会自动显示为“自定义”。";
+    public const string PresetCustomNotice = "“自定义”不是预设，仅表示当前参数与所有预设不同。";
+    public const string PresetNameRequired = "请填写预设名称。";
+    public const string PresetSaved = "已保存预设。";
+
+    // History dialog copy.
+    public const string HistoryLoadFailedTitle = "历史记录读取失败";
+    public const string HistoryCleared = "已清空历史记录。";
+    public const string HistoryClearFailedTitle = "清空历史失败";
+    public const string RejoinDone = "已重新加入工作台，正在读取媒体信息。";
+    public const string RejoinFailedExists = "无法重新加入：文件不存在或已在任务列表中。";
+    public const string RejoinFailedTitle = "重新加入失败";
+    public const string OpenOutputFailedTitle = "打开输出失败";
+    public const string RevealFailedTitle = "打开文件夹失败";
 }

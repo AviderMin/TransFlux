@@ -12,6 +12,8 @@ FFmpeg 文档说明硬件编译能力不代表当前机器可运行，实际支�
 
 每条流记录 index、codec_type/name、disposition、language/title、time_base、duration、start_time；视频记录宽高、SAR/DAR、rotation、pix_fmt、位深、color_range/space/transfer/primaries、HDR side data、avg/r_frame_rate；音频记录 channels/layout、sample_rate、bit_rate。全局时长和流时长分别保留，不用文件大小推算时长。
 
+HDR/DV side data 结构化解析（2026-11-01 修复）：mastering display（转为 x265 -master-display 语法）、maxCLL/maxFALL、DOVI configuration record 的 dv_profile 与 dv_bl_signal_compatibility_id 均为显式字段；FFmpeg 8 将 HDR 静态元数据挂在帧级 side data，探测固定追加 -show_frames -read_intervals %+#1 合并首帧数据。字体附件的 filename/mimetype 一并解析，供转封装重建。
+
 普通本地 probe 初始超时 15 秒、JSON 上限 8MiB，UNC 初始超时 30 秒；超限可由用户显式重试更高预算，但不能无限挂起或无限积累输出。缩略图按需生成，初始最长边 320px、单文件解码超时 5 秒；失败使用通用图标，不影响转换资格。解码像素数与异常大尺寸设明确上限并纳入恶意输入测试，不能只限制编码文件大小。
 
 缺失/`N/A`/零分母为 Unknown，不转成 0 后参与 ETA。排除 attached_pic 作为主视频，多个普通视频流需用户选择。识别 HDR 依赖 transfer、位深与 side data 组合；未知或冲突色彩标为需确认，不能自动当 SDR。输入指纹至少为规范化路径、长度、修改时间 UTC；不要求导入时哈希整个大文件，执行期间仍可能被改写，须在验证后再次检测。
@@ -41,7 +43,9 @@ FFmpeg 文档说明硬件编译能力不代表当前机器可运行，实际支�
 | MP3 / FLAC / AAC(ADTS) 音频 | 无 | 分别为 MP3 / FLAC / AAC | 无视频/字幕/附件 |
 | WAV 音频 | 无 | PCM 16-bit / PCM 24-bit | 同上 |
 | OGG / Opus 音频 | 无 | OGG：Vorbis/Opus；Opus：Opus | Opus 自动重采样到 48kHz，显式采样率需合法 |
-| 视频转封装 | 按容器兼容白名单复制 | 按容器兼容白名单复制 | MKV 文本字幕；MP4/MOV 仅已有 mov_text；WebM 仅已有 webvtt；位图字幕仍阻断 |
+| 视频转封装 | 按容器兼容白名单复制（MKV 含 mpeg2video/mpeg4/vc1/prores/theora/vp8/ffv1 等） | 按容器兼容白名单复制（MKV 含 ac3/eac3/truehd/mlp/dts/mp2；MP4/MOV 含 ac3/eac3） | MKV 文本字幕 + 位图字幕（PGS/DVB/DVD）直通；MP4/MOV 仅已有 mov_text；WebM 仅已有 webvtt；MKV 保留字体附件 |
+
+视频转码同样携带字幕（2026-11-01 修复）：可复制的流用 -c:s copy，其余转为目标容器字幕编码（MP4/MOV→mov_text，MKV 的 mov_text→srt，WebM→webvtt）；位图字幕只进 MKV（copy），其余容器跳过并警告。不做烧录、不导入外挂字幕（暂缓项见 docs/evidence/MEDIA-PIPELINE-FIXES.md）。Dolby Vision 分级：P8（有兼容基底）允许 MKV 转封装保留 RPU，P5/7 与未知 profile 阻断并说明原因；smpte432（DCI-P3）判宽色域而非 DV。
 
 界面和执行验证共用 Domain 的 OutputFormatCatalog，避免把容器与编码绑定成少量固定预设。
 Planner 按所选编码生成参数，Verifier 对所有支持的视频/音频编码以及容器族做检查并解码，不能只识别 H.264/AAC。
@@ -56,7 +60,8 @@ Planner 按所选编码生成参数，Verifier 对所有支持的视频/音频�
 界面提供“较小体积 / 均衡 / 更高画质”与单独速度档。CPU H.264 的初始候选映射为 CRF 26/23/20、preset medium；这只是待测起点。NVENC/QSV/AMF 分别用自身支持的质量/码率控制参数标定，参数不跨编码器照搬，尚未标定的组合不开放“质量等效”承诺。
 
 H.265 初始质量映射为 30/26/22，AV1/VP9 为 40/34/28；这些参数只是各编码器自己的默认档位，不承诺跨编码器质量相等。
-软件编码器分别为 libx264、libx265、libaom-av1、libvpx-vp9。新增 H.265/AV1/VP9 当前使用 CPU，H.264 保留原有硬件路径。
+软件编码器分别为 libx264、libx265、libaom-av1、libvpx-vp9。新增 H.265/AV1/VP9 当前使用 CPU，H.264 保留原有硬件路径；hevc_nvenc/hevc_qsv/hevc_amf/av1 硬件编码暂缓（见 docs/evidence/MEDIA-PIPELINE-FIXES.md）。
+NVENC 无目标码率时改用 -rc constqp -qp（原 -rc vbr -cq 无码率目标，语义未定义）；AMF cqp 补 -qp_b；libvpx-vp9 的 -cpu-used 按 5/4/2 映射（libvpx 上限 5），libaom-av1 保持 8/6/4；x265 不再硬编码线程池（-x265-params log-level=error）。
 
 自动模式只在通过同一质量档准入的候选中按预估完成时间选择；没有合格硬件则 CPU。硬件不能满足用户硬约束（10-bit 等）时不允许靠降规格通过。
 
@@ -77,7 +82,9 @@ ffmpeg -hide_banner -nostdin -n -loglevel warning
   -movflags +faststart -f mp4 <same-volume-attempt-temp-path>
 ```
 
-模板不含路径协议白名单、裁剪、缩放等完整策略，实际由 Compiler 补全。无音轨时省略 audio map 与编码选项；不使用 `-map ...?` 隐藏用户显式选中的流消失。多音轨按输出索引分别设置参数与 language/disposition。元数据默认清除自由标签和章节，保留/重建选中轨道 language、默认轨标记及必要媒体语义；保留标题/章节作为可选项，摘要说明可能含隐私。
+模板不含路径协议白名单、裁剪、缩放等完整策略，实际由 Compiler 补全。无音轨时省略 audio map 与编码选项；不使用 -map ...? 隐藏用户显式选中的流消失。未显式选流时保留全部音轨（含 MP4，多音轨不再截断）；多音轨按输出索引分别设置参数与 language/disposition。元数据默认清除自由标签和章节，但 language 与默认轨/强制轨标记始终以 -metadata:s:a:N language= 与 -disposition 显式重建（附件的 filename/mimetype 同理）；保留标题/章节作为可选项，摘要说明可能含隐私。
+
+色彩传递（2026-11-01 修复）：转码输出显式携带源 color_primaries/color_trc/colorspace/color_range。实测固定核心（Gyan 8.0.1）输出侧 -color_primaries/-color_trc 不生效，唯一全编码器（libx264/libx265/libvpx-vp9/libaom-av1/h264_nvenc）可靠的载体是 setparams= 滤镜段，故两者同时输出；Verifier 对 color_primaries/transfer/space 逐项抽查，color_range 的 tv 与 unspecified 视为等价（该核心对 MKV 源无法回写 tv 标记，实测见 evidence）。
 
 临时文件不能靠后缀推断 muxer，始终显式 `-f`。`-n` 防止覆盖已有文件，attempt 临时名唯一且核心不得覆盖源。`-nostdin` 表示不通过 `q` 控制退出；取消走受管理进程终止，残片删除，见 08。
 

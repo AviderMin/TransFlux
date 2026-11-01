@@ -165,17 +165,19 @@ public static class FfmpegCoreLocator
         });
     }
 
+    /// <summary>
+    /// Resolves a manifest entry strictly inside the manifest directory subtree (same
+    /// containment rule as runtimeFiles) so a tampered manifest cannot point at binaries
+    /// outside the shipped core folder.
+    /// </summary>
     private static string? ResolveRelative(string manifestDir, string relativePath)
     {
         var normalized = relativePath.Replace('/', Path.DirectorySeparatorChar);
-        var dir = new DirectoryInfo(manifestDir);
-        while (dir is not null)
-        {
-            var candidate = Path.GetFullPath(Path.Combine(dir.FullName, normalized));
-            if (File.Exists(candidate)) return candidate;
-            dir = dir.Parent;
-        }
-        return null;
+        var root = Path.GetFullPath(manifestDir);
+        var candidate = Path.GetFullPath(Path.Combine(root, normalized));
+        if (!candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            return null;
+        return File.Exists(candidate) ? candidate : null;
     }
 
     private static void VerifySha(string path, string expectedHex)

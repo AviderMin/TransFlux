@@ -6,7 +6,7 @@ namespace TransFlux.App.State;
 
 public sealed record WorkbenchSnapshot(
     IReadOnlyList<WorkbenchItem> Items, IReadOnlyList<Guid> Selected,
-    bool Paused, bool Loaded, bool Busy, string? Error, bool CanUndo, int UndoCount)
+    bool Paused, bool Loaded, bool Busy, Notice? Notice, bool CanUndo, int UndoCount)
 {
     public static readonly WorkbenchSnapshot Empty = new([], [], true, false, false, null, false, 0);
     public IReadOnlyList<WorkbenchItem> Selection => Items.Where(i => Selected.Contains(i.Id)).ToList();
@@ -37,7 +37,7 @@ public sealed class WorkbenchStore : IDisposable
     private System.Threading.Timer? _timer;
     private volatile bool _dirty;
     private bool _loaded, _busy, _disposed;
-    private string? _error;
+    private Notice? _notice;
     public Task? WatchTask { get; private set; }
 
     public WorkbenchStore(IJobService jobs, IMediaProbe probe, IWorkspacePersistence persistence,
@@ -64,7 +64,7 @@ public sealed class WorkbenchStore : IDisposable
             IReadOnlyList<WorkspaceEntry>? restored;
             try { restored = await _persistence.LoadAsync(_lifetime.Token).ConfigureAwait(false); }
             catch (Exception ex) when (ex is not OperationCanceledException)
-            { restored = null; SetError("工作台恢复失败：" + ex.Message); }
+            { restored = null; SetNotice(Notices.WorkbenchRestoreFailed(ex.Message)); }
             var saved = restored ?? [];
             lock (_gate)
                 foreach (var e in saved.DistinctBy(e => e.MediaId))
@@ -127,7 +127,7 @@ public sealed class WorkbenchStore : IDisposable
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetError("任务状态读取失败，请重新打开应用：" + ex.Message); }
+        catch (Exception ex) { SetNotice(Notices.JobWatchFailed(ex.Message)); }
     }
 
     public async Task<int> ImportAsync(IReadOnlyList<string> paths, ConversionOptions defaults)
@@ -187,7 +187,7 @@ public sealed class WorkbenchStore : IDisposable
             if (_busy || !_loaded) return;
             ready = BuildItems().Where(i => ids.Contains(i.Id) && i.CanStart).Select(i => i.Draft).ToList();
             if (ready.Count == 0) return;
-            _busy = true; _error = null;
+            _busy = true; _notice = null;
             foreach (var d in ready) Replace(d.MediaId, x => x with { Submitting = true });
         }
         Emit();
@@ -205,7 +205,7 @@ public sealed class WorkbenchStore : IDisposable
                         { Source = d.Snapshot!, Request = d.Options.ToRequest(d.MediaId) }, _lifetime.Token).ConfigureAwait(false);
                     lock (_gate) Replace(d.MediaId, x => x with { JobId = jobId, Submitting = false });
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException) { SetError("任务加入失败：" + ex.Message); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { SetNotice(Notices.EnqueueFailed(ex.Message)); }
             }
             // Never override a pause the user (or startup recovery) explicitly requested.
             if (!wasPaused && await PersistAsync().ConfigureAwait(false))
@@ -262,7 +262,7 @@ public sealed class WorkbenchStore : IDisposable
         var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);
         if (item?.Draft.JobId is not Guid jobId) return;
         var result = await _jobs.CancelAsync(jobId, _lifetime.Token).ConfigureAwait(false);
-        if (!result.Accepted) SetError("任务已进入保存阶段或已经结束，无法取消；请等待状态更新。");
+        if (!result.Accepted) SetNotice(Notices.CancelRejected());
         Emit();
     }
 
@@ -271,7 +271,7 @@ public sealed class WorkbenchStore : IDisposable
         var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);
         if (item?.Execution is not { State: JobState.Queued } row) return;
         if (!await _jobs.RemoveQueuedAsync(row.Job.JobId, _lifetime.Token).ConfigureAwait(false))
-        { SetError("任务已经开始，无法移出队列；可取消或复制为新任务。"); return; }
+        { SetNotice(Notices.EditQueuedRejected()); return; }
         lock (_gate) Replace(id, d => d with { JobId = null, Status = d.Snapshot is null ? DraftStatus.Probing : DraftStatus.Ready });
         Emit(); ProbeIfNeeded(id); await PersistAsync().ConfigureAwait(false);
     }
@@ -414,7 +414,7 @@ public sealed class WorkbenchStore : IDisposable
     }
     private List<WorkbenchItem> BuildItems() => _drafts.Select(d => new WorkbenchItem(d,
         d.JobId is Guid id ? _rows.GetValueOrDefault(id) : null)).ToList();
-    public void SetError(string? error) { lock (_gate) _error = error; Emit(); }
+    public void SetNotice(Notice? notice) { lock (_gate) _notice = notice; Emit(); }
     private void Emit()
     {
         lock (_gate)
@@ -422,7 +422,7 @@ public sealed class WorkbenchStore : IDisposable
             if (_disposed) return;
             _dirty = false;
             var next = new WorkbenchSnapshot(BuildItems(), _selected.ToArray(), _jobs.GetControl().Paused,
-                _loaded, _busy, _error, _undo.Count > 0, _undo.Count);
+                _loaded, _busy, _notice, _undo.Count > 0, _undo.Count);
             Volatile.Write(ref _snapshot, next);
         }
         _post(() => { if (!_disposed) _changed?.Invoke(); });
@@ -437,7 +437,7 @@ public sealed class WorkbenchStore : IDisposable
             await _persistence.SaveAsync(saved, CancellationToken.None).ConfigureAwait(false);
             return true;
         }
-        catch (Exception ex) { SetError("工作台保存失败：" + ex.Message); return false; }
+        catch (Exception ex) { SetNotice(Notices.PersistFailed(ex.Message)); return false; }
         finally { _saveGate.Release(); }
     }
     public void Dispose()
