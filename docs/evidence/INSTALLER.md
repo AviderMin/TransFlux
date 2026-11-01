@@ -1,8 +1,17 @@
 # Inno Setup installer — build & verification evidence
 
-Date: 2026-11-01. 当前构建：**1.0.0.7**；下方保留历史构建记录。
+Date: 2026-11-01. 当前构建：**1.0.0.8**；下方保留历史构建记录。
 
-## 当前构建 · 1.0.0.7（2026-11-01）
+## 当前构建 · 1.0.0.8（2026-11-01）
+
+- File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.8-x64.exe`
+- Size: **128,533,808 bytes / 122.58 MiB**；安装包及 payload 的 exe/dll FileVersion 均为 **1.0.0.8**。
+- SHA-256: `74DF601FDCD976C6B7C6E01FE4D77FD3EAFFA6069A7463183F241D6D639BE576`（同目录 `.sha256`）。
+- 使用 `pwsh -File tools/package-exe.ps1 -Version 1.0.0.8` 完成 x64 Release 自包含发布及 Inno Setup 编译，无警告或错误。构建日志：`artifacts/installer/x64/build-1.0.0.8.log`。
+- 包含当前代码与最新主界面 3:2 比例、诊断编解码器三列布局，见 [布局审查](UI-layout-balance.md)。布局修改后全量 366 项测试已通过；本次版本递增未重复功能测试。
+- 本次仅构建并检查版本/哈希，未执行安装/卸载，不覆盖用户现有安装。
+
+## 历史构建 · 1.0.0.7（2026-11-01）
 
 - File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.7-x64.exe`
 - Size: **122.56 MiB**；FileVersion **1.0.0.7**

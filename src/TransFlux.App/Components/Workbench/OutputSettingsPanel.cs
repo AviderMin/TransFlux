@@ -24,7 +24,11 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
     public override Element Render()
     {
         var p = Props;
-        var (advanced, setAdvanced) = UseState(false);
+        var wide = UseBreakpoint(1100);
+        var (videoOpen, setVideoOpen) = UseState(false);
+        var (audioOpen, setAudioOpen) = UseState(false);
+        var (outputOpen, setOutputOpen) = UseState(false);
+        var (presetOpen, setPresetOpen) = UseState(false);
         var (presetName, setPresetName) = UseState(string.Empty);
         var (notice, setNotice) = UseState<Notice?>(null);
         var selection = p.Selection;
@@ -34,9 +38,9 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
         bool Same<T>(Func<ConversionOptions, T> get) => options.Select(get).Distinct().Count() <= 1;
         int Index<T>(Func<ConversionOptions, T> get, int value) => Same(get) ? value : -1;
         void Apply(Func<ConversionOptions, ConversionOptions> mutate) { if (editable) p.Apply(mutate); }
-        Element Combo(string label, string[] items, int index, Action<int> change)
+        Element Combo(string label, string[] items, int index, Action<int> change, string placeholder = "多种值")
             => ComboBox(items, index, i => { if (i >= 0 && i < items.Length) change(i); })
-                .Header(label).PlaceholderText("多种值").AutomationName(label).IsEnabled(editable).HAlign(HorizontalAlignment.Stretch);
+                .Header(label).PlaceholderText(placeholder).AutomationName(label).IsEnabled(editable).HAlign(HorizontalAlignment.Stretch);
         // Optional numeric field: empty means auto (null), typed values are clamped by Range + callback.
         Element Number(string label, Func<ConversionOptions, double?> get, Func<ConversionOptions, double, ConversionOptions> mutate,
             double min, double max, double smallChange)
@@ -49,84 +53,99 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                 .Set(n => n.SmallChange = smallChange);
         }
         Element Pair(Element left, Element right)
-            => Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
-                left.Grid(column: 0), right.Grid(column: 1)) with { ColumnSpacing = Space.Md };
-        Element Group(string title, params Element[] fields)
-            => VStack(Space.Sm, new[] { (Element)SubHeading(title) }.Concat(fields).ToArray());
+            => wide ? Grid(columns: [GridSize.Star(), GridSize.Star()], rows: [GridSize.Auto],
+                left.Grid(column: 0), right.Grid(column: 1)) with { ColumnSpacing = Space.Md }
+                : VStack(Space.Md, left, right);
+        Element Section(string title, params Element[] fields)
+            => VStack(Space.Md, new[] { (Element)BodyStrong(title) }.Concat(fields).ToArray());
+        Element Group(string title, bool open, Action<bool> changed, params Element[] fields)
+            => Expander(title, open ? VStack(Space.Md, fields) : Empty(), isExpanded: open, onIsExpandedChanged: changed)
+                .AutomationName(title).HAlign(HorizontalAlignment.Stretch)
+                .Set(e => e.HorizontalContentAlignment = HorizontalAlignment.Stretch);
 
         var body = new List<Element>();
         Element outputFooter = Empty();
         if (selection.Count == 0) body.Add(Ui.Dim("选择文件后，在这里设置输出格式、质量和保存位置。").TextWrapping(TextWrapping.Wrap));
         else if (!editable) body.Add(Ui.Dim("执行参数已锁定。等待中的任务可移出队列编辑；其他任务可复制为新任务。").TextWrapping(TextWrapping.Wrap));
-        else body.Add(Ui.DimCaption("更改立即应用到已选项目；未修改的字段保持原值。").TextWrapping(TextWrapping.Wrap));
 
         if (selection.Count > 0)
         {
-            body.Add(Combo("媒体形式", ["视频", "音频"], Index(OutputTargets.IsAudio, OutputTargets.IsAudio(o) ? 1 : 0),
-                i => Apply(x => OutputTargets.WithMedia(x, i == 1))));
+            var formatFields = new List<Element>();
+            var mediaField = Combo("媒体形式", ["视频", "音频"], Index(OutputTargets.IsAudio, OutputTargets.IsAudio(o) ? 1 : 0),
+                i => Apply(x => OutputTargets.WithMedia(x, i == 1)));
             if (Same(OutputTargets.IsAudio))
             {
                 var containers = (OutputTargets.IsAudio(o) ? OutputFormatCatalog.AudioContainers : OutputFormatCatalog.VideoContainers).ToArray();
-                body.Add(Combo("容器格式", containers.Select(c => c.DisplayName()).ToArray(),
-                    Index(x => x.Container, Array.IndexOf(containers, o.Container)), i => Apply(x => OutputTargets.WithContainer(x, containers[i]))));
+                formatFields.Add(Pair(mediaField, Combo("容器格式", containers.Select(c => c.DisplayName()).ToArray(),
+                    Index(x => x.Container, Array.IndexOf(containers, o.Container)), i => Apply(x => OutputTargets.WithContainer(x, containers[i])))
+                    .ToolTip("切换容器仅调整不兼容的编码，其他参数保持不变。")));
                 if (Same(x => x.Container))
                 {
+                    Element? videoCodecField = null;
                     if (!OutputTargets.IsAudio(o))
                     {
                         var codecs = OutputFormatCatalog.VideoCodecs(o.Container).Append(VideoCodec.Copy).ToArray();
                         var currentVideo = o.Mode == ConversionMode.Remux ? VideoCodec.Copy : o.VideoCodec;
-                        body.Add(Combo("视频编码", codecs.Select(c => c.Name()).ToArray(),
-                            Index(x => x.Mode == ConversionMode.Remux ? VideoCodec.Copy : x.VideoCodec, Array.IndexOf(codecs, currentVideo)), i => Apply(x => OutputTargets.WithVideoCodec(x, codecs[i]))));
+                        videoCodecField = Combo("视频编码", codecs.Select(c => c.Name()).ToArray(),
+                            Index(x => x.Mode == ConversionMode.Remux ? VideoCodec.Copy : x.VideoCodec, Array.IndexOf(codecs, currentVideo)), i => Apply(x => OutputTargets.WithVideoCodec(x, codecs[i])));
                     }
                     if (Same(x => x.Mode) && o.Mode != ConversionMode.Remux)
                     {
                         var codecs = BasicAudioCodecs(o.Container);
-                        body.Add(Combo(OutputTargets.IsAudio(o) ? "编码格式" : "音频编码", codecs.Select(AudioLabel).ToArray(),
+                        var audioCodecField = Combo(OutputTargets.IsAudio(o) ? "编码格式" : "音频编码", codecs.Select(AudioLabel).ToArray(),
                             Index(x => OutputTargets.IsPcm(x.AudioCodec) ? AudioCodec.PcmS16le : x.AudioCodec, BasicAudioIndex(o.AudioCodec, codecs)),
                             i => Apply(x => codecs[i] == AudioCodec.PcmS16le && OutputTargets.IsPcm(x.AudioCodec)
-                                ? x : OutputTargets.WithAudioCodec(x, codecs[i]))));
+                                ? x : OutputTargets.WithAudioCodec(x, codecs[i])));
+                        formatFields.Add(videoCodecField is null ? audioCodecField : Pair(videoCodecField, audioCodecField));
                         if (OutputTargets.IsAudio(o) && !o.AudioCodec.HasBitrate())
-                            body.Add(Ui.DimCaption("无损编码不会恢复已损失的音质，输出文件可能更大。").TextWrapping(TextWrapping.Wrap));
+                            formatFields.Add(Ui.DimCaption("无损编码不会恢复已损失的音质，输出文件可能更大。").TextWrapping(TextWrapping.Wrap));
                     }
+                    else if (videoCodecField is not null) formatFields.Add(videoCodecField);
                     if (o.Mode == ConversionMode.Remux)
-                        body.Add(Ui.DimCaption("转封装复制原始音视频编码；源轨道不兼容时会阻止开始。").TextWrapping(TextWrapping.Wrap));
+                        formatFields.Add(Ui.DimCaption("直接复制音视频，不重新编码；不兼容的轨道会阻止开始。").TextWrapping(TextWrapping.Wrap));
                 }
-                else body.Add(Ui.DimCaption("容器格式有多种值；统一容器后可设置编码。").TextWrapping(TextWrapping.Wrap));
+                else formatFields.Add(Ui.DimCaption("容器格式有多种值；统一容器后可设置编码。").TextWrapping(TextWrapping.Wrap));
             }
-            else body.Add(Ui.DimCaption("媒体形式有多种值；请先选择视频或音频。").TextWrapping(TextWrapping.Wrap));
-            body.Add(Ui.DimCaption("容器和编码分别选择；切换容器时仅调整不兼容的编码。").TextWrapping(TextWrapping.Wrap));
+            else
+            {
+                formatFields.Add(mediaField);
+                formatFields.Add(Ui.DimCaption("媒体形式有多种值；请先选择视频或音频。").TextWrapping(TextWrapping.Wrap));
+            }
+            body.Add(Section("输出格式", formatFields.ToArray()));
+            var commonFields = new List<Element>();
             var presets = p.Presets.Where(pr => pr.Template.Mode == o.Mode && pr.Template.Container == o.Container
                 && (o.Mode != ConversionMode.VideoTranscode || pr.Template.VideoCodec == o.VideoCodec)).ToArray();
             int PresetIndex(ConversionOptions x) => Array.FindIndex(presets, pr => Matches(pr.Template, x)) + 1;
-            body.Add(Combo("使用预设", new[] { "自定义" }.Concat(presets.Select(pr => pr.Name)).ToArray(),
+            if (presets.Length > 0) commonFields.Add(Combo("使用预设", new[] { "自定义" }.Concat(presets.Select(pr => pr.Name)).ToArray(),
                 Index(PresetIndex, PresetIndex(o)), i =>
                 {
                     if (i > 0) Apply(x => x.ApplyPresetTemplate(presets[i - 1].Template));
                     else setNotice(Notices.PresetCustom());
-                }));
-            body.Add(Ui.DimCaption(UiText.PresetHint).TextWrapping(TextWrapping.Wrap));
+                }).ToolTip(UiText.PresetHint));
             if (!Same(x => x.Mode)) body.Add(Ui.DimCaption("已选项目使用不同转换方式。请先统一输出格式，或分别选择后编辑。").TextWrapping(TextWrapping.Wrap));
             if (Same(x => x.Mode) && o.Mode == ConversionMode.VideoTranscode)
             {
-                body.Add(Combo("质量", ["较小体积", "均衡", "更高质量"], Index(x => x.Quality, (int)o.Quality),
-                    i => Apply(x => x with { Quality = (QualityTier)i, CrfOverride = null, VideoBitrateKbps = null })));
+                var qualityField = Combo("质量", ["较小体积", "均衡", "更高质量"],
+                    Index(x => (x.Quality, x.CrfOverride, x.VideoBitrateKbps), o.CrfOverride.HasValue || o.VideoBitrateKbps.HasValue ? -1 : (int)o.Quality),
+                    i => Apply(x => x with { Quality = (QualityTier)i, CrfOverride = null, VideoBitrateKbps = null }),
+                    Same(x => (x.Quality, x.CrfOverride, x.VideoBitrateKbps)) ? "自定义参数" : "多种值");
                 int ResizeIndex(ConversionOptions x) => x.TargetWidth.HasValue || x.TargetHeight.HasValue ? 2 : x.ResizeMode == ResizeMode.Max1080p ? 1 : 0;
-                body.Add(Combo("分辨率", ["保持原始", "最高 1080p", "自定义"], Index(x => (x.ResizeMode, x.TargetWidth, x.TargetHeight), ResizeIndex(o)),
+                commonFields.Add(Pair(qualityField, Combo("分辨率", ["保持原始", "最高 1080p", "自定义"], Index(x => (x.ResizeMode, x.TargetWidth, x.TargetHeight), ResizeIndex(o)),
                     i => Apply(x => x with { ResizeMode = i == 1 ? ResizeMode.Max1080p : ResizeMode.KeepDisplaySize,
-                        TargetWidth = i == 2 ? x.TargetWidth ?? 1920 : null, TargetHeight = i == 2 ? x.TargetHeight ?? 1080 : null, AllowUpscale = i == 2 })));
+                        TargetWidth = i == 2 ? x.TargetWidth ?? 1920 : null, TargetHeight = i == 2 ? x.TargetHeight ?? 1080 : null, AllowUpscale = i == 2 }))));
                 if (ResizeIndex(o) == 2)
                 {
-                    body.Add(Pair(
+                    commonFields.Add(Pair(
                         Number("宽度", x => x.TargetWidth, (x, v) => x with { TargetWidth = FieldValues.IntOrNull(v, 2, 16384) }, 0, 16384, 2),
                         Number("高度", x => x.TargetHeight, (x, v) => x with { TargetHeight = FieldValues.IntOrNull(v, 2, 16384) }, 0, 16384, 2)));
                 }
             }
+            if (commonFields.Count > 0) body.Add(Section("常用设置", commonFields.ToArray()));
             var directory = Same(x => x.OutputDirectory) ? o.OutputDirectory ?? "源文件旁的 TransFlux Output 文件夹" : "多种位置";
             outputFooter = VStack(Space.Sm, Ui.Divider(), Ui.FieldLabel("保存到"),
                 Caption(directory).TextWrapping(TextWrapping.Wrap).MaxLines(2).ToolTip(directory),
                 FlexRow(Button("更改…", p.PickOutput).IsEnabled(editable).AutomationName("更改输出位置"),
-                    Button("使用源文件旁", p.ResetOutput).IsEnabled(editable).SubtleButton().AutomationName("使用源文件旁"),
-                    Button("重置所选参数", p.ResetOptions).IsEnabled(editable).SubtleButton().AutomationName("重置所选参数"))
+                    Button("使用源文件旁", p.ResetOutput).IsEnabled(editable).SubtleButton().AutomationName("使用源文件旁"))
                     with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
 
             var advancedGroups = new List<Element>();
@@ -152,7 +171,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                     if (o.VideoCodec != VideoCodec.H264)
                         videoFields.Add(Ui.DimCaption("H.265、AV1、VP9 当前使用 CPU 编码；高分辨率 AV1 可能较慢。").TextWrapping(TextWrapping.Wrap));
                     videoFields.Add(Ui.DimCaption("自动选择可用编码器；硬件编码不保证更小或更快。").TextWrapping(TextWrapping.Wrap));
-                    advancedGroups.Add(Group("视频编码", videoFields.ToArray()));
+                    advancedGroups.Add(Group("视频参数", videoOpen, setVideoOpen, videoFields.ToArray()));
                 }
                 if (o.Mode != ConversionMode.Remux)
                 {
@@ -193,7 +212,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                             i => Apply(x => OutputTargets.WithPcmBitDepth(x, i == 1)))));
                     else audioFields.Add(channels);
                     audioFields.Add(Ui.DimCaption("声道数留空时保留源声道布局；PCM 为无损编码，不会恢复源文件已丢失的信息。").TextWrapping(TextWrapping.Wrap));
-                    advancedGroups.Add(Group("音频", audioFields.ToArray()));
+                    advancedGroups.Add(Group("音频与音轨", audioOpen, setAudioOpen, audioFields.ToArray()));
                 }
                 else if (selection.Count == 1 && selection[0].Draft.Snapshot is { } remuxSource)
                 {
@@ -214,7 +233,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                                 .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
                                 .IsEnabled(editable));
                         }
-                        advancedGroups.Add(Group("音轨", remuxFields.ToArray()));
+                        advancedGroups.Add(Group("音轨", audioOpen, setAudioOpen, remuxFields.ToArray()));
                     }
                 }
             }
@@ -229,17 +248,15 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             outputFields.Add(TextBox(Optional<string>.Of(Same(x => x.OutputFileName) ? o.OutputFileName ?? "" : ""),
                 text => Apply(x => x with { OutputFileName = string.IsNullOrWhiteSpace(text) ? null : text }),
                 placeholderText: Same(x => x.OutputFileName) ? "自动生成，重名时保留两个文件" : "多种值", header: "输出文件名").AutomationName("输出文件名").IsEnabled(editable));
-            advancedGroups.Add(Group(o.Mode == ConversionMode.Remux ? "输出" : "裁剪与输出", outputFields.ToArray()));
+            advancedGroups.Add(Group(o.Mode == ConversionMode.Remux ? "文件与元数据" : "裁剪、文件与元数据", outputOpen, setOutputOpen, outputFields.ToArray()));
             if (selection.Count == 1 && editable)
             {
-                advancedGroups.Add(Group("预设",
+                advancedGroups.Add(Group("保存为预设", presetOpen, setPresetOpen,
                     Ui.DimCaption("预设保存编码参数，不包含路径、文件名、裁剪范围和源音轨选择。").TextWrapping(TextWrapping.Wrap),
                     TextBox(Optional<string>.Of(presetName), setPresetName, header: "预设名称").AutomationName("预设名称"),
                     Button("保存为预设", () => _ = SaveAsync()).SubtleButton()));
             }
-            if (advancedGroups.Count > 0)
-                body.Add(Expander("高级参数", VStack(Space.Md, advancedGroups.ToArray()), isExpanded: advanced, onIsExpandedChanged: setAdvanced)
-                    .AutomationName("高级参数"));
+            if (advancedGroups.Count > 0) body.Add(Section("更多设置", advancedGroups.ToArray()));
         }
         async Task SaveAsync()
         {
@@ -255,8 +272,12 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
         var scroll = ScrollViewer(fields).HorizontalScrollMode(ScrollMode.Disabled).VerticalScrollMode(ScrollMode.Auto)
             .Set(s => { s.HorizontalContentAlignment = HorizontalAlignment.Stretch; s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled; });
         return Ui.Card(Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
-            VStack(Space.Xs, SubHeading("输出设置"),
-                Ui.DimCaption(selection.Count == 0 ? "尚未选择文件" : $"{(editable ? "正在编辑" : "查看参数")} {selection.Count} 项"))
+            VStack(Space.Xs,
+                Grid(columns: [GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+                    SubHeading("输出设置").Grid(column: 0),
+                    Button("重置", p.ResetOptions).SubtleButton().IsEnabled(editable)
+                        .AutomationName("重置所选参数").ToolTip("重置所选项目的格式、裁剪和输出参数").Grid(column: 1)),
+                Ui.DimCaption(selection.Count == 0 ? "尚未选择文件" : editable ? $"已选 {selection.Count} 项 · 更改即时生效" : $"查看 {selection.Count} 项 · 参数已锁定"))
                 .Margin(0, 0, 0, Space.Lg).Grid(row: 0),
             scroll.Grid(row: 1), outputFooter.Grid(row: 2)));
     }
