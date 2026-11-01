@@ -7,6 +7,7 @@ namespace TransFlux.App.State;
 public static class OutputTargets
 {
     public static bool IsAudio(ConversionOptions o) => o.Mode == ConversionMode.AudioExtract;
+    public static bool IsPcm(AudioCodec codec) => codec is AudioCodec.PcmS16le or AudioCodec.PcmS24le;
     public static ConversionOptions WithMedia(ConversionOptions o, bool audio)
     {
         if (IsAudio(o) == audio) return o;
@@ -25,6 +26,8 @@ public static class OutputTargets
             next = next with { VideoCodec = video[0], Hardware = HardwareBackend.Auto, CrfOverride = null };
         return next;
     }
+    public static ConversionOptions WithPcmBitDepth(ConversionOptions o, bool twentyFourBit)
+        => o with { AudioCodec = twentyFourBit ? AudioCodec.PcmS24le : AudioCodec.PcmS16le };
     public static ConversionOptions WithAudioCodec(ConversionOptions o, AudioCodec codec)
     {
         var maxBitrate = codec == AudioCodec.Mp3 ? 320 : codec == AudioCodec.Opus ? 510 : 512;

@@ -133,6 +133,23 @@ public sealed class WorkbenchTests
     }
 
     [Fact]
+    public async Task RemoveUndoBannerReportsCountAndCanBeDismissed()
+    {
+        await using var h = new SchedulerHarness(); using var files = new Files(2); using var store = Store(h);
+        await Loaded(store); await store.ImportAsync(files.Paths, ConversionOptions.Default); await Ready(store, 2);
+        await store.RemoveAsync(store.GetSnapshot().Items.Select(i => i.Id).ToArray());
+        var snapshot = store.GetSnapshot();
+        Assert.True(snapshot.CanUndo);
+        Assert.Equal(2, snapshot.UndoCount);
+        store.DismissUndo();
+        snapshot = store.GetSnapshot();
+        Assert.False(snapshot.CanUndo);
+        Assert.Equal(0, snapshot.UndoCount);
+        await store.UndoAsync();
+        Assert.Empty(store.GetSnapshot().Items);
+    }
+
+    [Fact]
     public async Task RetryPreservesTheVisibleCard_AndCopyDoesNotOverwriteOriginalOptions()
     {
         await using var h = new SchedulerHarness(); using var files = new Files(1); using var store = Store(h);

@@ -245,7 +245,9 @@ public sealed class AppRoot : Component<AppServices>
                 .AccentButton().AutomationName("开始转换").IsEnabled(startItems.Length > 0 && !snapshot.Busy && !exiting).Grid(column: 2)).Margin(0, Space.Lg, 0, 0);
         var banners = new List<Element>();
         if (snapshot.Error is { } error) banners.Add(InfoBar("提示", error).Warning().IsClosable(true).Closed(() => store.SetError(null)));
-        if (snapshot.CanUndo) banners.Add(HStack(Space.Sm, Ui.Dim("已移除项目，源文件和输出文件均保留。"), Button("撤销移除", () => Run(store.UndoAsync)).SubtleButton()));
+        if (snapshot.CanUndo)
+            banners.Add(Component<UndoNotification, UndoNotificationProps>(
+                new(snapshot.UndoCount, () => Run(store.UndoAsync), () => store.DismissUndo())));
         var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
             VStack(Space.Sm, banners.ToArray()).Grid(row: 0).Margin(0, 0, 0, Space.Sm), main.Grid(row: 1), footer.Grid(row: 2)).Padding(Space.Lg);
         var top = TitleBarView.Render(new TitleBarProps(() => OpenDialog("settings"), () => OpenDialog("about"), () => OpenDialog("history")));

@@ -6,9 +6,9 @@ namespace TransFlux.App.State;
 
 public sealed record WorkbenchSnapshot(
     IReadOnlyList<WorkbenchItem> Items, IReadOnlyList<Guid> Selected,
-    bool Paused, bool Loaded, bool Busy, string? Error, bool CanUndo)
+    bool Paused, bool Loaded, bool Busy, string? Error, bool CanUndo, int UndoCount)
 {
-    public static readonly WorkbenchSnapshot Empty = new([], [], true, false, false, null, false);
+    public static readonly WorkbenchSnapshot Empty = new([], [], true, false, false, null, false, 0);
     public IReadOnlyList<WorkbenchItem> Selection => Items.Where(i => Selected.Contains(i.Id)).ToList();
 }
 
@@ -323,6 +323,15 @@ public sealed class WorkbenchStore : IDisposable
         Emit(); foreach (var d in restored) ProbeIfNeeded(d.MediaId);
         await PersistAsync().ConfigureAwait(false);
     }
+    public void DismissUndo()
+    {
+        lock (_gate)
+        {
+            if (_undo.Count == 0) return;
+            _undo = [];
+        }
+        Emit();
+    }
 
     private void ProbeIfNeeded(Guid id)
     {
@@ -384,7 +393,7 @@ public sealed class WorkbenchStore : IDisposable
             if (_disposed) return;
             _dirty = false;
             var next = new WorkbenchSnapshot(BuildItems(), _selected.ToArray(), _jobs.GetControl().Paused,
-                _loaded, _busy, _error, _undo.Count > 0);
+                _loaded, _busy, _error, _undo.Count > 0, _undo.Count);
             Volatile.Write(ref _snapshot, next);
         }
         _post(() => { if (!_disposed) _changed?.Invoke(); });
