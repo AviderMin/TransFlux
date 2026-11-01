@@ -53,7 +53,7 @@ public static class TaskRow
                 Caption("输出格式").Foreground(Theme.SecondaryText),
                 Body(targetTitle).TextWrapping(TextWrapping.Wrap),
                 Body(targetMeta).Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap)).Grid(column: 1))
-            with { ColumnSpacing = Space.Lg };
+            with { ColumnSpacing = Space.Md };
 
         var lines = new List<Element> { header, facts };
 
@@ -116,8 +116,8 @@ public static class TaskRow
             lines.Add(FlexRow(actions.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
         }
 
-        return Border(VStack(Space.Md, lines.ToArray()))
-            .Padding(Space.Lg)
+        return Border(VStack(Space.Sm, lines.ToArray()))
+            .Padding(Space.Md)
             .CornerRadius(8)
             .Background(selected ? Theme.SubtleFill : Theme.CardBackground)
             .WithBorder(selected ? Theme.Accent : Theme.CardStroke, selected ? 2 : 1)
@@ -127,8 +127,8 @@ public static class TaskRow
     private static Element StatusPill(string text, ThemeRef background, ThemeRef foreground)
         => Border(BodyStrong(text).Foreground(foreground))
             .Background(background)
-            .CornerRadius(12)
-            .Padding(10, 4);
+            .CornerRadius(10)
+            .Padding(8, 2);
 
     private static string TargetMeta(ConversionOptions options)
     {
