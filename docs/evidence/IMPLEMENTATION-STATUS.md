@@ -5,7 +5,7 @@ Output targets now separate media form, container and codec; see [output format 
 See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
 Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
 
-Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified, M5 packaging pending. This is a real build, not a design document.
+Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.4 built and verified, signed MSIX pending. This is a real build, not a design document.
 
 ## What works (executed)
 
@@ -45,10 +45,10 @@ Every requirement in docs/02 flows through `TransFlux.Application.Contracts`; th
 ## Known limitations / not yet verified (honest)
 
 - Real NVENC/QSV/AMF trial-to-transcode not signed off as supported/performance claims; CPU libx264 is the recorded path, although the machine has an RTX 4060 Laptop GPU.
-- HDR tone-mapping, HEVC/AV1 output, subtitle burn-in, target-size/two-pass, run-time pause/resume — all P1, intentionally not implemented.
+- HDR tone-mapping, subtitle burn-in, target-size/two-pass, run-time pause/resume — all P1, intentionally not implemented. H.265/AV1/VP9 CPU output was added with the layered output targets; hardware paths for them remain unsupported/unverified.
 - Accessibility (Narrator/DPI/high-contrast), visual theming, drag-drop implemented but need human/image-capable review.
 - Signed MSIX install/upgrade/offline (M0-06/M5) not completed.
-- Performance budgets (docs/06) remain targets; E2E wall time ~3.1 s for a 5 s 720p clip on CPU was observed, not a formal benchmark.
+- Performance budgets (docs/06) remain targets; E2E wall time ~1.6–1.8 s for a 5 s 720p clip on CPU was observed, not a formal benchmark.
 
 ## How to build / run / test
 
@@ -62,8 +62,9 @@ dotnet run --project tools/TransFlux.E2E/TransFlux.E2E.csproj -c Debug         #
 
 ## Next minimal tasks (priority order)
 
-1. Rebuild the Inno Setup installer from the current source (1.0.0.4) and re-verify install/launch/E2E/uninstall; 1.0.0.3 predates the output-format expansion.
-2. Signed MSIX packaging and clean-VM offline install/upgrade (M0-06/M5).
-3. Human visual + Narrator + 100/150/200% DPI/high-contrast/theme review of the current workbench.
-4. Real NVENC trial + measured performance/quality report on the RTX 4060 Laptop GPU; keep GPU backends explicitly unverified until signed off.
-5. Fix any P0 gaps found in a human walkthrough; record docs/06 performance budgets against a controlled benchmark.
+1. Signed MSIX packaging and clean-VM offline install/upgrade (M0-06/M5).
+2. Human visual + Narrator + 100/150/200% DPI/high-contrast/theme review of the current workbench.
+3. Real NVENC trial + measured performance/quality report on the RTX 4060 Laptop GPU; keep GPU backends explicitly unverified until signed off.
+4. Fix any P0 gaps found in a human walkthrough; record docs/06 performance budgets against a controlled benchmark.
+
+Completed 2026-11-01: Inno Setup **1.0.0.4** built from commit `b59dc0a`, install/launch/E2E/uninstall verified — see [INSTALLER.md](INSTALLER.md).

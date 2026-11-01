@@ -1,8 +1,17 @@
 # Inno Setup installer — build & verification evidence
 
-Date: 2026-11-01. Installer version: **1.0.0.2** (packaging flow modeled on SurgeLink).
+Date: 2026-11-01. 当前发布：**1.0.0.4**（下方 Built artifact 为历史 1.0.0.2 记录，打包流程相同，均基于 SurgeLink 方案）。
 
-## Built artifact
+## 当前发布 · 1.0.0.4（2026-11-01）
+
+- File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.4-x64.exe`
+- Size: **117.4 MB**；FileVersion / ProductVersion **1.0.0.4**
+- SHA-256: `4D3CA7C1D3E3BAE890E8DB7478A53A1F45407F8B5BC36832BF1CA8A600DA92DE`
+- Source base commit: `b59dc0a`（包含文件优先工作台、输出目标分层及工作台缺陷修复；265 项测试通过）
+- 实测（开发机）：静默安装到 `D:\tmp\TransFluxVerify-104` **exit 0** → `TransFlux.exe` FileVersion **1.0.0.4**、窗口标题 `TransFlux` → 使用安装目录 `ffmpeg\ffmpeg.exe` 运行 E2E **PASS**（1.8 s，源文件不变）→ 静默卸载 **exit 0**，安装目录与 exe 清理干净。
+- 1.0.0.3 安装包早于输出格式扩展，已被 1.0.0.4 取代。
+
+## Built artifact（历史 1.0.0.2）
 
 - File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.2-x64.exe`
 - Size: **117.4 MB** (previous framework-dependent + static-FFmpeg build was 257.3 MB — more than halved)
