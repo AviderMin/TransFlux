@@ -2,6 +2,7 @@ using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Shared;
 using TransFlux.App.State;
@@ -17,7 +18,7 @@ public static class TaskRow
 {
     public static Element Render(WorkbenchItem item, bool selected, bool paused,
         Action select, Action toggle, Action remove, Action cancel, Action copy,
-        Action retry, Action editQueued, Action open, Action reveal, Action details)
+        Action moveUp, Action moveDown, Action retry, Action editQueued, Action open, Action reveal, Action copyPath, Action details)
     {
         var d = item.Draft;
         var job = item.Execution;
@@ -31,13 +32,15 @@ public static class TaskRow
             CheckBox(selected, v => { if (v != selected) toggle(); }, string.Empty)
                 .Width(36).MinWidth(36).VAlign(VerticalAlignment.Top)
                 .AutomationName("选择 " + d.FileName).Grid(column: 0),
-            Button(BodyLarge(d.FileName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1), select)
+            Button(BodyLarge(d.FileName).SemiBold().TextWrapping(TextWrapping.Wrap).MaxLines(2), select)
                 .SubtleButton().HAlign(HorizontalAlignment.Stretch).ToolTip(d.Path)
                 .Set(b => b.HorizontalContentAlignment = HorizontalAlignment.Left)
                 .AutomationName("任务 " + d.FileName).Grid(column: 1),
             StatusPill(stateText, statusBackground, statusForeground).VAlign(VerticalAlignment.Top).Grid(column: 2));
 
-        var sourceTitle = d.Snapshot is { } snapshot ? Fmt.TrackSummary(snapshot) : "正在读取媒体信息…";
+        var sourceTitle = d.Snapshot is { } snapshot ? Fmt.TrackSummary(snapshot, d.Options)
+            : d.JobId is not null ? "已保留执行参数；源媒体信息尚未重新读取"
+            : d.IsProbing ? "正在读取媒体信息…" : "源媒体信息不可用";
         var sourceMeta = d.Snapshot is { } source
             ? $"{Fmt.Resolution(source.PrimaryVideo)} · {Fmt.DurationMicros(source.DurationUs)} · {Fmt.Size(source.SizeBytes)}"
             : d.Path;
@@ -59,18 +62,23 @@ public static class TaskRow
 
         if (job is { IsActive: true } && job.State != JobState.CancelRequested)
         {
-            var fraction = Math.Clamp(job.Progress?.Fraction ?? 0, 0, 1);
-            var percent = Math.Clamp((int)Math.Round(fraction * 100), 0, 99);
+            var fraction = job.Progress?.Fraction is double value ? Math.Clamp(value, 0, 1) : (double?)null;
+            var percent = fraction is double f ? Math.Clamp((int)Math.Round(f * 100), 0, 99) : 0;
             var activity = job.State == JobState.Running
-                ? $"{percent}% · {Fmt.Speed(job.Progress?.Speed)} · 剩余 {Fmt.Eta(job.Progress?.Eta)}"
+                ? fraction is null
+                    ? $"已处理 {Fmt.DurationMicros(job.Progress?.ProcessedUs)} · {Fmt.Speed(job.Progress?.Speed)} · 无法估计剩余时间"
+                    : $"{percent}% · {Fmt.Speed(job.Progress?.Speed)} · 剩余 {Fmt.Eta(job.Progress?.Eta)}"
                 : job.State == JobState.Verifying ? "正在检查输出，检查通过后才会发布文件。"
                 : job.State == JobState.Committing ? "正在安全保存，请稍候。"
                 : "正在准备转换。";
+            Element progressVisual = Empty();
+            if (job.State is JobState.Running or JobState.Verifying or JobState.Committing)
+                progressVisual = job.State == JobState.Running && fraction is null
+                    ? ProgressIndeterminate().Height(8).AutomationName($"任务 {d.FileName} 转换进度，无法估计完成时间")
+                    : Progress((fraction ?? 0) * 100).Height(8).AutomationName($"任务 {d.FileName} 转换进度");
             lines.Add(VStack(Space.Xs,
                 Body(activity).Foreground(Theme.SecondaryText),
-                (job.State is JobState.Running or JobState.Verifying or JobState.Committing
-                    ? Progress(fraction * 100).Height(8)
-                    : Empty())));
+                progressVisual));
         }
         if (job is { State: JobState.Succeeded, Output: not null })
         {
@@ -82,7 +90,10 @@ public static class TaskRow
                 Caption(job.Output.FinalPath).Foreground(Theme.SecondaryText)
                     .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath)));
         }
-        if (job is { State: JobState.Failed or JobState.Interrupted or JobState.NeedsAttention }
+        if (job is { State: JobState.Canceled })
+            lines.Add(Body("转换已取消，可重试或修改参数后转换。")
+                .Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap));
+        else if (job is { State: JobState.Failed or JobState.Interrupted or JobState.NeedsAttention }
             || d.Status == DraftStatus.Invalid)
             lines.Add(Body(WorkbenchRules.FailureText(job?.Failure ?? d.Failure))
                 .Foreground(Theme.SystemCritical).TextWrapping(TextWrapping.Wrap));
@@ -102,12 +113,23 @@ public static class TaskRow
         {
             ActionButton("打开文件", open, primary: true);
             ActionButton("打开文件夹", reveal);
+            ActionButton("复制路径", copyPath);
         }
         if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", retry, primary: true);
-        if (job?.State == JobState.Queued) ActionButton("移出队列并编辑", editQueued, primary: true);
+        if (job?.State == JobState.Queued)
+        {
+            ActionButton("上移", moveUp);
+            ActionButton("下移", moveDown);
+            ActionButton("移出队列并编辑", editQueued, primary: true);
+        }
         if (job?.CanCancel == true) ActionButton("取消任务", cancel);
-        if (job is not null && job.State != JobState.NeedsAttention)
-            ActionButton(job.State == JobState.Succeeded ? "再次转换" : "修改后转换", copy);
+        if (job is not null)
+            ActionButton(job.State switch
+            {
+                JobState.Succeeded => "再次转换",
+                JobState.NeedsAttention => "核对后再次转换",
+                _ => "修改后转换",
+            }, copy);
         if (job is not null || d.Status == DraftStatus.Invalid) ActionButton("技术详情", details);
         if (item.CanRemove) ActionButton("移除", remove);
         if (actions.Count > 0)
@@ -125,7 +147,7 @@ public static class TaskRow
     }
 
     private static Element StatusPill(string text, ThemeRef background, ThemeRef foreground)
-        => Border(BodyStrong(text).Foreground(foreground))
+        => Border(BodyStrong(text).Foreground(foreground).LiveRegion(AutomationLiveSetting.Polite))
             .Background(background)
             .CornerRadius(10)
             .Padding(8, 2);

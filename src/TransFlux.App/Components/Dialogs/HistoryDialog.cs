@@ -35,7 +35,9 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         var (open, setOpen) = UseState(true);
         var (entries, setEntries) = UseState<IReadOnlyList<HistoryEntry>?>(null);
         var (error, setError) = UseState<string?>(null);
+        var (errorTitle, setErrorTitle) = UseState("历史记录读取失败");
         var (notice, setNotice) = UseState<string?>(null);
+        var (noticeWarning, setNoticeWarning) = UseState(false);
         var (confirmClear, setConfirmClear) = UseState(false);
         var (busy, setBusy) = UseState(false);
 
@@ -64,9 +66,10 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
                 await p.Services.History.ClearAsync(CancellationToken.None);
                 setEntries(Array.Empty<HistoryEntry>());
                 setConfirmClear(false);
+                setNoticeWarning(false);
                 setNotice("已清空历史记录。");
             }
-            catch (Exception ex) { setError(ex.Message); }
+            catch (Exception ex) { setErrorTitle("清空历史失败"); setError(ex.Message); }
             finally { setBusy(false); }
         }
 
@@ -76,11 +79,23 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
             try
             {
                 var added = await p.Rejoin(entry.SourcePath);
+                setNoticeWarning(!added);
                 setNotice(added
                     ? "已重新加入工作台，正在读取媒体信息。"
                     : "无法重新加入：文件不存在或已在任务列表中。");
             }
-            catch (Exception ex) { setError(ex.Message); }
+            catch (Exception ex) { setErrorTitle("重新加入失败"); setError(ex.Message); }
+        }
+
+        async Task OpenOutputAsync(string path)
+        {
+            try { await LauncherInterop.OpenAsync(path); }
+            catch (Exception ex) { setErrorTitle("打开输出失败"); setError(ex.Message); }
+        }
+        void RevealOutput(string path)
+        {
+            try { LauncherInterop.RevealInExplorer(path); }
+            catch (Exception ex) { setErrorTitle("打开文件夹失败"); setError(ex.Message); }
         }
 
         void Close()
@@ -104,9 +119,12 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         }
 
         if (error is { } err)
-            children.Add(InfoBar("历史记录读取失败", err).Error().IsClosable(true).Closed(() => setError(null)));
+            children.Add(InfoBar(errorTitle, err).Error().IsClosable(true).Closed(() => setError(null)));
         if (notice is { } msg)
-            children.Add(InfoBar("历史记录", msg).Success().IsClosable(true).Closed(() => setNotice(null)));
+        {
+            var bar = InfoBar("历史记录", msg).IsClosable(true).Closed(() => setNotice(null));
+            children.Add(noticeWarning ? bar.Warning() : bar.Success());
+        }
 
         if (entries is null)
         {
@@ -123,7 +141,7 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
                 Button(UiText.HistoryClear, () => setConfirmClear(true)).SubtleButton()
                     .IsEnabled(!busy).AutomationName(UiText.HistoryClear).Grid(column: 1)));
 
-            var cards = entries.Select(entry => EntryCard(entry, RejoinAsync)).ToArray();
+            var cards = entries.Select(entry => EntryCard(entry, RejoinAsync, OpenOutputAsync, RevealOutput)).ToArray();
             children.Add(VStack(Space.Sm, cards));
         }
 
@@ -140,7 +158,8 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
             isOpen: open);
     }
 
-    private static Element EntryCard(HistoryEntry entry, Func<HistoryEntry, Task> onRejoin)
+    private static Element EntryCard(HistoryEntry entry, Func<HistoryEntry, Task> onRejoin,
+        Func<string, Task> onOpen, Action<string> onReveal)
     {
         var sourceName = string.IsNullOrWhiteSpace(entry.SourcePath)
             ? "未知来源"
@@ -156,12 +175,12 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         {
             Button(UiText.OpenOutput, () =>
                 {
-                    if (!string.IsNullOrWhiteSpace(entry.OutputPath)) _ = LauncherInterop.OpenAsync(entry.OutputPath);
+                    if (!string.IsNullOrWhiteSpace(entry.OutputPath)) _ = onOpen(entry.OutputPath);
                 })
                 .SubtleButton().IsEnabled(canOpenOutput).AutomationName(UiText.OpenOutput + " " + sourceName).WithKey("open"),
             Button(UiText.OpenFolder, () =>
                 {
-                    if (!string.IsNullOrWhiteSpace(entry.OutputPath)) LauncherInterop.RevealInExplorer(entry.OutputPath);
+                    if (!string.IsNullOrWhiteSpace(entry.OutputPath)) onReveal(entry.OutputPath);
                 })
                 .SubtleButton().IsEnabled(canOpenOutput).AutomationName(UiText.OpenFolder + " " + sourceName).WithKey("folder"),
             Button(UiText.Rejoin, () => _ = onRejoin(entry))

@@ -63,6 +63,16 @@ public sealed record ConversionOptions
         AudioSampleRate = t.AudioSampleRate, AudioChannels = t.AudioChannels, Hardware = t.Hardware,
     };
 
+    /// <summary>Applies reusable parameters while retaining source-specific edits.</summary>
+    public ConversionOptions ApplyPresetTemplate(PresetRequestTemplate t) => FromTemplate(t) with
+    {
+        OutputDirectory = OutputDirectory,
+        OutputFileName = OutputFileName,
+        TrimStart = TrimStart,
+        TrimEnd = TrimEnd,
+        SelectedStreams = SelectedStreams,
+    };
+
     public PresetRequestTemplate ToTemplate() => new()
     {
         Mode = Mode, Container = Container, VideoCodec = VideoCodec, Quality = Quality, Speed = Speed, ResizeMode = ResizeMode,

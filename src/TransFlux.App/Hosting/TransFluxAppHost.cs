@@ -98,7 +98,17 @@ public static class TransFluxAppHost
 
         _scheduler = scheduler;
         _store = store;
-        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, options, new HistoryService(store), new WorkspacePersistence(store));
+        CoreIdentity coreIdentity;
+        try
+        {
+            coreIdentity = engineCapabilities.GetIdentity();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("TransFlux core identity unavailable: " + ex);
+            coreIdentity = new CoreIdentity { CoreHash = string.Empty, FfmpegVersion = "(unavailable)", FfmpegPath = string.Empty, FfprobePath = string.Empty };
+        }
+        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, coreIdentity, options, new HistoryService(store), new WorkspacePersistence(store));
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {

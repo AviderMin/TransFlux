@@ -44,6 +44,8 @@ public interface IJobService
     Task<Guid> EnqueueAsync(EnqueueRequest request, CancellationToken ct);
     Task<CancelResult> CancelAsync(Guid id, CancellationToken ct);
     Task<Guid> RetryAsync(Guid id, CancellationToken ct);
+    /// <summary>Moves a queued job by -1 (up) or +1 (down); returns false if not movable.</summary>
+    Task<bool> MoveQueuedAsync(Guid id, int direction, CancellationToken ct);
     IAsyncEnumerable<JobEvent> WatchAsync(JobWatchQuery query, CancellationToken ct);
     Task PauseQueueAsync(CancellationToken ct);
     Task ResumeQueueAsync(CancellationToken ct);

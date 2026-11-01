@@ -36,6 +36,8 @@ public interface IJobStore
 {
     Task InitializeAsync(CancellationToken ct);
     Task<long> NextEnqueueOrderAsync(CancellationToken ct);
+    /// <summary>Atomically moves one queued job before/after another queued job and normalizes order.</summary>
+    Task<bool> ReorderQueuedAsync(Guid jobId, Guid targetJobId, bool placeBefore, CancellationToken ct);
     Task CreateJobAsync(Job job, CancellationToken ct);
     /// <summary>Conditional update keyed on revision; throws on mismatch.</summary>
     Task UpdateJobAsync(Job job, long expectedRevision, CancellationToken ct);

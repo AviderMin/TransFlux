@@ -29,6 +29,9 @@ internal sealed class InMemoryJobStore : IJobStore
     private readonly Dictionary<string, string> _settings = new();
     private long _enqueueOrder;
 
+    /// <summary>Number of queued-list reads that should fail before succeeding again.</summary>
+    public int QueuedReadFailuresToInject { get; set; }
+
     public Task InitializeAsync(CancellationToken ct) => Task.CompletedTask;
 
     public Task<long> NextEnqueueOrderAsync(CancellationToken ct)
@@ -36,6 +39,24 @@ internal sealed class InMemoryJobStore : IJobStore
         lock (_gate)
         {
             return Task.FromResult(++_enqueueOrder);
+        }
+    }
+
+    public Task<bool> ReorderQueuedAsync(Guid jobId, Guid targetJobId, bool placeBefore, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var queued = _jobs.Values.Where(j => j.State == JobState.Queued)
+                .OrderBy(j => j.EnqueueOrder).ThenBy(j => j.JobId).ToList();
+            if (queued.All(j => j.JobId != jobId) || queued.All(j => j.JobId != targetJobId) || jobId == targetJobId)
+                return Task.FromResult(false);
+            var moving = queued.Single(j => j.JobId == jobId);
+            var reordered = queued.Where(j => j.JobId != jobId).ToList();
+            var targetIndex = reordered.FindIndex(j => j.JobId == targetJobId);
+            reordered.Insert(placeBefore ? targetIndex : targetIndex + 1, moving);
+            for (var i = 0; i < reordered.Count; i++)
+                _jobs[reordered[i].JobId] = reordered[i] with { EnqueueOrder = i + 1, Revision = reordered[i].Revision + 1 };
+            return Task.FromResult(true);
         }
     }
 
@@ -82,6 +103,12 @@ internal sealed class InMemoryJobStore : IJobStore
     {
         lock (_gate)
         {
+            if (states?.Contains(JobState.Queued) == true && QueuedReadFailuresToInject > 0)
+            {
+                QueuedReadFailuresToInject--;
+                throw new IOException("Injected transient queued-read failure.");
+            }
+
             var result = _jobs.Values
                 .Where(j => states is null || states.Contains(j.State))
                 .OrderBy(j => j.EnqueueOrder)

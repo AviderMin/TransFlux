@@ -9,5 +9,6 @@ public sealed record QueueRow(Job Job, ProgressSnapshot? Progress, OutputRecord?
     public bool IsTerminal => JobStateMachine.IsTerminal(State);
     public bool IsActive => JobStateMachine.IsActive(State);
     public bool CanCancel => JobStateMachine.AllowsCancel(State);
-    public bool CanRetry => State is JobState.Failed or JobState.Canceled or JobState.Interrupted or JobState.NeedsAttention;
+    // A commit whose outcome is uncertain requires manual output verification first.
+    public bool CanRetry => State is JobState.Failed or JobState.Canceled or JobState.Interrupted;
 }

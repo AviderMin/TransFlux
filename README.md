@@ -1,6 +1,6 @@
 # TransFlux
 
-**1.0.0.5 硬件兼容修复**：修正设备绑定、硬件检测和自动回退，固定兼容核心；[实测与开发记录](docs/evidence/HARDWARE-COMPATIBILITY.md)。
+**1.0.0.6**：包含 1.0.0.5 硬件兼容基线、工作台 UX 重构及审查修复；[实测与开发记录](docs/evidence/HARDWARE-COMPATIBILITY.md)。
 
 以 **WinUI 3 + Microsoft.UI.Reactor** 为界面核心的本地媒体转换软件。
 

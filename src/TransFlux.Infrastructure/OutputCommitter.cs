@@ -1,8 +1,17 @@
+using System.Security.Cryptography;
 using TransFlux.Application.Contracts;
 using TransFlux.Application.Services;
 using TransFlux.Domain.Jobs;
 
 namespace TransFlux.Infrastructure;
+
+/// <summary>Infrastructure-private persistence for content identity without expanding the
+/// Application commit-journal contract. Null hashes represent legacy journal rows.</summary>
+internal interface ICommitJournalContentStore
+{
+    Task UpsertJournalWithContentHashAsync(CommitJournalEntry entry, string contentSha256, CancellationToken ct);
+    Task<string?> GetJournalContentHashAsync(string token, CancellationToken ct);
+}
 
 /// <summary>Atomic, journal-backed output publication. Writes a Prepared intent, performs a
 /// no-replace move, records Published, persists the OutputRecord, then closes the journal.
@@ -24,12 +33,19 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
     {
         var token = Guid.NewGuid().ToString("N");
         long actualSize;
+        string? contentSha256 = null;
         try
         {
             if (!_fs.FileExists(request.TempPath))
                 return Fail(FailureCode.CommitFailed, "COMMIT_TEMP_MISSING",
                     $"Temporary output '{request.TempPath}' does not exist.", token);
             actualSize = _fs.GetFileLength(request.TempPath);
+            if (_store is ICommitJournalContentStore)
+                contentSha256 = await ComputeContentHashAsync(request.TempPath, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -53,7 +69,9 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
             SizeBytes = actualSize,
             UpdatedUtc = _clock.UtcNow,
         };
-        await _store.UpsertJournalAsync(prepared, ct);
+        // The hash and Prepared intent are persisted together, so a crash cannot leave a new
+        // final-only journal with size as its only identity.
+        await UpsertJournalWithIdentityAsync(prepared, contentSha256, ct).ConfigureAwait(false);
 
         try
         {
@@ -113,6 +131,22 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
 
                     if (_fs.FileExists(entry.TempPath))
                     {
+                        string recoveredHash;
+                        try
+                        {
+                            // This also gives legacy journals a reliable identity when recovery
+                            // itself performs the no-replace move from the original temporary file.
+                            recoveredHash = await ComputeContentHashAsync(entry.TempPath, ct).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            return Fail(FailureCode.VerifyFailed, "COMMIT_RECONCILE_HASH", ex.Message, entry.CommitToken);
+                        }
+
                         try
                         {
                             _fs.MoveNoReplace(entry.TempPath, entry.FinalPath);
@@ -124,7 +158,7 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
                         if (!_fs.FileExists(entry.FinalPath))
                             return Fail(FailureCode.CommitFailed, "COMMIT_RECONCILE_MOVE",
                                 "Move reported success but final file is missing.", entry.CommitToken);
-                        return await PublishExistingAsync(entry, ct).ConfigureAwait(false);
+                        return await PublishExistingAsync(entry, ct, recoveredHash).ConfigureAwait(false);
                     }
 
                     // Neither temp nor final exists: unresolved, keep the journal for NeedsAttention.
@@ -151,7 +185,8 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
         }
     }
 
-    private async Task<CommitResult> PublishExistingAsync(CommitJournalEntry entry, CancellationToken ct)
+    private async Task<CommitResult> PublishExistingAsync(
+        CommitJournalEntry entry, CancellationToken ct, string? recoveredHash = null)
     {
         long finalSize;
         try
@@ -167,12 +202,81 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
             return Fail(FailureCode.VerifyFailed, "COMMIT_RECONCILE_SIZE",
                 $"Final file size {finalSize} does not match journal {entry.SizeBytes}.", entry.CommitToken);
 
+        var storedHash = _store is ICommitJournalContentStore contentStore
+            ? await contentStore.GetJournalContentHashAsync(entry.CommitToken, ct).ConfigureAwait(false)
+            : null;
+        if (!string.IsNullOrEmpty(storedHash) && !string.IsNullOrEmpty(recoveredHash)
+            && !string.Equals(storedHash, recoveredHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT",
+                "Temporary output content does not match the Prepared journal identity.", entry.CommitToken);
+        }
+
+        var expectedHash = storedHash ?? recoveredHash;
+        if (string.IsNullOrEmpty(expectedHash) && _fs.FileExists(entry.TempPath))
+        {
+            // A legacy final+temp pair can still be proven by comparing their contents. A legacy
+            // final-only row cannot: equal length alone must never claim an unrelated file.
+            try
+            {
+                expectedHash = await ComputeContentHashAsync(entry.TempPath, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return Fail(FailureCode.VerifyFailed, "COMMIT_RECONCILE_HASH", ex.Message, entry.CommitToken);
+            }
+        }
+        if (string.IsNullOrEmpty(expectedHash))
+        {
+            return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT",
+                "The legacy journal has no content identity and no temporary file to verify the final output.",
+                entry.CommitToken);
+        }
+
+        string finalHash;
+        try
+        {
+            finalHash = await ComputeContentHashAsync(entry.FinalPath, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return Fail(FailureCode.VerifyFailed, "COMMIT_FINAL_UNREADABLE", ex.Message, entry.CommitToken);
+        }
+        if (!string.Equals(expectedHash, finalHash, StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT",
+                "Final output content does not match the commit journal identity.", entry.CommitToken);
+        }
+
         var published = entry with { Phase = CommitPhase.Published, SizeBytes = finalSize, UpdatedUtc = _clock.UtcNow };
-        await _store.UpsertJournalAsync(published, ct).ConfigureAwait(false);
+        await UpsertJournalWithIdentityAsync(published, expectedHash, ct).ConfigureAwait(false);
         await SaveOutputAsync(published, ct).ConfigureAwait(false);
         await _store.DeleteJournalAsync(entry.CommitToken, ct).ConfigureAwait(false);
         TryDeleteFile(OutputReservation.LockPath(entry.FinalPath));
         return new CommitResult { Success = true, CommitToken = entry.CommitToken, FinalPath = entry.FinalPath };
+    }
+
+    private Task UpsertJournalWithIdentityAsync(
+        CommitJournalEntry entry, string? contentSha256, CancellationToken ct)
+        => !string.IsNullOrEmpty(contentSha256) && _store is ICommitJournalContentStore contentStore
+            ? contentStore.UpsertJournalWithContentHashAsync(entry, contentSha256, ct)
+            : _store.UpsertJournalAsync(entry, ct);
+
+    private static async Task<string> ComputeContentHashAsync(string path, CancellationToken ct)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
+        return Convert.ToHexString(hash);
     }
 
     private Task SaveOutputAsync(CommitJournalEntry entry, CancellationToken ct)

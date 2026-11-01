@@ -61,14 +61,17 @@ public static class Fmt
         return string.Join(" · ", parts);
     }
 
-    public static string TrackSummary(SourceSnapshot? snapshot)
+    public static string TrackSummary(SourceSnapshot? snapshot, ConversionOptions? options = null)
     {
         if (snapshot is null) return "正在读取媒体信息…";
         var v = VideoText(snapshot.PrimaryVideo);
         var a = AudioText(snapshot.PrimaryAudio);
+        var audioTotal = snapshot.AudioStreams.Count();
+        var audioSelected = options?.SelectedStreams.Count is > 0 ? options.SelectedStreams.Count : Math.Min(1, audioTotal);
+        var audioMap = audioTotal > 0 ? $"输出 {audioSelected}/{audioTotal} 音轨" : "无音轨";
         var subs = snapshot.SubtitleStreams.Count();
-        var suffix = subs > 0 ? $" · 字幕 {subs}" : string.Empty;
-        return $"{v} · {a}{suffix}";
+        var subtitle = subs > 0 ? $" · 字幕 {subs} 未包含" : string.Empty;
+        return $"{v} · {a} · {ColorText(snapshot.ColorClassification)} · {audioMap}{subtitle}";
     }
 
     public static string CodecName(string? codec) => codec switch

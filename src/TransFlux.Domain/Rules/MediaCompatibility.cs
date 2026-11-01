@@ -92,10 +92,12 @@ public static class MediaCompatibility
             issues.Add(CompatibilityIssue.Block("TRIM_REMUX", "Trim is disabled for remux in the first release."));
         if (!OutputFormatCatalog.VideoContainers.Contains(r.Container))
             issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose a video container for remux."));
-        if (!s.HasVideo && !s.HasAudio)
-            issues.Add(CompatibilityIssue.Block("EMPTY", "Source has no audio or video to copy."));
 
-        foreach (var v in s.VideoStreams)
+        var selected = SelectRemuxStreams(r, s);
+        if (selected.Count == 0)
+            issues.Add(CompatibilityIssue.Block("EMPTY", "Source has no selected audio or video to copy."));
+
+        foreach (var v in selected.Where(st => st.Kind == MediaKind.Video))
         {
             bool ok = OutputFormatCatalog.VideoCodecs(r.Container).Any(codec => codec.ProbeName() == v.Codec)
                 || r.Container is ContainerFormat.Mkv or ContainerFormat.Webm && v.Codec == "vp8";
@@ -105,7 +107,7 @@ public static class MediaCompatibility
             if (v.BitDepth is > 8 && r.Container == ContainerFormat.Mp4)
                 issues.Add(CompatibilityIssue.Block("REMUX_DEPTH", "MP4 remux supports only 8-bit video."));
         }
-        foreach (var a in s.AudioStreams)
+        foreach (var a in selected.Where(st => st.Kind == MediaKind.Audio))
         {
             bool ok = OutputFormatCatalog.AudioCodecs(r.Container).Any(codec => codec.ProbeName() == a.Codec)
                 || r.Container == ContainerFormat.Mkv && a.Codec is "pcm_s32le" or "ac3" or "eac3";
@@ -113,7 +115,7 @@ public static class MediaCompatibility
                 issues.Add(CompatibilityIssue.Block("REMUX_AUDIO",
                     $"Audio codec {a.Codec} cannot be remuxed to {r.Container.DisplayName()}."));
         }
-        foreach (var sub in s.SubtitleStreams)
+        foreach (var sub in selected.Where(st => st.Kind == MediaKind.Subtitle))
         {
             if (sub.IsBitmapSubtitle)
                 issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE_BITMAP",
@@ -126,6 +128,25 @@ public static class MediaCompatibility
         if (s.ColorClassification is ColorClassification.DolbyVision)
             issues.Add(CompatibilityIssue.Block("REMUX_DV", "Dolby Vision remux is blocked in the first release."));
     }
+
+    /// <summary>
+    /// Returns the exact remux input set used by validation, argument mapping and expected output.
+    /// An empty selection preserves the existing default of all non-attachment media streams.
+    /// </summary>
+    public static IReadOnlyList<StreamDescriptor> SelectRemuxStreams(ConversionRequest r, SourceSnapshot s)
+    {
+        if (r.SelectedStreamIndices.Count == 0)
+        {
+            return s.Streams.Where(IsRemuxStream).ToList();
+        }
+
+        var indices = r.SelectedStreamIndices.ToHashSet();
+        return s.Streams.Where(st => indices.Contains(st.SourceIndex) && IsRemuxStream(st)).ToList();
+    }
+
+    private static bool IsRemuxStream(StreamDescriptor st) =>
+        st.Kind is MediaKind.Audio or MediaKind.Subtitle
+        || st.Kind == MediaKind.Video && !st.IsAttachedPicture;
 
     public static StreamDescriptor? SelectPrimaryVideo(ConversionRequest r, SourceSnapshot s)
     {

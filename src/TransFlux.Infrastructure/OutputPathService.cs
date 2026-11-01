@@ -29,13 +29,21 @@ public sealed class OutputPathService : IOutputPathService
     public Task<Result<ReservedOutput>> ReserveAsync(OutputReservationRequest request, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        string? reservedFinalPath = null;
         try
         {
             var directory = ResolveDirectory(request);
             _fs.CreateDirectory(directory);
 
-            // Preflight: report free space; a genuinely full volume also fails lock creation below.
-            _ = _fs.GetAvailableFreeSpace(directory);
+            // The reservation request has no expected output size. Zero (also returned when the
+            // platform cannot determine free space) is the only universally insufficient value.
+            var availableFreeSpace = _fs.GetAvailableFreeSpace(directory);
+            if (availableFreeSpace <= 0)
+            {
+                return Task.FromResult(Result<ReservedOutput>.Operational(
+                    FailureInfo.Of(FailureCode.DiskFull, "OUTPUT_DISK_FULL",
+                        $"Output free space is unavailable or insufficient for '{directory}'.")));
+            }
 
             var extension = request.Container.Extension();
             var stem = !string.IsNullOrWhiteSpace(request.RequestedFileName)
@@ -43,14 +51,14 @@ public sealed class OutputPathService : IOutputPathService
                 : _fs.GetFileNameWithoutExtension(request.SourcePath);
             if (string.IsNullOrWhiteSpace(stem)) stem = "output";
 
-            var finalPath = AllocateAndLock(directory, stem, extension);
+            reservedFinalPath = AllocateAndLock(directory, stem, extension);
             var commitToken = Guid.NewGuid().ToString("N");
             var workDirectory = Path.Combine(directory, OutputReservation.WorkFolderName, commitToken);
             _fs.CreateDirectory(workDirectory);
 
             return Task.FromResult(Result<ReservedOutput>.Ok(new ReservedOutput
             {
-                FinalPath = finalPath,
+                FinalPath = reservedFinalPath,
                 WorkDirectory = workDirectory,
                 CommitToken = commitToken,
                 Extension = extension,
@@ -58,11 +66,13 @@ public sealed class OutputPathService : IOutputPathService
         }
         catch (UnauthorizedAccessException ex)
         {
+            CleanupFailedReservation(reservedFinalPath);
             return Task.FromResult(Result<ReservedOutput>.Operational(
                 FailureInfo.Of(FailureCode.AccessDenied, "OUTPUT_ACCESS_DENIED", ex.Message)));
         }
         catch (IOException ex)
         {
+            CleanupFailedReservation(reservedFinalPath);
             return Task.FromResult(Result<ReservedOutput>.Operational(
                 FailureInfo.Of(FailureCode.CommitFailed, "OUTPUT_RESERVE_IO", ex.Message)));
         }
@@ -107,10 +117,18 @@ public sealed class OutputPathService : IOutputPathService
             }
             catch (IOException)
             {
-                // Name already reserved; try the next increment.
+                // Only an existing lock means the name is taken. Other I/O failures (for example
+                // a full or unavailable volume) must be surfaced instead of scanning 10,000 names.
+                if (_fs.FileExists(lockPath)) continue;
+                throw;
             }
         }
         throw new IOException("Could not allocate a unique output name.");
+    }
+
+    private static void CleanupFailedReservation(string? finalPath)
+    {
+        if (!string.IsNullOrEmpty(finalPath)) TryDeleteFile(OutputReservation.LockPath(finalPath));
     }
 
     private static void TryDeleteFile(string path)

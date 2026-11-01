@@ -114,8 +114,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
                 throw new PlanValidationException(FailureInfo.Of(
                     FailureCode.DeviceUnavailable, "plan.device_unavailable",
                     $"Requested hardware backend {requested} has no verified encoder in the capability snapshot."));
-            // The single automatic fallback must be CPU, not another potentially failing GPU.
-            candidates = [candidates.First(c => c.Backend == requested), cpu];
+            // A manually locked backend must never silently fall back to another device/CPU.
+            candidates = [candidates.First(c => c.Backend == requested)];
         }
         else if (requested == HardwareBackend.Auto && candidates.Any(c => c.Backend != HardwareBackend.Cpu))
         {
@@ -261,22 +261,13 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         AddInput(args);
 
         int mapped = 0, videoMapped = 0, audioMapped = 0;
-        foreach (var v in source.VideoStreams)
+        var selectedStreams = MediaCompatibility.SelectRemuxStreams(request, source);
+        foreach (var stream in selectedStreams)
         {
-            args.Add("-map"); args.Add($"0:{v.SourceIndex}");
-            mapped++; videoMapped++;
-        }
-        foreach (var a in source.AudioStreams)
-        {
-            args.Add("-map"); args.Add($"0:{a.SourceIndex}");
-            mapped++; audioMapped++;
-        }
-        foreach (var sub in source.SubtitleStreams)
-        {
-            if (!sub.IsTextSubtitle) continue;
-            if (request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov && sub.Codec != "mov_text") continue;
-            args.Add("-map"); args.Add($"0:{sub.SourceIndex}");
+            args.Add("-map"); args.Add($"0:{stream.SourceIndex}");
             mapped++;
+            if (stream.Kind == MediaKind.Video) videoMapped++;
+            if (stream.Kind == MediaKind.Audio) audioMapped++;
         }
 
         args.Add("-c"); args.Add("copy");

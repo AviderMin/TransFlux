@@ -228,6 +228,35 @@ public sealed class WorkbenchStore : IDisposable
         else await _jobs.PauseQueueAsync(_lifetime.Token).ConfigureAwait(false);
         Emit();
     }
+
+    /// <summary>Moves a queued card one position up/down while preserving card identity.</summary>
+    public async Task MoveQueuedAsync(Guid id, int direction)
+    {
+        if (direction is not (-1 or 1)) return;
+        var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);
+        if (item?.Execution is not { State: JobState.Queued }) return;
+        if (!await _jobs.MoveQueuedAsync(item.Execution.Job.JobId, direction, _lifetime.Token).ConfigureAwait(false))
+            return;
+
+        lock (_gate)
+        {
+            var index = _drafts.FindIndex(d => d.MediaId == id);
+            if (index < 0) return;
+            var step = direction;
+            for (var i = index + step; i >= 0 && i < _drafts.Count; i += step)
+            {
+                var candidate = _drafts[i];
+                if (candidate.JobId is not Guid jobId || !_rows.TryGetValue(jobId, out var row) || row.State != JobState.Queued) continue;
+                var moving = _drafts[index];
+                _drafts.RemoveAt(index);
+                _drafts.Insert(i, moving);
+                break;
+            }
+        }
+        Emit();
+        await PersistAsync().ConfigureAwait(false);
+    }
+
     public async Task CancelAsync(Guid id)
     {
         var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);

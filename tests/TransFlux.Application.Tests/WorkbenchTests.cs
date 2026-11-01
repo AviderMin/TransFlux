@@ -224,7 +224,7 @@ public sealed class WorkbenchTests
     }
 
     [Fact]
-    public async Task NeedsAttentionCardCanBeRetriedAndRemoved()
+    public async Task NeedsAttentionCardRequiresReviewBeforeAnyRetryAndCanBeRemoved()
     {
         await using var h = new SchedulerHarness(); var saved = new MemoryWorkspace();
         var id = await h.EnqueueAsync(); var job = (await h.Store.GetJobAsync(id, default))!;
@@ -232,14 +232,15 @@ public sealed class WorkbenchTests
         using var store = Store(h, saved); await Loaded(store);
         var card = Assert.Single(store.GetSnapshot().Items);
         Assert.True(card.CanRemove);
-        Assert.True(card.Execution!.CanRetry);
+        Assert.False(card.Execution!.CanRetry);
         await store.RemoveAsync([card.Id]);
         Assert.Empty(store.GetSnapshot().Items);
         await store.UndoAsync();
         await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items.Count == 1);
         await store.RetryAsync(card.Id);
-        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items[0].Execution?.State == JobState.Queued);
-        Assert.Single(store.GetSnapshot().Items);
+        var unchanged = Assert.Single(store.GetSnapshot().Items);
+        Assert.Equal(JobState.NeedsAttention, unchanged.Execution!.State);
+        Assert.Equal(card.Id, unchanged.Id);
     }
 
     [Fact]
@@ -275,6 +276,62 @@ public sealed class WorkbenchTests
         using var second = Store(h, saved); await Loaded(second);
         Assert.Empty(second.GetSnapshot().Items);
         Assert.NotNull(await h.Store.GetJobAsync(id, default));
+    }
+
+    [Fact]
+    public async Task QueuedCardsMoveWithoutChangingCardIdentityOrRunningJobs()
+    {
+        await using var h = new SchedulerHarness(); using var files = new Files(2); using var store = Store(h);
+        await Loaded(store); await store.ImportAsync(files.Paths, ConversionOptions.Default); await Ready(store, 2);
+        var ids = store.GetSnapshot().Items.Select(i => i.Id).ToArray();
+        await store.StartAsync(ids);
+        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items.All(i => i.Execution?.State == JobState.Queued));
+        var firstJob = store.GetSnapshot().Items[0].Execution!.Job.JobId;
+        var secondJob = store.GetSnapshot().Items[1].Execution!.Job.JobId;
+
+        await store.MoveQueuedAsync(ids[1], -1);
+
+        var snapshot = store.GetSnapshot();
+        Assert.Equal(new[] { ids[1], ids[0] }, snapshot.Items.Select(i => i.Id));
+        Assert.Equal(secondJob, snapshot.Items[0].Execution!.Job.JobId);
+        var queued = await h.Store.GetJobsAsync(new[] { JobState.Queued }, default);
+        Assert.Equal(new[] { secondJob, firstJob }, queued.Select(j => j.JobId));
+    }
+
+    [Fact]
+    public void ApplyingPresetRetainsTrimTracksAndOutputLocation()
+    {
+        var source = ConversionOptions.Default with
+        {
+            TrimStart = TimeSpan.FromSeconds(2), TrimEnd = TimeSpan.FromSeconds(8),
+            SelectedStreams = [1, 3], OutputDirectory = "output", OutputFileName = "name",
+        };
+        var template = (ConversionOptions.Default with { Quality = QualityTier.HigherQuality, CrfOverride = 21 }).ToTemplate();
+        var applied = source.ApplyPresetTemplate(template);
+        Assert.Equal(QualityTier.HigherQuality, applied.Quality);
+        Assert.Equal(21, applied.CrfOverride);
+        Assert.Equal(source.TrimStart, applied.TrimStart);
+        Assert.Equal(source.TrimEnd, applied.TrimEnd);
+        Assert.Equal(source.SelectedStreams, applied.SelectedStreams);
+        Assert.Equal("output", applied.OutputDirectory);
+        Assert.Equal("name", applied.OutputFileName);
+    }
+
+    [Fact]
+    public void DiagnosticReportRedactsAbsolutePathsAndFileNames()
+    {
+        var item = new WorkbenchItem(new MediaDraft
+        {
+            MediaId = Guid.NewGuid(),
+            Path = @"C:\Users\alice\Private Clips\secret-movie.mp4",
+            Status = DraftStatus.Ready,
+        }, null);
+
+        var report = DiagnosticReport.Build(item, DateTimeOffset.UnixEpoch);
+
+        Assert.DoesNotContain("alice", report, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret-movie.mp4", report, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[path]", report);
     }
 
     [Fact]

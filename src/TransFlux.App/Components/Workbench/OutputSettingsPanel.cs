@@ -1,5 +1,6 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using static Microsoft.UI.Reactor.Factories;
@@ -14,7 +15,7 @@ namespace TransFlux.App.Components.Workbench;
 
 public sealed record OutputSettingsProps(IReadOnlyList<WorkbenchItem> Selection, IReadOnlyList<Preset> Presets,
     Action<Func<ConversionOptions, ConversionOptions>> Apply, Action PickOutput, Action ResetOutput,
-    Func<string, Task> SavePreset);
+    Func<string, Task> SavePreset, Action ResetOptions);
 
 /// <summary>One inspector: every field edits precisely the selected editable cards.</summary>
 public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
@@ -92,7 +93,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                 && (o.Mode != ConversionMode.VideoTranscode || pr.Template.VideoCodec == o.VideoCodec)).ToArray();
             int PresetIndex(ConversionOptions x) => Array.FindIndex(presets, pr => Matches(pr.Template, x)) + 1;
             body.Add(Combo("使用预设", new[] { "自定义" }.Concat(presets.Select(pr => pr.Name)).ToArray(),
-                Index(PresetIndex, PresetIndex(o)), i => { if (i > 0) Apply(x => ApplyPreset(presets[i - 1].Template, x)); }));
+                Index(PresetIndex, PresetIndex(o)), i => { if (i > 0) Apply(x => x.ApplyPresetTemplate(presets[i - 1].Template)); }));
             if (!Same(x => x.Mode)) body.Add(Ui.Dim("已选项目使用不同转换方式。请先统一输出格式，或分别选择后编辑。").FontSize(12).TextWrapping(TextWrapping.Wrap));
             if (Same(x => x.Mode) && o.Mode == ConversionMode.VideoTranscode)
             {
@@ -112,8 +113,10 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             var directory = Same(x => x.OutputDirectory) ? o.OutputDirectory ?? "源文件旁的 TransFlux Output 文件夹" : "多种位置";
             outputFooter = VStack(Space.Sm, Ui.Divider(), Ui.FieldLabel("保存到"),
                 TextBlock(directory).FontSize(12).TextWrapping(TextWrapping.Wrap).MaxLines(2).ToolTip(directory),
-                HStack(Space.Sm, Button("更改…", p.PickOutput).IsEnabled(editable).AutomationName("更改输出位置"),
-                    Button("使用源文件旁", p.ResetOutput).IsEnabled(editable).SubtleButton()));
+                FlexRow(Button("更改…", p.PickOutput).IsEnabled(editable).AutomationName("更改输出位置"),
+                    Button("使用源文件旁", p.ResetOutput).IsEnabled(editable).SubtleButton().AutomationName("使用源文件旁"),
+                    Button("重置所选参数", p.ResetOptions).IsEnabled(editable).SubtleButton().AutomationName("重置所选参数"))
+                    with { Wrap = FlexWrap.Wrap, ColumnGap = Space.Sm, RowGap = Space.Xs });
 
             var advancedGroups = new List<Element>();
             if (Same(x => x.Mode))
@@ -121,9 +124,13 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                 if (o.Mode == ConversionMode.VideoTranscode)
                 {
                     var videoFields = new List<Element>();
-                    var maxCrf = o.VideoCodec is VideoCodec.Av1 or VideoCodec.Vp9 ? 63 : 51;
-                    videoFields.Add(Number($"CRF（0–{maxCrf}，留空自动）", x => x.CrfOverride,
-                        (x, v) => x with { CrfOverride = double.IsNaN(v) ? null : (int)Math.Clamp(v, 0, maxCrf), VideoBitrateKbps = null }));
+                    if (Same(x => x.VideoCodec))
+                    {
+                        var maxCrf = o.VideoCodec is VideoCodec.Av1 or VideoCodec.Vp9 ? 63 : 51;
+                        videoFields.Add(Number($"CRF（0–{maxCrf}，留空自动）", x => x.CrfOverride,
+                            (x, v) => x with { CrfOverride = double.IsNaN(v) ? null : (int)Math.Clamp(v, 0, maxCrf), VideoBitrateKbps = null }));
+                    }
+                    else videoFields.Add(Ui.Dim("视频编码有多种值；统一视频编码后可设置 CRF。").FontSize(12).TextWrapping(TextWrapping.Wrap));
                     videoFields.Add(Pair(
                         Number("视频码率 kbps", x => x.VideoBitrateKbps, (x, v) => x with { VideoBitrateKbps = v > 0 ? (int)Math.Clamp(v, 16, 100000) : null }),
                         Number("帧率 fps", x => x.FrameRateOverride, (x, v) => x with { FrameRateOverride = v > 0 ? Math.Clamp(v, 1, 240) : null })));
@@ -142,9 +149,23 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                     if (selection.Count == 1 && selection[0].Draft.Snapshot is { } source)
                     {
                         var tracks = source.AudioStreams.ToArray();
-                        var selectedTrack = Array.FindIndex(tracks, t => o.SelectedStreams.Contains(t.SourceIndex)) + 1;
-                        audioFields.Add(Combo("音轨", new[] { "默认音轨" }.Concat(tracks.Select(t => $"音轨 {t.SourceIndex} · {t.Language ?? "未知语言"} · {t.Codec}")).ToArray(),
-                            selectedTrack, i => Apply(x => x with { SelectedStreams = i == 0 ? [] : new[] { tracks[i - 1].SourceIndex } })));
+                        if (tracks.Length > 0)
+                        {
+                            audioFields.Add(Ui.FieldLabel("音轨（可多选；全不选表示默认音轨）"));
+                            foreach (var track in tracks)
+                            {
+                                var trackIndex = track.SourceIndex;
+                                audioFields.Add(CheckBox(o.SelectedStreams.Contains(trackIndex), checkedOn =>
+                                    Apply(x =>
+                                    {
+                                        var selected = x.SelectedStreams.ToHashSet();
+                                        if (checkedOn) selected.Add(trackIndex); else selected.Remove(trackIndex);
+                                        return x with { SelectedStreams = selected.OrderBy(i => i).ToArray() };
+                                    }), $"音轨 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}")
+                                    .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
+                                    .IsEnabled(editable));
+                            }
+                        }
                     }
                     if (o.AudioCodec.HasBitrate())
                         audioFields.Add(Pair(
@@ -162,12 +183,36 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                     audioFields.Add(Ui.Dim("声道数留空时保留源声道布局；PCM 为无损编码，不会恢复源文件已丢失的信息。").FontSize(12).TextWrapping(TextWrapping.Wrap));
                     advancedGroups.Add(Group("音频", audioFields.ToArray()));
                 }
+                else if (selection.Count == 1 && selection[0].Draft.Snapshot is { } remuxSource)
+                {
+                    var remuxTracks = remuxSource.AudioStreams.ToArray();
+                    if (remuxTracks.Length > 0)
+                    {
+                        var remuxFields = new List<Element> { Ui.FieldLabel("音轨（可多选；全不选表示默认音轨）") };
+                        foreach (var track in remuxTracks)
+                        {
+                            var trackIndex = track.SourceIndex;
+                            remuxFields.Add(CheckBox(o.SelectedStreams.Contains(trackIndex), checkedOn =>
+                                Apply(x =>
+                                {
+                                    var selected = x.SelectedStreams.ToHashSet();
+                                    if (checkedOn) selected.Add(trackIndex); else selected.Remove(trackIndex);
+                                    return x with { SelectedStreams = selected.OrderBy(i => i).ToArray() };
+                                }), $"音轨 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}")
+                                .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
+                                .IsEnabled(editable));
+                        }
+                        advancedGroups.Add(Group("音轨", remuxFields.ToArray()));
+                    }
+                }
             }
             var outputFields = new List<Element>();
-            if (o.Mode != ConversionMode.Remux)
+            if (Same(x => x.Mode) && o.Mode != ConversionMode.Remux)
                 outputFields.Add(Pair(
                     Number("裁剪开始（秒）", x => x.TrimStart?.TotalSeconds, (x, v) => x with { TrimStart = double.IsNaN(v) ? null : TimeSpan.FromSeconds(Math.Max(0, v)) }),
                     Number("裁剪结束（秒）", x => x.TrimEnd?.TotalSeconds, (x, v) => x with { TrimEnd = double.IsNaN(v) ? null : TimeSpan.FromSeconds(Math.Max(0, v)) })));
+            else if (!Same(x => x.Mode))
+                outputFields.Add(Ui.Dim("转换方式有多种值；统一转换方式后可设置裁剪。").FontSize(12).TextWrapping(TextWrapping.Wrap));
             outputFields.Add(Combo("元数据", ["清除个人信息", "保留标题与章节"], Index(x => x.MetadataPolicy, (int)o.MetadataPolicy), i => Apply(x => x with { MetadataPolicy = (MetadataPolicy)i })));
             outputFields.Add(TextBox(Optional<string>.Of(Same(x => x.OutputFileName) ? o.OutputFileName ?? "" : ""),
                 text => Apply(x => x with { OutputFileName = string.IsNullOrWhiteSpace(text) ? null : text }),
@@ -219,6 +264,4 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
     }
     private static string AudioLabel(AudioCodec codec) => OutputTargets.IsPcm(codec) ? "PCM" : codec.Name();
     private static bool Matches(PresetRequestTemplate t, ConversionOptions o) => t == o.ToTemplate();
-    private static ConversionOptions ApplyPreset(PresetRequestTemplate t, ConversionOptions o)
-        => ConversionOptions.FromTemplate(t) with { OutputDirectory = o.OutputDirectory, OutputFileName = o.OutputFileName };
 }

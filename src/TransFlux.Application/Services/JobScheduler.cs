@@ -124,12 +124,14 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
 
     private async Task DispatchLoopAsync(CancellationToken ct)
     {
-        try
+        var consecutiveFailures = 0;
+        while (!ct.IsCancellationRequested)
         {
-            while (!ct.IsCancellationRequested)
+            try
             {
                 if (Volatile.Read(ref _paused) != 0)
                 {
+                    consecutiveFailures = 0;
                     await WaitForWakeAsync(ct).ConfigureAwait(false);
                     continue;
                 }
@@ -142,22 +144,14 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     continue;
                 }
 
-                IReadOnlyList<Job> queued;
-                try
-                {
-                    queued = await _store.GetJobsAsync(new[] { JobState.Queued }, ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-
+                var queued = await _store.GetJobsAsync(new[] { JobState.Queued }, ct).ConfigureAwait(false);
                 var candidate = QueueOrdering
                     .Order(queued.Where(j => !_inFlight.ContainsKey(j.JobId)), _clock.UtcNow, QueueOrdering.DefaultAgingQuantum)
                     .FirstOrDefault();
 
                 if (candidate is null)
                 {
+                    consecutiveFailures = 0;
                     await WaitForWakeAsync(ct).ConfigureAwait(false);
                     continue;
                 }
@@ -182,7 +176,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     _inFlight.TryRemove(candidate.JobId, out _);
-                    break;
+                    throw;
                 }
 
                 if (fresh is null || fresh.State != JobState.Queued)
@@ -197,17 +191,28 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     continue;
                 }
 
+                consecutiveFailures = 0;
                 SpawnWorker(candidate.JobId, ct);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal shutdown.
-        }
-        catch (Exception)
-        {
-            // A dispatch failure must not take down the app; pending work will be retried on the
-            // next wake / restart. RecoveryService reconciles persisted state.
+            catch (OperationCanceledException)
+            {
+                break; // Normal shutdown.
+            }
+            catch (Exception ex)
+            {
+                consecutiveFailures++;
+                var delayMs = Math.Min(2_000, 250 * consecutiveFailures);
+                System.Diagnostics.Trace.TraceError(
+                    $"TransFlux dispatch iteration failed; retrying in {delayMs} ms. {ex}");
+                try
+                {
+                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -360,6 +365,12 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
             throw new InvalidOperationException($"Job {id} is not retryable in state {original.State}.");
         }
 
+        if (original.State == JobState.NeedsAttention)
+        {
+            throw new InvalidOperationException(
+                $"Job {id} requires manual output verification and cannot be retried directly.");
+        }
+
         var now = _clock.UtcNow;
         var order = await _store.NextEnqueueOrderAsync(ct).ConfigureAwait(false);
         var retry = new Job
@@ -489,6 +500,26 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         RunningCount = Volatile.Read(ref _activeWorkers),
         QueuedCount = Volatile.Read(ref _queuedCount),
     };
+
+    public async Task<bool> MoveQueuedAsync(Guid id, int direction, CancellationToken ct)
+    {
+        if (direction is not (-1 or 1) || _inFlight.ContainsKey(id)) return false;
+        var queued = await _store.GetJobsAsync(new[] { JobState.Queued }, ct).ConfigureAwait(false);
+        var ordered = queued.OrderBy(j => j.EnqueueOrder).ThenBy(j => j.JobId).ToList();
+        var index = ordered.FindIndex(j => j.JobId == id);
+        if (index < 0) return false;
+        var targetIndex = Math.Clamp(index + direction, 0, ordered.Count - 1);
+        if (targetIndex == index) return false;
+
+        var moved = await _store.ReorderQueuedAsync(id, ordered[targetIndex].JobId,
+            placeBefore: direction < 0, ct).ConfigureAwait(false);
+        if (!moved) return false;
+
+        foreach (var job in await _store.GetJobsAsync(new[] { JobState.Queued }, ct).ConfigureAwait(false))
+            Publish(new JobEvent { Kind = JobEventKind.StateChanged, JobId = job.JobId, Job = job });
+        Wake();
+        return true;
+    }
 
     public async Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct)
     {
@@ -744,6 +775,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     _activeAttempts.TryRemove(jobId, out _);
 
                     var canFallback = policy.AllowFallback
+                        && job.RequestSnapshot.Hardware.Backend == HardwareBackend.Auto
                         && IsCapabilityFailure(failure)
                         && fallbackUsed < fallbackCap
                         && fallbackUsed + 1 < plan.CandidatePaths.Count;
@@ -804,6 +836,45 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 {
                     var failure = verification.Failure
                         ?? FailureInfo.Of(FailureCode.VerifyFailed, "error.verifyFailed", verification.Summary);
+                    _activeAttempts.TryRemove(jobId, out _);
+                    await MarkAttemptTerminalAsync(attempt.AttemptId, AttemptState.Failed, failure, null, null, null).ConfigureAwait(false);
+                    await CleanupAsync(reservedOutput, tempPath).ConfigureAwait(false);
+                    reserved = null;
+                    await FailFromCurrentAsync(jobId, failure, CancellationToken.None).ConfigureAwait(false);
+                    return;
+                }
+
+                // The source may have changed while encoding/verifying. Re-probe before crossing
+                // the commit boundary so unstable input can never be published as a valid result.
+                Result<SourceSnapshot> postVerificationProbe;
+                try
+                {
+                    postVerificationProbe = await _probe.ProbeAsync(sourceRef, cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    postVerificationProbe = Result<SourceSnapshot>.Canceled();
+                }
+
+                if (postVerificationProbe.IsCanceled || cts.IsCancellationRequested)
+                {
+                    await MarkAttemptTerminalAsync(attempt.AttemptId, AttemptState.Canceled, null, null, null, null).ConfigureAwait(false);
+                    _activeAttempts.TryRemove(jobId, out _);
+                    await CleanupAsync(reservedOutput, tempPath).ConfigureAwait(false);
+                    reserved = null;
+                    await FinishCanceledAsync(jobId).ConfigureAwait(false);
+                    return;
+                }
+
+                if (!postVerificationProbe.IsSuccess || postVerificationProbe.Value is null
+                    || !SameInput(job.SourceFingerprint, postVerificationProbe.Value))
+                {
+                    var failure = postVerificationProbe.IsSuccess && postVerificationProbe.Value is not null
+                        ? FailureInfo.Of(FailureCode.InputChanged, "error.inputChanged",
+                            "Source changed while the output was being produced.", true)
+                        : postVerificationProbe.Failure
+                            ?? FailureInfo.Of(FailureCode.ProbeFailed, "error.probeFailed",
+                                "Source could not be rechecked before commit.");
                     _activeAttempts.TryRemove(jobId, out _);
                     await MarkAttemptTerminalAsync(attempt.AttemptId, AttemptState.Failed, failure, null, null, null).ConfigureAwait(false);
                     await CleanupAsync(reservedOutput, tempPath).ConfigureAwait(false);

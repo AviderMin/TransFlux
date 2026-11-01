@@ -102,7 +102,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
 
         var appearance = Section(UiText.Appearance,
             ComboBox(ThemeItems, themeIndex, i => Update(s => s with { Theme = i switch { 1 => "Light", 2 => "Dark", _ => "System" } }))
-                .Header(UiText.ThemeSystem).HAlign(HorizontalAlignment.Stretch));
+                .Header("主题").AutomationName("主题").HAlign(HorizontalAlignment.Stretch));
 
         var output = Section(UiText.OutputRules,
             VStack(2, Ui.FieldLabel("默认输出位置（留空则使用源文件旁的 TransFlux Output）"),
@@ -182,7 +182,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
 
         var body = VStack(Space.Lg,
             Ui.Dim("保存后，并发限制影响后续任务；回退与验证策略影响此后开始的任务。默认输出规则用于新增文件。").FontSize(12).TextWrapping(TextWrapping.Wrap),
-            notice is { } msg ? InfoBar("提示", msg).Informational().IsClosable(true).Closed(() => setNotice(null)) : null,
+            notice is { } msg ? InfoBar("设置未保存", msg).Error().IsClosable(true).Closed(() => setNotice(null)) : null,
             appearance,
             output,
             resources,

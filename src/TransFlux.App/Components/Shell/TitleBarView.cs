@@ -8,7 +8,7 @@ using TransFlux.App.Theming;
 namespace TransFlux.App.Components.Shell;
 
 /// <summary>Props for the custom title bar.</summary>
-public sealed record TitleBarProps(Action OpenSettings, Action ShowAbout, Action? OpenHistory = null);
+public sealed record TitleBarProps(Action OpenSettings, Action ShowAbout, Action? OpenHistory = null, bool SettingsEnabled = true);
 
 /// <summary>
 /// Custom title bar (SurgeLink TitleBar.RightHeader pattern): app icon + name on
@@ -22,7 +22,7 @@ public static class TitleBarView
     {
         var right = HStack(Space.Sm,
             props.OpenHistory is null ? null : TitleIconButton("\uE81C", "历史记录", "历史记录", props.OpenHistory),
-            TitleIconButton("\uE713", UiText.SettingsTitle, "设置", props.OpenSettings),
+            TitleIconButton("\uE713", UiText.SettingsTitle, "设置", props.OpenSettings).IsEnabled(props.SettingsEnabled),
             TitleIconButton("\uE946", UiText.AboutTitle, "关于", props.ShowAbout))
             .VAlign(VerticalAlignment.Center)
             .Margin(0, 0, Space.Sm, 0);

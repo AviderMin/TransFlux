@@ -74,7 +74,7 @@ public sealed class FfmpegVerifier : IOutputVerifier
         return VerificationResult.Ok(summary, actual);
     }
 
-    private static List<string> Compare(ExpectedOutput expected, SourceSnapshot actual, string outputPath)
+    internal static List<string> Compare(ExpectedOutput expected, SourceSnapshot actual, string outputPath)
     {
         var problems = new List<string>();
         var video = actual.PrimaryVideo;
@@ -141,16 +141,26 @@ public sealed class FfmpegVerifier : IOutputVerifier
         if (wantContainer is not null && !actual.Format.FormatName.Split(',').Contains(wantContainer, StringComparer.OrdinalIgnoreCase))
             problems.Add($"container '{actual.Format.FormatName}' != expected '{wantContainer}'");
 
-        if (expected.DurationUs is long expectedUs && actual.DurationUs is long actualUs)
+        if (expected.DurationUs is long expectedUs)
         {
-            var toleranceUs = DurationToleranceUs(expected, video, audio);
-            var delta = Math.Abs(actualUs - expectedUs);
-            if (delta > toleranceUs)
-                problems.Add($"duration {actualUs} us differs from expected {expectedUs} us by {delta} us (tolerance {toleranceUs} us)");
+            if (actual.DurationUs is long actualUs)
+            {
+                var toleranceUs = DurationToleranceUs(expected, video, audio);
+                var delta = Math.Abs(actualUs - expectedUs);
+                if (delta > toleranceUs)
+                    problems.Add($"duration {actualUs} us differs from expected {expectedUs} us by {delta} us (tolerance {toleranceUs} us)");
+            }
+            else if (RequiresKnownDuration(expected.Container))
+            {
+                problems.Add($"duration is unknown; expected {expectedUs} us");
+            }
         }
 
         return problems;
     }
+
+    private static bool RequiresKnownDuration(ContainerFormat container) =>
+        container is not (ContainerFormat.Aac or ContainerFormat.Mp3);
 
     private static long DurationToleranceUs(ExpectedOutput expected, StreamDescriptor? video, StreamDescriptor? audio)
     {

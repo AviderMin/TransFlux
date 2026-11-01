@@ -13,9 +13,9 @@ public static class LauncherInterop
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             await Launcher.LaunchFileAsync(file);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Ignore: the caller already surfaces the final path.
+            throw new InvalidOperationException("无法打开输出文件。请确认文件仍存在，并检查默认应用关联。", ex);
         }
     }
 
@@ -32,9 +32,9 @@ public static class LauncherInterop
             }
             await OpenAsync(path);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Ignore: the caller already surfaces the path in the UI.
+            throw new InvalidOperationException("无法打开输出文件夹。请确认该位置仍然存在。", ex);
         }
     }
 
@@ -45,7 +45,10 @@ public static class LauncherInterop
             var args = System.IO.File.Exists(path) ? $"/select,\"{path}\"" : $"\"{System.IO.Path.GetDirectoryName(path) ?? path}\"";
             Process.Start(new ProcessStartInfo("explorer.exe", args) { UseShellExecute = true });
         }
-        catch (Exception) { }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("无法在资源管理器中显示输出。请确认该位置仍然存在。", ex);
+        }
     }
 
     public static void CopyText(string text)
@@ -56,6 +59,9 @@ public static class LauncherInterop
             package.SetText(text);
             Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
         }
-        catch (Exception) { }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("无法复制输出路径。", ex);
+        }
     }
 }

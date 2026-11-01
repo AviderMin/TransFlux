@@ -11,7 +11,7 @@ namespace TransFlux.Infrastructure;
 
 /// <summary>SQLite-backed job store (docs/07 schema). WAL, foreign keys, FULL synchronous durability,
 /// single-writer serialization, conditional (revision-checked) job updates and migration backups.</summary>
-public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
+public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournalContentStore
 {
     private static readonly JsonSerializerOptions Json = CanonicalJson.Options;
 
@@ -36,6 +36,12 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
     private static readonly int[] TerminalStates =
     {
         (int)JobState.Succeeded, (int)JobState.Failed, (int)JobState.Canceled, (int)JobState.Interrupted,
+    };
+
+    private static readonly int[] ActiveAttemptStates =
+    {
+        (int)AttemptState.Created, (int)AttemptState.Running,
+        (int)AttemptState.Verifying, (int)AttemptState.Committing,
     };
 
     private readonly string _databasePath;
@@ -208,6 +214,53 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
             return ++_lastEnqueueOrder;
         }, ct).ConfigureAwait(false);
     }
+
+    public Task<bool> ReorderQueuedAsync(Guid jobId, Guid targetJobId, bool placeBefore, CancellationToken ct)
+        => InGateAsync(async conn =>
+        {
+            using var tx = conn.BeginTransaction();
+            var queued = new List<(Guid Id, long Order, long Revision)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "SELECT id, enqueue_order, revision FROM jobs WHERE state=$state ORDER BY enqueue_order, id;";
+                cmd.Parameters.AddWithValue("$state", (int)JobState.Queued);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    queued.Add((Guid.Parse(reader.GetString(0)), reader.GetInt64(1), reader.GetInt64(2)));
+            }
+
+            var moving = queued.FirstOrDefault(x => x.Id == jobId);
+            if (moving.Id == Guid.Empty || !queued.Any(x => x.Id == targetJobId) || jobId == targetJobId)
+            {
+                tx.Rollback();
+                return false;
+            }
+
+            var reordered = queued.Where(x => x.Id != jobId).ToList();
+            var targetIndex = reordered.FindIndex(x => x.Id == targetJobId);
+            if (targetIndex < 0) { tx.Rollback(); return false; }
+            reordered.Insert(placeBefore ? targetIndex : targetIndex + 1, moving);
+
+            var now = DateTimeOffset.UtcNow;
+            for (var i = 0; i < reordered.Count; i++)
+            {
+                using var update = conn.CreateCommand();
+                update.Transaction = tx;
+                update.CommandText = "UPDATE jobs SET enqueue_order=$order, revision=revision+1, updated_utc=$updated WHERE id=$id AND state=$state;";
+                update.Parameters.AddWithValue("$order", (long)(i + 1));
+                update.Parameters.AddWithValue("$updated", Fmt(now));
+                update.Parameters.AddWithValue("$id", reordered[i].Id.ToString());
+                update.Parameters.AddWithValue("$state", (int)JobState.Queued);
+                if (await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
+                {
+                    tx.Rollback();
+                    return false;
+                }
+            }
+            tx.Commit();
+            return true;
+        }, ct);
 
     public Task CreateJobAsync(Job job, CancellationToken ct)
     {
@@ -532,15 +585,32 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
     // ---- Commit journal ----
 
     public Task UpsertJournalAsync(CommitJournalEntry entry, CancellationToken ct)
+        => UpsertJournalCoreAsync(entry, contentSha256: null, updateContentHash: false, ct);
+
+    Task ICommitJournalContentStore.UpsertJournalWithContentHashAsync(
+        CommitJournalEntry entry, string contentSha256, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(contentSha256))
+            throw new ArgumentException("A content hash is required.", nameof(contentSha256));
+        return UpsertJournalCoreAsync(entry, contentSha256, updateContentHash: true, ct);
+    }
+
+    private Task UpsertJournalCoreAsync(
+        CommitJournalEntry entry, string? contentSha256, bool updateContentHash, CancellationToken ct)
     {
         if (entry is null) throw new ArgumentNullException(nameof(entry));
         return InGateAsync(async conn =>
         {
             using var cmd = conn.CreateCommand();
+            var columns = updateContentHash ? JournalColumns + ",content_sha256" : JournalColumns;
+            var values = updateContentHash
+                ? "$token,$attempt,$job,$phase,$temp,$final,$size,$updated,$hash"
+                : "$token,$attempt,$job,$phase,$temp,$final,$size,$updated";
             cmd.CommandText =
-                "INSERT INTO commit_journal(" + JournalColumns + ") VALUES($token,$attempt,$job,$phase,$temp,$final,$size,$updated) " +
+                "INSERT INTO commit_journal(" + columns + ") VALUES(" + values + ") " +
                 "ON CONFLICT(commit_token) DO UPDATE SET attempt_id=excluded.attempt_id, job_id=excluded.job_id, phase=excluded.phase, " +
-                "temp_path=excluded.temp_path, final_path=excluded.final_path, size_bytes=excluded.size_bytes, updated_utc=excluded.updated_utc;";
+                "temp_path=excluded.temp_path, final_path=excluded.final_path, size_bytes=excluded.size_bytes, updated_utc=excluded.updated_utc" +
+                (updateContentHash ? ", content_sha256=excluded.content_sha256" : "") + ";";
             cmd.Parameters.AddWithValue("$token", entry.CommitToken);
             cmd.Parameters.AddWithValue("$attempt", entry.AttemptId.ToString());
             cmd.Parameters.AddWithValue("$job", entry.JobId.ToString());
@@ -549,9 +619,20 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
             cmd.Parameters.AddWithValue("$final", entry.FinalPath);
             cmd.Parameters.AddWithValue("$size", entry.SizeBytes);
             cmd.Parameters.AddWithValue("$updated", Fmt(entry.UpdatedUtc));
+            if (updateContentHash) cmd.Parameters.AddWithValue("$hash", contentSha256!);
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }, ct);
     }
+
+    Task<string?> ICommitJournalContentStore.GetJournalContentHashAsync(string token, CancellationToken ct)
+        => InGateAsync(async conn =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT content_sha256 FROM commit_journal WHERE commit_token=$token;";
+            cmd.Parameters.AddWithValue("$token", token);
+            var value = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            return value is null or DBNull ? null : (string)value;
+        }, ct);
 
     public Task<CommitJournalEntry?> GetJournalAsync(string token, CancellationToken ct)
         => InGateAsync(async conn =>
@@ -686,6 +767,10 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
     public Task<IReadOnlyList<Job>> MarkActiveJobsInterruptedAsync(CancellationToken ct)
         => InGateAsync(async conn =>
         {
+            // A later recovery pass can prove that a commit which previously needed attention
+            // actually completed. Reconcile those outputs before interrupting remaining work.
+            await RecoverNeedsAttentionJobsAsync(conn, ct).ConfigureAwait(false);
+
             var stateList = string.Join(",", ActiveStates);
             var active = new List<Job>();
             using (var cmd = conn.CreateCommand())
@@ -698,22 +783,106 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable
 
             var now = DateTimeOffset.UtcNow;
             var updated = new List<Job>(active.Count);
+            var attemptStateList = string.Join(",", ActiveAttemptStates);
             using var tx = conn.BeginTransaction();
             foreach (var job in active)
             {
-                using var cmd = conn.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = "UPDATE jobs SET state=$state, revision=revision+1, updated_utc=$updated WHERE id=$id AND state=$oldState;";
-                cmd.Parameters.AddWithValue("$state", (int)JobState.Interrupted);
-                cmd.Parameters.AddWithValue("$updated", Fmt(now));
-                cmd.Parameters.AddWithValue("$id", job.JobId.ToString());
-                cmd.Parameters.AddWithValue("$oldState", (int)job.State);
-                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-                updated.Add(job with { State = JobState.Interrupted, Revision = job.Revision + 1, UpdatedUtc = now });
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText =
+                        "UPDATE attempts SET state=$state, ended_utc=$ended " +
+                        "WHERE job_id=$job AND state IN (" + attemptStateList + ");";
+                    cmd.Parameters.AddWithValue("$state", (int)AttemptState.Interrupted);
+                    cmd.Parameters.AddWithValue("$ended", Fmt(now));
+                    cmd.Parameters.AddWithValue("$job", job.JobId.ToString());
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText =
+                        "UPDATE jobs SET state=$state, revision=revision+1, updated_utc=$updated, active_attempt_id=NULL " +
+                        "WHERE id=$id AND state=$oldState;";
+                    cmd.Parameters.AddWithValue("$state", (int)JobState.Interrupted);
+                    cmd.Parameters.AddWithValue("$updated", Fmt(now));
+                    cmd.Parameters.AddWithValue("$id", job.JobId.ToString());
+                    cmd.Parameters.AddWithValue("$oldState", (int)job.State);
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                updated.Add(job with
+                {
+                    State = JobState.Interrupted,
+                    Revision = job.Revision + 1,
+                    UpdatedUtc = now,
+                    ActiveAttemptId = null,
+                });
             }
             tx.Commit();
             return (IReadOnlyList<Job>)updated;
         }, ct);
+
+    private static async Task RecoverNeedsAttentionJobsAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        var candidates = new List<(Guid JobId, long Revision, Guid AttemptId, DateTimeOffset CommittedUtc)>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText =
+                "SELECT j.id, j.revision, j.updated_utc, o.attempt_id, o.committed_utc FROM jobs j " +
+                "JOIN outputs o ON o.attempt_id=(" +
+                "SELECT o2.attempt_id FROM outputs o2 WHERE o2.job_id=j.id ORDER BY o2.committed_utc DESC LIMIT 1) " +
+                "WHERE j.state=$attention AND NOT EXISTS(" +
+                "SELECT 1 FROM commit_journal cj WHERE cj.job_id=j.id AND cj.phase IN ($prepared,$published)) " +
+                "ORDER BY j.enqueue_order;";
+            cmd.Parameters.AddWithValue("$attention", (int)JobState.NeedsAttention);
+            cmd.Parameters.AddWithValue("$prepared", (int)CommitPhase.Prepared);
+            cmd.Parameters.AddWithValue("$published", (int)CommitPhase.Published);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                var jobUpdatedUtc = ParseDate(reader.GetString(2));
+                var committedUtc = ParseDate(reader.GetString(4));
+                // An output predating the NeedsAttention transition belongs to an older attempt
+                // and must not make a later failed attempt look successful.
+                if (committedUtc < jobUpdatedUtc) continue;
+                candidates.Add((Guid.Parse(reader.GetString(0)), reader.GetInt64(1),
+                    Guid.Parse(reader.GetString(3)), committedUtc));
+            }
+        }
+        if (candidates.Count == 0) return;
+
+        using var tx = conn.BeginTransaction();
+        foreach (var candidate in candidates)
+        {
+            int attemptRows;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText =
+                    "UPDATE attempts SET state=$succeeded, ended_utc=$ended WHERE id=$attempt AND job_id=$job;";
+                cmd.Parameters.AddWithValue("$succeeded", (int)AttemptState.Succeeded);
+                cmd.Parameters.AddWithValue("$ended", Fmt(candidate.CommittedUtc));
+                cmd.Parameters.AddWithValue("$attempt", candidate.AttemptId.ToString());
+                cmd.Parameters.AddWithValue("$job", candidate.JobId.ToString());
+                attemptRows = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            if (attemptRows == 0) continue;
+
+            using var jobCmd = conn.CreateCommand();
+            jobCmd.Transaction = tx;
+            jobCmd.CommandText =
+                "UPDATE jobs SET state=$succeeded, active_attempt_id=NULL, revision=revision+1, updated_utc=$updated " +
+                "WHERE id=$job AND revision=$revision AND state=$attention;";
+            jobCmd.Parameters.AddWithValue("$succeeded", (int)JobState.Succeeded);
+            jobCmd.Parameters.AddWithValue("$updated", Fmt(candidate.CommittedUtc));
+            jobCmd.Parameters.AddWithValue("$job", candidate.JobId.ToString());
+            jobCmd.Parameters.AddWithValue("$revision", candidate.Revision);
+            jobCmd.Parameters.AddWithValue("$attention", (int)JobState.NeedsAttention);
+            await jobCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+        tx.Commit();
+    }
 
     // ---- Helpers ----
 
@@ -930,6 +1099,9 @@ CREATE INDEX ix_jobs_source ON jobs(source_id);
 CREATE INDEX ix_attempts_job ON attempts(job_id);
 CREATE INDEX ix_outputs_job ON outputs(job_id);
 CREATE INDEX ix_journal_phase ON commit_journal(phase);
+"),
+        new(3, @"
+ALTER TABLE commit_journal ADD COLUMN content_sha256 TEXT;
 "),
     };
 }

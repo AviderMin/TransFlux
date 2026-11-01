@@ -30,7 +30,7 @@ public sealed class SqliteJobStoreTests
             var versions = new List<long>();
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) versions.Add(reader.GetInt64(0));
-            Assert.Equal(new long[] { 1, 2 }, versions.ToArray());
+            Assert.Equal(new long[] { 1, 2, 3 }, versions.ToArray());
         }
 
         using (var modeCmd = conn.CreateCommand())
@@ -237,8 +237,11 @@ public sealed class SqliteJobStoreTests
         await store.InitializeAsync(default);
 
         var running = TestData.NewJob(state: JobState.Running, revision: 0, enqueueOrder: 1);
+        var runningAttempt = TestData.NewAttempt(running.JobId) with { State = AttemptState.Running };
+        running = running with { ActiveAttemptId = runningAttempt.AttemptId };
         var done = TestData.NewJob(state: JobState.Succeeded, revision: 3, enqueueOrder: 2);
         await store.CreateJobAsync(running, default);
+        await store.CreateAttemptAsync(runningAttempt, default);
         await store.CreateJobAsync(done, default);
 
         var interrupted = await store.MarkActiveJobsInterruptedAsync(default);
@@ -249,9 +252,50 @@ public sealed class SqliteJobStoreTests
         var reloadedRunning = await store.GetJobAsync(running.JobId, default);
         Assert.Equal(JobState.Interrupted, reloadedRunning!.State);
         Assert.Equal(1, reloadedRunning.Revision);
+        Assert.Null(reloadedRunning.ActiveAttemptId);
+        var reloadedAttempt = await store.GetAttemptAsync(runningAttempt.AttemptId, default);
+        Assert.Equal(AttemptState.Interrupted, reloadedAttempt!.State);
+        Assert.NotNull(reloadedAttempt.EndedUtc);
 
         var reloadedDone = await store.GetJobAsync(done.JobId, default);
         Assert.Equal(JobState.Succeeded, reloadedDone!.State);
         Assert.Equal(3, reloadedDone.Revision);
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_RecoversNeedsAttentionWithOutputAndNoOpenJournal()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+
+        var updated = new DateTimeOffset(2026, 1, 2, 4, 0, 0, TimeSpan.Zero);
+        var job = TestData.NewJob(state: JobState.NeedsAttention, revision: 4, enqueueOrder: 1) with
+        {
+            UpdatedUtc = updated,
+        };
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Failed };
+        job = job with { ActiveAttemptId = attempt.AttemptId };
+        await store.CreateJobAsync(job, default);
+        await store.CreateAttemptAsync(attempt, default);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = @"C:\out\recovered.mp4",
+            Size = 42,
+            VerificationSummary = "recovered",
+            CommittedUtc = updated.AddMinutes(1),
+            CommitToken = "recover-token",
+        }, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        var recoveredJob = await store.GetJobAsync(job.JobId, default);
+        Assert.Equal(JobState.Succeeded, recoveredJob!.State);
+        Assert.Null(recoveredJob.ActiveAttemptId);
+        var recoveredAttempt = await store.GetAttemptAsync(attempt.AttemptId, default);
+        Assert.Equal(AttemptState.Succeeded, recoveredAttempt!.State);
+        Assert.Equal(updated.AddMinutes(1), recoveredAttempt.EndedUtc);
     }
 }

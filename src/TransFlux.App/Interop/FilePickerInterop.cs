@@ -10,6 +10,12 @@ namespace TransFlux.App.Interop;
 /// </summary>
 public static class FilePickerInterop
 {
+    private const int DefaultBatchSize = 64;
+    private static readonly HashSet<string> ExcludedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "TransFlux Output",
+        ".transflux-work",
+    };
     private static readonly string[] DefaultMediaExtensions =
     {
         ".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm", ".ts", ".m2ts",
@@ -53,26 +59,119 @@ public static class FilePickerInterop
         return folder?.Path;
     }
 
-    /// <summary>Enumerates media files in a folder (recursively for "add folder").</summary>
+    public static async Task<string?> PickSaveReportAsync(Microsoft.UI.Xaml.Window? window, string suggestedName)
+    {
+        if (window is null) return null;
+        var picker = new FileSavePicker
+        {
+            SuggestedFileName = suggestedName,
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+        };
+        picker.FileTypeChoices.Add("诊断报告", new List<string> { ".txt" });
+        Initialize(window, picker);
+        var file = await picker.PickSaveFileAsync();
+        return file?.Path;
+    }
+
+    /// <summary>
+    /// Enumerates media files without following reparse points, yielding bounded batches so
+    /// the caller can import incrementally and cancel between batches.
+    /// </summary>
+    public static async Task<int> EnumerateMediaFilesAsync(
+        string folder,
+        bool recursive,
+        Func<IReadOnlyList<string>, Task> onBatch,
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? excludedDirectories = null,
+        int batchSize = DefaultBatchSize)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folder);
+        ArgumentNullException.ThrowIfNull(onBatch);
+        ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);
+        if (!Directory.Exists(folder)) throw new DirectoryNotFoundException("文件夹不存在或当前不可访问。");
+
+        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (excludedDirectories is not null)
+            foreach (var path in excludedDirectories)
+                if (!string.IsNullOrWhiteSpace(path)) excluded.Add(NormalizeDirectory(path));
+
+        var found = 0;
+        var batch = new List<string>(Math.Min(batchSize, DefaultBatchSize));
+        foreach (var path in EnumeratePaths(folder, recursive, excluded, cancellationToken))
+        {
+            batch.Add(path);
+            found++;
+            if (batch.Count < batchSize) continue;
+            await onBatch(batch.ToArray()).ConfigureAwait(false);
+            batch.Clear();
+        }
+        if (batch.Count > 0) await onBatch(batch.ToArray()).ConfigureAwait(false);
+        return found;
+    }
+
+    /// <summary>Compatibility helper for bounded, non-UI callers; new UI imports use the batch API.</summary>
     public static IReadOnlyList<string> EnumerateMediaFiles(string folder, bool recursive)
     {
-        var options = new EnumerationOptions
-        {
-            RecurseSubdirectories = recursive,
-            IgnoreInaccessible = true,
-            AttributesToSkip = System.IO.FileAttributes.System | System.IO.FileAttributes.Hidden,
-        };
+        if (!Directory.Exists(folder)) return Array.Empty<string>();
         try
         {
-            return Directory.EnumerateFiles(folder, "*", options)
-                .Where(IsMediaFile)
-                .ToList();
+            return EnumeratePaths(folder, recursive, new HashSet<string>(StringComparer.OrdinalIgnoreCase), CancellationToken.None).ToList();
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
             return Array.Empty<string>();
         }
     }
+
+    private static IEnumerable<string> EnumeratePaths(
+        string folder,
+        bool recursive,
+        HashSet<string> excluded,
+        CancellationToken cancellationToken)
+    {
+        var pending = new Stack<string>();
+        pending.Push(NormalizeDirectory(folder));
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var directory = pending.Pop();
+            string[] files;
+            try { files = Directory.GetFiles(directory); }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { continue; }
+
+            foreach (var path in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (IsMediaFile(path)) yield return path;
+            }
+            if (!recursive) continue;
+
+            string[] children;
+            try { children = Directory.GetDirectories(directory); }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { continue; }
+            foreach (var child in children)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string fullPath;
+                System.IO.FileAttributes attributes;
+                try
+                {
+                    fullPath = NormalizeDirectory(child);
+                    attributes = File.GetAttributes(fullPath);
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { continue; }
+                const System.IO.FileAttributes skipped = System.IO.FileAttributes.ReparsePoint | System.IO.FileAttributes.Hidden | System.IO.FileAttributes.System;
+                if ((attributes & skipped) != 0 || IsExcludedDirectory(fullPath, excluded)) continue;
+                pending.Push(fullPath);
+            }
+        }
+    }
+
+    private static bool IsExcludedDirectory(string path, HashSet<string> excluded)
+        => excluded.Contains(path) || ExcludedDirectoryNames.Contains(Path.GetFileName(path));
+
+    private static string NormalizeDirectory(string path)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 
     public static bool IsMediaFile(string path)
     {

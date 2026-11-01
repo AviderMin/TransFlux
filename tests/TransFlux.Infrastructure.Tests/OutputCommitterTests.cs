@@ -79,7 +79,7 @@ public sealed class OutputCommitterTests
     }
 
     [Fact]
-    public async Task Reconcile_Prepared_WithFinal_CompletesOutput()
+    public async Task Reconcile_Prepared_WithLegacyFinalOnly_RequiresAttention()
     {
         using var dir = new TempDir();
         var h = await CreateAsync(dir);
@@ -103,9 +103,10 @@ public sealed class OutputCommitterTests
         await store.UpsertJournalAsync(entry, default);
 
         var result = await h.Committer.ReconcileAsync(entry, default);
-        Assert.True(result.Success, result.Failure?.TechnicalDetail);
-        Assert.Single(await store.GetOutputsForJobAsync(h.Job.JobId, default));
-        Assert.Empty(await store.GetOpenJournalsAsync(default));
+        Assert.False(result.Success);
+        Assert.Equal(FailureCode.OutputConflict, result.Failure!.Code);
+        Assert.Empty(await store.GetOutputsForJobAsync(h.Job.JobId, default));
+        Assert.Single(await store.GetOpenJournalsAsync(default)); // kept for NeedsAttention
     }
 
     [Fact]
