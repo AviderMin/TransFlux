@@ -14,7 +14,7 @@ H.265/AV1/VP9 目前使用 CPU，不能直接宣称新增相应硬件编码支�
 不要恢复按源文件 ID 合并任务、运行中直接编辑参数、移除代替取消或启动时自动继续队列的行为。
 当前验证范围、隔离数据目录及后续验收事项见 [重构证据](evidence/UX-workbench-redesign.md)。
 
-当前构建（2026-11-01）：工作台重构与输出格式扩展已提交（`0aec42c`），版本 `1.0.0.4`（`b59dc0a`）；解决方案 Debug 构建 0 警告/0 错误，全量 **265 项测试通过**，真实 E2E PASS；Inno Setup 1.0.0.4 安装包已构建并验证安装/启动/E2E/卸载（见 [INSTALLER](evidence/INSTALLER.md)）。签名的 MSIX、Narrator/DPI/主题人工验收、NVENC 实机性能报告仍未完成。
+当前构建（2026-11-01）：版本 `1.0.0.6`（`862c5ef`），包含 1.0.0.5 硬件兼容基线（`2cc0b80`）与工作台 UI 更新；解决方案 Debug 构建 0 警告/0 错误，全量 **272 项测试通过**，真实 E2E PASS；Inno Setup 1.0.0.6 安装包已构建并验证安装/启动/CPU E2E/卸载（见 [INSTALLER](evidence/INSTALLER.md)）。签名的 MSIX、Narrator/DPI/主题人工验收、NVENC 实机性能报告仍未完成。
 
 ## 当前项目事实
 
