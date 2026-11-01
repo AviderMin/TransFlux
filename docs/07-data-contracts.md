@@ -1,5 +1,26 @@
 # 07 · 数据、接口与状态契约
 
+## 2026-11-01 工作台契约增量
+
+- 输出分层扩展：ConversionRequest / PresetRequestTemplate 新增 VideoCodec（默认 H264）；ConversionMode 继续区分转码、音频输出和转封装。
+  ContainerFormat、VideoCodec、AudioCodec 新值只追加，不更改旧序号；兼容矩阵统一由 OutputFormatCatalog 提供。
+  可用组合见 [输出格式记录](evidence/OUTPUT-FORMATS.md)。
+
+- `WorkspaceEntry(MediaId, SourcePath, Request, JobId?)` 经 IWorkspacePersistence 存入 settings 的 `workspace.v1`。
+  Request 记录未开始项目参数；绑定后以执行 RequestSnapshot 为准。恢复时重新探测未开始项目。
+- 工作台移除只删除可见卡片；历史与源/输出文件独立保留。撤销恢复同一 MediaId/JobId。
+  工作台加载返回 null 表示从未保存，空列表表示已保存的空工作台，避免把已移除的中断任务重新带回。
+  新任务在卡片绑定持久化前保持暂停，避免崩溃造成不可见的已启动任务。
+- SnapshotCompleted 在初始查询（包括零任务）后发出；Snapshot 同时携带最新 Attempt、Output 和可用的 Failure。
+  查询失败向观察者传播，不能伪装空队列；后续事件不能回滚已有 Job.Revision。
+- IJobService.ConfigureExecution 更新后续调度并发、回退和完整验证；执行中的任务捕获旧策略。
+- Recovering 允许取消；Committing 之后拒绝取消。
+- PresetRequestTemplate 新增可空宽/高、CRF、视频码率、帧率、音频采样率/声道及硬件后端；旧 JSON 缺失字段使用默认值。
+  不包含输出路径、文件名、裁剪和源轨道编号。
+- 恢复时 Committing 任务已有对应 OutputRecord，应补齐成功终态与 Attempt，避免诱导重复转换。
+
+本节是当前实现增量，其余旧接口示例以代码为准。
+
 ## 领域模型
 
 ID 采用不可变 GUID，时间以 UTC 存储，UI 本地化显示。媒体时长使用整数微秒或 TimeSpan ticks，帧率/SAR/time_base 使用分子分母有理数；Unknown 用 nullable/显式联合状态，不用 0、NaN 或空字符串混淆。

@@ -1,5 +1,26 @@
 # 04 · 系统架构
 
+## 2026-11-01 工作台实现修订
+
+`WorkbenchStore` 统一管理导入、选择、参数变更、任务绑定、撤销和可见项目持久化；
+`AppRoot` 负责 Reactor 布局与窗口/文件选择器互操作，`OutputSettingsPanel` 编辑所选项目，`TaskRow` 显示完整生命周期。
+旧的独立 JobQueueStore、WorkbenchReducer、ParameterDialog、BatchDialog、ConversionForm 和 ShellContext 已移除。
+
+每张卡片有稳定 MediaId，入队后显式绑定 JobId，不能按源路径或 SourceSnapshotId 合并独立转换。
+Submitting 状态锁定修改和移除；已绑定的参数由不可变 RequestSnapshot 校正。
+控制器不依赖 WinUI，通知由 Reactor 组件投递到 DispatcherQueue；进度通知按 250ms 合并。
+媒体读取限制并发，每项都有取消令牌；移除/撤销不会接纳旧读取的迟到结果。
+
+`IWorkspacePersistence` 在 Infrastructure 通过 SQLite settings 的 `workspace.v1` 保存可见卡片。
+恢复后，通过 WatchAsync 初始 Job/Attempt/Output 投影关联执行信息，SnapshotCompleted 标识初始化完成。
+历史已清空的悬空 JobId 不会自动成为待执行草稿。未开始文件重新读取媒体信息。
+宿主完成恢复后先暂停调度，再启动循环，用户明确继续才恢复等待任务。
+ConfigureExecution 原子更新后续策略；并发门槛基于在途任务数量，不终止已有任务。
+回退/验证策略在任务开始时捕获；暂停在启动任务前复核。
+AppRoot 拦截退出：有活动任务时提供继续/取消退出，等待安全终态后保存并关闭。
+
+以下目录结构为早期建议；当前交互与生命周期以本节及 [03](03-ui-ux.md) 为准。
+
 ## 模块依赖
 
 ```mermaid

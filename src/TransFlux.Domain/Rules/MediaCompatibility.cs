@@ -9,7 +9,7 @@ public sealed record CompatibilityIssue(string Code, string Message, bool Blocki
     public static CompatibilityIssue Warn(string code, string msg) => new(code, msg, false);
 }
 
-/// <summary>First-release compatibility matrix (docs/05). Returns blocking/warn issues.</summary>
+/// <summary>Output compatibility plus source colour/stream constraints (docs/05).</summary>
 public static class MediaCompatibility
 {
     public static IReadOnlyList<CompatibilityIssue> Validate(ConversionRequest request, SourceSnapshot source)
@@ -27,6 +27,21 @@ public static class MediaCompatibility
                 ValidateRemux(request, source, issues);
                 break;
         }
+        if (request.Mode != ConversionMode.Remux && request.Audio.Codec == AudioCodec.Opus)
+        {
+            if (request.Audio.SampleRate is int rate && rate is not (8000 or 12000 or 16000 or 24000 or 48000))
+                issues.Add(CompatibilityIssue.Block("AUDIO_RATE", "Opus 支持 8000、12000、16000、24000、48000 Hz，请选择受支持的采样率或留空自动。"));
+            if (request.Audio.BitRateKbps is > 510)
+                issues.Add(CompatibilityIssue.Block("AUDIO_BITRATE", "Opus 码率不得超过 510 kbps。"));
+        }
+        if (request.Mode != ConversionMode.Remux && request.Audio.Codec == AudioCodec.Mp3
+            && (request.Audio.Channels ?? SelectPrimaryAudio(request, source)?.Channels) is > 2)
+            issues.Add(CompatibilityIssue.Block("AUDIO_CHANNELS", "MP3 仅支持单声道或立体声，请将声道数改为 1 或 2。"));
+        if (request.Mode != ConversionMode.Remux && request.Audio.Codec == AudioCodec.Mp3 && request.Audio.BitRateKbps is > 320)
+            issues.Add(CompatibilityIssue.Block("AUDIO_BITRATE", "MP3 码率不得超过 320 kbps。"));
+        if (request.Mode != ConversionMode.Remux && request.Audio.Codec == AudioCodec.Mp3
+            && request.Audio.SampleRate is not (null or 8000 or 11025 or 12000 or 16000 or 22050 or 24000 or 32000 or 44100 or 48000))
+            issues.Add(CompatibilityIssue.Block("AUDIO_RATE", "MP3 不支持该采样率，请改为 44100/48000 Hz 或留空自动。"));
         return issues;
     }
 
@@ -34,8 +49,11 @@ public static class MediaCompatibility
     {
         if (!s.HasVideo)
             issues.Add(CompatibilityIssue.Block("NO_VIDEO", "Source has no video stream to transcode."));
-        if (r.Container is not (ContainerFormat.Mp4 or ContainerFormat.Mkv))
-            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Video transcode supports MP4 or MKV only."));
+        if (!OutputFormatCatalog.VideoContainers.Contains(r.Container))
+            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose a video container."));
+        else if (!OutputFormatCatalog.VideoCodecs(r.Container).Contains(r.VideoCodec)
+            || !OutputFormatCatalog.AudioCodecs(r.Container).Contains(r.Audio.Codec))
+            issues.Add(CompatibilityIssue.Block("CODEC_CONTAINER", "Selected codecs do not match the video container."));
         if (s.ColorClassification is not ColorClassification.SdrBt709)
             issues.Add(CompatibilityIssue.Block("NON_SDR",
                 "Only verified SDR BT.709 video may be transcoded. Use Remux for compatible HDR sources."));
@@ -56,16 +74,9 @@ public static class MediaCompatibility
     {
         if (!s.HasAudio)
             issues.Add(CompatibilityIssue.Block("NO_AUDIO", "Source has no audio stream to extract."));
-        var expected = r.Container switch
-        {
-            ContainerFormat.M4a => AudioCodec.Aac,
-            ContainerFormat.Flac => AudioCodec.Flac,
-            ContainerFormat.Wav => AudioCodec.PcmS16le,
-            _ => (AudioCodec)(-1),
-        };
-        if ((int)expected < 0)
-            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Audio export supports M4A, FLAC or WAV."));
-        else if (r.Audio.Codec != expected)
+        if (!OutputFormatCatalog.AudioContainers.Contains(r.Container))
+            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose an audio container."));
+        else if (!OutputFormatCatalog.AudioCodecs(r.Container).Contains(r.Audio.Codec))
             issues.Add(CompatibilityIssue.Block("CODEC_CONTAINER", "Audio codec does not match container."));
         if (r.Audio.Codec == AudioCodec.Flac)
         {
@@ -79,16 +90,15 @@ public static class MediaCompatibility
     {
         if (r.Trim is not null)
             issues.Add(CompatibilityIssue.Block("TRIM_REMUX", "Trim is disabled for remux in the first release."));
-        if (r.Container is not (ContainerFormat.Mp4 or ContainerFormat.Mkv))
-            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Remux supports MP4 or MKV only."));
+        if (!OutputFormatCatalog.VideoContainers.Contains(r.Container))
+            issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose a video container for remux."));
         if (!s.HasVideo && !s.HasAudio)
             issues.Add(CompatibilityIssue.Block("EMPTY", "Source has no audio or video to copy."));
 
         foreach (var v in s.VideoStreams)
         {
-            bool ok = v.Codec is "h264";
-            if (r.Container == ContainerFormat.Mkv)
-                ok = v.Codec is "h264" or "hevc";
+            bool ok = OutputFormatCatalog.VideoCodecs(r.Container).Any(codec => codec.ProbeName() == v.Codec)
+                || r.Container is ContainerFormat.Mkv or ContainerFormat.Webm && v.Codec == "vp8";
             if (!ok)
                 issues.Add(CompatibilityIssue.Block("REMUX_VIDEO",
                     $"Video codec {v.Codec} cannot be remuxed to {r.Container.DisplayName()}."));
@@ -97,9 +107,8 @@ public static class MediaCompatibility
         }
         foreach (var a in s.AudioStreams)
         {
-            bool ok = a.Codec is "aac" or "flac" or "pcm_s16le" or "pcm_s24le" or "pcm_s32le" or "mp3";
-            if (r.Container == ContainerFormat.Mp4)
-                ok = a.Codec is "aac" or "mp3";
+            bool ok = OutputFormatCatalog.AudioCodecs(r.Container).Any(codec => codec.ProbeName() == a.Codec)
+                || r.Container == ContainerFormat.Mkv && a.Codec is "pcm_s32le" or "ac3" or "eac3";
             if (!ok)
                 issues.Add(CompatibilityIssue.Block("REMUX_AUDIO",
                     $"Audio codec {a.Codec} cannot be remuxed to {r.Container.DisplayName()}."));
@@ -109,9 +118,10 @@ public static class MediaCompatibility
             if (sub.IsBitmapSubtitle)
                 issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE_BITMAP",
                     "Bitmap subtitles are not supported in the first release."));
-            else if (r.Container == ContainerFormat.Mp4 && sub.Codec is not ("mov_text" or "subrip" or "srt"))
+            else if (r.Container is ContainerFormat.Mp4 or ContainerFormat.Mov && sub.Codec != "mov_text"
+                || r.Container == ContainerFormat.Webm && sub.Codec != "webvtt")
                 issues.Add(CompatibilityIssue.Block("REMUX_SUBTITLE",
-                    $"Subtitle codec {sub.Codec} cannot be remuxed to MP4."));
+                    $"Subtitle codec {sub.Codec} cannot be copied to {r.Container.DisplayName()}."));
         }
         if (s.ColorClassification is ColorClassification.DolbyVision)
             issues.Add(CompatibilityIssue.Block("REMUX_DV", "Dolby Vision remux is blocked in the first release."));

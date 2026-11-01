@@ -63,6 +63,7 @@ public class RecoveryServiceTests
         Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
         var outputs = await store.GetOutputsForJobAsync(job.JobId, CancellationToken.None);
         Assert.Single(outputs);
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
     }
 
     [Fact]

@@ -3,6 +3,7 @@ using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using System.Runtime.CompilerServices;
 using static Microsoft.UI.Reactor.Factories;
 
 namespace TransFlux.App.Components.Dialogs;
@@ -14,6 +15,12 @@ namespace TransFlux.App.Components.Dialogs;
 /// </summary>
 public static class DialogChrome
 {
+    private sealed class PrimaryAction
+    {
+        public Func<Task<bool>>? Invoke { get; set; }
+        public bool Busy { get; set; }
+    }
+    private static readonly ConditionalWeakTable<ContentDialog, PrimaryAction> PrimaryActions = new();
     public static ContentDialogElement Render(
         string title,
         Element body,
@@ -22,7 +29,9 @@ public static class DialogChrome
         Action<ContentDialogResult> onClosed,
         double contentWidth = 620,
         double maxHeight = 520,
-        bool isOpen = true)
+        bool isOpen = true,
+        Func<Task<bool>>? beforePrimaryClose = null,
+        bool primaryEnabled = true)
     {
         var scroll = ScrollViewer(Border(body).Padding(0, 0, 16, 24))
             .Width(contentWidth)
@@ -47,7 +56,27 @@ public static class DialogChrome
 
         // Allow the grouped form to use the requested width instead of the
         // ContentDialog default (~548). Indexer assignment overwrites safely.
-        return dialog.Set(control => control.Resources["ContentDialogMaxWidth"] = contentWidth + 120);
+        return dialog.Set(control =>
+        {
+            control.Resources["ContentDialogMaxWidth"] = contentWidth + 120;
+            control.IsPrimaryButtonEnabled = primaryEnabled;
+            var action = PrimaryActions.GetValue(control, c =>
+            {
+                var holder = new PrimaryAction();
+                c.PrimaryButtonClick += async (_, args) =>
+                {
+                    if (holder.Invoke is null) return;
+                    args.Cancel = true;
+                    if (holder.Busy) return;
+                    var deferral = args.GetDeferral();
+                    holder.Busy = true;
+                    try { args.Cancel = !await holder.Invoke(); }
+                    finally { holder.Busy = false; deferral.Complete(); }
+                };
+                return holder;
+            });
+            action.Invoke = beforePrimaryClose;
+        });
     }
 
     /// <summary>

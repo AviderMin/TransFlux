@@ -53,6 +53,20 @@ public static class RecoveryService
             }
         }
 
+        // A crash can occur after durable publication but before the final job transition,
+        // including after the committer has already removed its journal.
+        foreach (var job in await store.GetJobsAsync(new[] { JobState.Committing }, ct).ConfigureAwait(false))
+        {
+            var outputs = await store.GetOutputsForJobAsync(job.JobId, ct).ConfigureAwait(false);
+            var output = outputs.FirstOrDefault(o => job.ActiveAttemptId is null || o.AttemptId == job.ActiveAttemptId);
+            if (output is null) continue;
+            var attempt = await store.GetAttemptAsync(output.AttemptId, ct).ConfigureAwait(false);
+            if (attempt is not null)
+                await store.UpdateAttemptAsync(attempt with { State = AttemptState.Succeeded, EndedUtc = output.CommittedUtc }, ct).ConfigureAwait(false);
+            await store.UpdateJobAsync(job with { State = JobState.Succeeded, ActiveAttemptId = null,
+                Revision = job.Revision + 1, UpdatedUtc = output.CommittedUtc }, job.Revision, ct).ConfigureAwait(false);
+        }
+
         // Any job still active was interrupted by the previous process exit.
         await store.MarkActiveJobsInterruptedAsync(ct).ConfigureAwait(false);
     }

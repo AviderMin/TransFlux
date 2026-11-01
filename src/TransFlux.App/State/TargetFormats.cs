@@ -1,70 +1,47 @@
 using TransFlux.Domain.Plans;
+using TransFlux.Domain.Rules;
 
 namespace TransFlux.App.State;
 
-/// <summary>Groups shown in the left target-format catalogue (Format-Factory style).</summary>
-public enum TargetFormatGroup { Video, Audio, Image }
-
-/// <summary>
-/// One entry in the target-format catalogue. Selecting an entry sets the mode /
-/// container / audio codec for newly added files (and for the current selection).
-/// Pure data: no I/O.
-/// </summary>
-public sealed record TargetFormat(
-    string Key,
-    string Title,
-    string Detail,
-    TargetFormatGroup Group,
-    ConversionMode Mode,
-    ContainerFormat Container,
-    AudioCodec AudioCodec,
-    bool Enabled = true,
-    string? DisabledReason = null)
+public sealed record TargetFormat(string Key, ConversionMode Mode, ContainerFormat Container, VideoCodec VideoCodec, AudioCodec AudioCodec)
 {
-    public ConversionOptions ApplyTo(ConversionOptions options) => options with
-    {
-        Mode = Mode,
-        Container = Container,
-        AudioCodec = AudioCodec,
-    };
+    public ConversionOptions ApplyTo(ConversionOptions o) => o with
+    { Mode = Mode, Container = Container, VideoCodec = VideoCodec, AudioCodec = AudioCodec };
 }
 
-/// <summary>The fixed target-format catalogue: 视频 / 音频 / 图片 (docs/03).</summary>
+/// <summary>Stable last-used keys, including the keys written by earlier releases.</summary>
 public static class TargetFormats
 {
-    public static readonly IReadOnlyList<TargetFormat> All = new[]
-    {
-        new TargetFormat("mp4-h264", "MP4", "H.264 / AAC", TargetFormatGroup.Video,
-            ConversionMode.VideoTranscode, ContainerFormat.Mp4, AudioCodec.Aac),
-        new TargetFormat("mkv-h264", "MKV", "H.264 / AAC", TargetFormatGroup.Video,
-            ConversionMode.VideoTranscode, ContainerFormat.Mkv, AudioCodec.Aac),
-        new TargetFormat("mkv-remux", "MKV · 转封装", "复制音视频轨道（不重编码）", TargetFormatGroup.Video,
-            ConversionMode.Remux, ContainerFormat.Mkv, AudioCodec.Copy),
-        new TargetFormat("m4a-aac", "M4A", "AAC 音频", TargetFormatGroup.Audio,
-            ConversionMode.AudioExtract, ContainerFormat.M4a, AudioCodec.Aac),
-        new TargetFormat("flac", "FLAC", "无损音频", TargetFormatGroup.Audio,
-            ConversionMode.AudioExtract, ContainerFormat.Flac, AudioCodec.Flac),
-        new TargetFormat("wav", "WAV", "PCM 16-bit", TargetFormatGroup.Audio,
-            ConversionMode.AudioExtract, ContainerFormat.Wav, AudioCodec.PcmS16le),
-        new TargetFormat("png", "PNG", "图片转换将在后续版本开放", TargetFormatGroup.Image,
-            ConversionMode.VideoTranscode, ContainerFormat.Mp4, AudioCodec.Aac,
-            Enabled: false, DisabledReason: "图片转换将在后续版本开放"),
-        new TargetFormat("jpeg", "JPEG", "图片转换将在后续版本开放", TargetFormatGroup.Image,
-            ConversionMode.VideoTranscode, ContainerFormat.Mp4, AudioCodec.Aac,
-            Enabled: false, DisabledReason: "图片转换将在后续版本开放"),
-    };
-
+    public static IReadOnlyList<TargetFormat> All { get; } = Build();
     public static TargetFormat Default => All[0];
-
     public static TargetFormat? Find(string key) => All.FirstOrDefault(f => f.Key == key);
-
-    public static IReadOnlyList<TargetFormat> ForGroup(TargetFormatGroup group)
-        => All.Where(f => f.Group == group).ToList();
-
-    public static string GroupTitle(TargetFormatGroup group) => group switch
+    public static TargetFormat? Find(ConversionOptions o) => All.FirstOrDefault(f => f.Mode == o.Mode && f.Container == o.Container
+        && (o.Mode != ConversionMode.VideoTranscode || f.VideoCodec == o.VideoCodec)
+        && (o.Mode == ConversionMode.Remux || f.AudioCodec == o.AudioCodec));
+    private static IReadOnlyList<TargetFormat> Build()
     {
-        TargetFormatGroup.Video => "视频",
-        TargetFormatGroup.Audio => "音频",
-        _ => "图片",
-    };
+        var result = new List<TargetFormat>();
+        foreach (var container in OutputFormatCatalog.VideoContainers)
+        {
+            foreach (var video in OutputFormatCatalog.VideoCodecs(container))
+                foreach (var audio in OutputFormatCatalog.AudioCodecs(container))
+                {
+                    var prefix = $"{container.ToString().ToLowerInvariant()}-{video.ToString().ToLowerInvariant()}";
+                    var key = audio == AudioCodec.Aac ? prefix : prefix + "-" + audio.ToString().ToLowerInvariant();
+                    result.Add(new(key, ConversionMode.VideoTranscode, container, video, audio));
+                }
+            result.Add(new(container.ToString().ToLowerInvariant() + "-remux", ConversionMode.Remux, container, VideoCodec.H264, AudioCodec.Copy));
+        }
+        foreach (var container in OutputFormatCatalog.AudioContainers)
+            foreach (var audio in OutputFormatCatalog.AudioCodecs(container))
+            {
+                var key = container switch
+                {
+                    ContainerFormat.Flac => "flac", ContainerFormat.Wav when audio == AudioCodec.PcmS16le => "wav",
+                    _ => $"{container.ToString().ToLowerInvariant()}-{audio.ToString().ToLowerInvariant()}",
+                };
+                result.Add(new(key, ConversionMode.AudioExtract, container, VideoCodec.H264, audio));
+            }
+        return result;
+    }
 }

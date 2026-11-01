@@ -18,7 +18,7 @@ public sealed record CancelResult
     public static CancelResult Refused(string msg) => new() { Accepted = false, Message = msg };
 }
 
-public enum JobEventKind { Snapshot, Enqueued, StateChanged, Progress, AttemptChanged, OutputCommitted, Failed, Removed }
+public enum JobEventKind { Snapshot, Enqueued, StateChanged, Progress, AttemptChanged, OutputCommitted, Failed, Removed, SnapshotCompleted }
 
 public sealed record JobEvent
 {
@@ -50,6 +50,8 @@ public interface IJobService
     QueueControlSnapshot GetControl();
     /// <summary>Removes a not-yet-started job from the queue (undoable).</summary>
     Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct);
+    /// <summary>Updates limits for future dispatches; existing attempts keep their policy.</summary>
+    void ConfigureExecution(int maxConcurrentTranscodes, bool allowAutomaticFallback, bool fullVerification);
 }
 
 public sealed record QueueControlSnapshot

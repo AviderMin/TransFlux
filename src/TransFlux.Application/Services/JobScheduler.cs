@@ -38,7 +38,8 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
     private readonly IClock _clock;
     private readonly SchedulerOptions _options;
 
-    private readonly SemaphoreSlim _slots;
+    private sealed record ExecutionPolicy(int MaxConcurrent, bool AllowFallback, bool FullVerification);
+    private ExecutionPolicy _policy;
     private readonly JobEventHub _hub = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _jobCts = new();
     private readonly ConcurrentDictionary<Guid, Guid> _activeAttempts = new();
@@ -88,7 +89,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         _options = options ?? throw new ArgumentNullException(nameof(options));
 
         var maxConcurrent = Math.Max(1, _options.MaxConcurrentTranscodes);
-        _slots = new SemaphoreSlim(maxConcurrent, maxConcurrent);
+        _policy = new ExecutionPolicy(maxConcurrent, options.AllowAutomaticFallback, options.FullVerification);
         _progressThrottle = _options.ProgressThrottle <= TimeSpan.Zero
             ? TimeSpan.FromMilliseconds(500)
             : _options.ProgressThrottle;
@@ -135,6 +136,12 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
 
                 await RecountAsync(ct).ConfigureAwait(false);
 
+                if (_inFlight.Count >= Volatile.Read(ref _policy).MaxConcurrent)
+                {
+                    await WaitForWakeAsync(ct).ConfigureAwait(false);
+                    continue;
+                }
+
                 IReadOnlyList<Job> queued;
                 try
                 {
@@ -160,9 +167,13 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     continue;
                 }
 
-                await _slots.WaitAsync(ct).ConfigureAwait(false);
+                if (Volatile.Read(ref _paused) != 0)
+                {
+                    _inFlight.TryRemove(candidate.JobId, out _);
+                    continue;
+                }
 
-                // Re-check after waiting for a slot (may have been removed/canceled/claimed elsewhere).
+                // Re-read before dispatch (may have been removed/canceled/claimed elsewhere).
                 Job? fresh;
                 try
                 {
@@ -171,14 +182,18 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     _inFlight.TryRemove(candidate.JobId, out _);
-                    _slots.Release();
                     break;
                 }
 
                 if (fresh is null || fresh.State != JobState.Queued)
                 {
                     _inFlight.TryRemove(candidate.JobId, out _);
-                    _slots.Release();
+                    continue;
+                }
+
+                if (Volatile.Read(ref _paused) != 0 || _inFlight.Count > Volatile.Read(ref _policy).MaxConcurrent)
+                {
+                    _inFlight.TryRemove(candidate.JobId, out _);
                     continue;
                 }
 
@@ -212,7 +227,6 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
             {
                 _inFlight.TryRemove(jobId, out _);
                 _workers.TryRemove(jobId, out _);
-                _slots.Release();
                 Wake();
             }
         }, CancellationToken.None);
@@ -390,10 +404,6 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 {
                     yield break;
                 }
-                catch
-                {
-                    snapshot = Array.Empty<Job>();
-                }
 
                 foreach (var job in snapshot.OrderBy(j => j.EnqueueOrder))
                 {
@@ -401,14 +411,21 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     {
                         continue;
                     }
+                    var attempts = await _store.GetAttemptsForJobAsync(job.JobId, ct).ConfigureAwait(false);
+                    var outputs = await _store.GetOutputsForJobAsync(job.JobId, ct).ConfigureAwait(false);
+                    var latestAttempt = attempts.OrderByDescending(a => a.Ordinal).FirstOrDefault();
                     yield return new JobEvent
                     {
                         Kind = JobEventKind.Snapshot,
                         Sequence = handle.StartSequence,
                         JobId = job.JobId,
                         Job = job,
+                        Attempt = latestAttempt,
+                        Output = outputs.OrderByDescending(o => o.CommittedUtc).FirstOrDefault(),
+                        Failure = latestAttempt?.Failure,
                     };
                 }
+                yield return new JobEvent { Kind = JobEventKind.SnapshotCompleted, Sequence = handle.StartSequence };
             }
 
             await foreach (var evt in handle.Reader.ReadAllAsync(ct).ConfigureAwait(false))
@@ -447,6 +464,16 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
     {
         Volatile.Write(ref _paused, 1);
         return Task.CompletedTask;
+    }
+
+    public void ConfigureExecution(int maxConcurrentTranscodes, bool allowAutomaticFallback, bool fullVerification)
+    {
+        var limit = Math.Clamp(maxConcurrentTranscodes, 1, 4);
+        Volatile.Write(ref _policy, new ExecutionPolicy(limit, allowAutomaticFallback, fullVerification));
+        _options.MaxConcurrentTranscodes = limit;
+        _options.AllowAutomaticFallback = allowAutomaticFallback;
+        _options.FullVerification = fullVerification;
+        Wake();
     }
 
     public Task ResumeQueueAsync(CancellationToken ct)
@@ -488,6 +515,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
 
     private async Task ProcessJobAsync(Guid jobId, CancellationToken stopToken)
     {
+        var policy = Volatile.Read(ref _policy);
         Interlocked.Increment(ref _activeWorkers);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
         _jobCts[jobId] = cts;
@@ -715,7 +743,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                         ?? FailureInfo.Of(FailureCode.ProcessFailed, "error.processFailed", runResult.StderrTail ?? string.Empty, true);
                     _activeAttempts.TryRemove(jobId, out _);
 
-                    var canFallback = _options.AllowAutomaticFallback
+                    var canFallback = policy.AllowFallback
                         && IsCapabilityFailure(failure)
                         && fallbackUsed < fallbackCap
                         && fallbackUsed + 1 < plan.CandidatePaths.Count;
@@ -759,7 +787,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                         Plan = plan,
                         OutputPath = tempPath,
                         Source = source,
-                        FullDecode = _options.FullVerification,
+                        FullDecode = policy.FullVerification,
                     }, cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -934,6 +962,9 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 : JobState.NeedsAttention;
             if (!JobStateMachine.CanTransition(job.State, target))
             {
+                // Cancellation can win while a fallback failure is being recorded. Do not leave
+                // the job suspended in CancelRequested without a worker.
+                await FinishCanceledIfRequestedAsync(jobId).ConfigureAwait(false);
                 return;
             }
 
@@ -943,6 +974,17 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 Publish(new JobEvent { Kind = JobEventKind.Failed, JobId = jobId, Failure = failure, Job = latest });
                 return;
             }
+        }
+
+        await FinishCanceledIfRequestedAsync(jobId).ConfigureAwait(false);
+    }
+
+    private async Task FinishCanceledIfRequestedAsync(Guid jobId)
+    {
+        var job = await _store.GetJobAsync(jobId, CancellationToken.None).ConfigureAwait(false);
+        if (job is { State: JobState.CancelRequested })
+        {
+            await FinishCanceledAsync(jobId).ConfigureAwait(false);
         }
     }
 
@@ -1129,6 +1171,5 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         _hub.CompleteAll();
         _wake.Writer.TryComplete();
         _loopCts?.Dispose();
-        _slots.Dispose();
     }
 }

@@ -17,5 +17,12 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="..\..\src\TransFlux.App\State\WorkbenchState.cs" Link="Workbench\WorkbenchState.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\ConversionOptions.cs" Link="Workbench\ConversionOptions.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\OutputTargets.cs" Link="Workbench\OutputTargets.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\TargetFormats.cs" Link="Workbench\TargetFormats.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\QueueStore.cs" Link="Workbench\QueueStore.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\WorkbenchRules.cs" Link="Workbench\WorkbenchRules.cs" />
+    <Compile Include="..\..\src\TransFlux.App\State\WorkbenchStore.cs" Link="Workbench\WorkbenchStore.cs" />
   </ItemGroup>
 </Project>

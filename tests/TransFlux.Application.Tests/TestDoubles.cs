@@ -51,7 +51,10 @@ internal sealed class InMemoryJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task UpdateJobAsync(Job job, long expectedRevision, CancellationToken ct)
+    /// <summary>Test hook invoked after a successful job update (used to force cancellation windows).</summary>
+    public Func<Job, Task>? AfterUpdateJob { get; set; }
+
+    public async Task UpdateJobAsync(Job job, long expectedRevision, CancellationToken ct)
     {
         lock (_gate)
         {
@@ -61,7 +64,10 @@ internal sealed class InMemoryJobStore : IJobStore
             }
             _jobs[job.JobId] = job;
         }
-        return Task.CompletedTask;
+        if (AfterUpdateJob is not null)
+        {
+            await AfterUpdateJob(job).ConfigureAwait(false);
+        }
     }
 
     public Task<Job?> GetJobAsync(Guid id, CancellationToken ct)

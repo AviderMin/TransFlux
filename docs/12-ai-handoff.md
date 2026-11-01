@@ -1,5 +1,15 @@
 # 12 · AI 编码交接总结
 
+## 最新交接 · 2026-11-01 UX 重构
+
+最新增量：输出目标已拆为媒体/容器/编码，扩展到 4 种视频容器、7 种音频输出类型。修改选项时先读 OutputFormatCatalog、OutputTargets、OutputFormatTests，保持界面与执行矩阵一致。
+H.265/AV1/VP9 目前使用 CPU，不能直接宣称新增相应硬件编码支持。详见 [格式扩展记录](evidence/OUTPUT-FORMATS.md)。
+
+交互以 [03](03-ui-ux.md) 为准；旧的左格式目录/参数窗口/批处理窗口已被右侧所选参数与任务卡片替代。
+先阅读 WorkbenchStore、WorkbenchRules、WorkspaceContracts 和 RuntimeQueueTests，再修改工作台流程。
+不要恢复按源文件 ID 合并任务、运行中直接编辑参数、移除代替取消或启动时自动继续队列的行为。
+当前验证范围、隔离数据目录及后续验收事项见 [重构证据](evidence/UX-workbench-redesign.md)。
+
 ## 当前项目事实
 
 截至 2026-10-31，本仓库原有内容为 README、MIT LICENSE 和 .gitignore，没有现成解决方案、应用代码或测试。本轮完成 README 和 `docs/` 内开发设计文档，未安装 SDK、未引入媒体二进制、未编写应用代码、未执行应用构建或媒体/硬件基准。

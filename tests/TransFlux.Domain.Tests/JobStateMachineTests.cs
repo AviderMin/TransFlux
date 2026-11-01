@@ -82,7 +82,7 @@ public class JobStateMachineTests
     {
         foreach (var s in AllStates)
         {
-            var expected = s is JobState.Queued or JobState.Preflighting or JobState.Running or JobState.Verifying;
+            var expected = s is JobState.Queued or JobState.Preflighting or JobState.Running or JobState.Verifying or JobState.Recovering;
             Assert.Equal(expected, JobStateMachine.AllowsCancel(s));
         }
         Assert.False(JobStateMachine.AllowsCancel(JobState.Committing));

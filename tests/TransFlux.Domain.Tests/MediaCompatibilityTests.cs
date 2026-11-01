@@ -208,21 +208,21 @@ public class MediaCompatibilityTests
     }
 
     [Fact]
-    public void Remux_Vp9ToMkv_IsBlocked()
+    public void Remux_Vp9ToMkv_IsAllowed()
     {
         var src = TestData.Source(new[] { TestData.Video(codec: "vp9"), TestData.Audio() });
         var issues = MediaCompatibility.Validate(
             TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
-        Assert.True(Has(issues, "REMUX_VIDEO"));
+        Assert.Empty(issues);
     }
 
     [Fact]
-    public void Remux_HevcToMp4_IsBlocked()
+    public void Remux_HevcToMp4_IsAllowed()
     {
         var src = TestData.Source(new[] { TestData.Video(codec: "hevc"), TestData.Audio() });
         var issues = MediaCompatibility.Validate(
             TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mp4), src);
-        Assert.True(Has(issues, "REMUX_VIDEO"));
+        Assert.Empty(issues);
     }
 
     [Fact]

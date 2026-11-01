@@ -12,7 +12,7 @@ namespace TransFlux.Engine.FFmpeg.Planner;
 /// <summary>
 /// Compiles a validated plan into typed ffmpeg argument lists. Never concatenates user text into
 /// filters; the runner substitutes <see cref="PlanPlaceholders.Input"/>/<see cref="PlanPlaceholders.Output"/>.
-/// Emits a CPU libx264 candidate plus any verified hardware candidates present in the capability snapshot.
+/// Emits the selected software codec and, for H.264, verified hardware candidates from the capability snapshot.
 /// </summary>
 public sealed class FfmpegPlanner : IExecutionPlanner
 {
@@ -84,12 +84,17 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         var warnings = BuildWarnings(request, source);
         var candidates = new List<ExecutionCandidate>();
 
-        var cpu = BuildVideoCandidate(request, video, audioIndices, geometry, HardwareBackend.Cpu, "libx264", "cpu", usesGpu: false, uncalibrated: false);
+        var cpuEncoder = request.VideoCodec switch
+        {
+            VideoCodec.H264 => "libx264", VideoCodec.Hevc => "libx265", VideoCodec.Av1 => "libaom-av1", VideoCodec.Vp9 => "libvpx-vp9",
+            _ => throw new DomainException("Unsupported video codec."),
+        };
+        var cpu = BuildVideoCandidate(request, video, audioIndices, geometry, HardwareBackend.Cpu, cpuEncoder, "cpu", usesGpu: false, uncalibrated: false);
         candidates.Add(cpu);
 
         var requested = request.Hardware.Backend;
         var hw = capabilities.Candidates
-            .Where(c => c.Available && H264HardwareEncoders.Contains(c.EncoderName))
+            .Where(c => request.VideoCodec == VideoCodec.H264 && c.Available && H264HardwareEncoders.Contains(c.EncoderName))
             .Where(c => request.Hardware.EncoderName is null || string.Equals(c.EncoderName, request.Hardware.EncoderName, StringComparison.OrdinalIgnoreCase))
             .Where(c => requested == HardwareBackend.Auto || MapBackend(c.Backend) == requested)
             .ToList();
@@ -141,6 +146,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
         args.Add("-c:v"); args.Add(encoder);
         AddVideoQuality(args, encoder, request);
+        if (request.VideoCodec == VideoCodec.Hevc && request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov)
+        { args.Add("-tag:v"); args.Add("hvc1"); }
         args.Add("-pix_fmt"); args.Add("yuv420p");
         if (request.FrameRateOverride is double frameRate && frameRate > 0)
         {
@@ -154,10 +161,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
         if (audioIndices.Count > 0)
         {
-            args.Add("-c:a"); args.Add("aac");
-            args.Add("-b:a"); args.Add($"{request.Audio.BitRateKbps ?? 192}k");
-            if (request.Audio.SampleRate is int ar && ar > 0) { args.Add("-ar"); args.Add(ar.ToString(CultureInfo.InvariantCulture)); }
-            if (request.Audio.Channels is int ac && ac > 0) { args.Add("-ac"); args.Add(ac.ToString(CultureInfo.InvariantCulture)); }
+            AddAudioEncoding(args, request);
         }
         else
         {
@@ -165,15 +169,15 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         }
 
         AddMetadataPolicy(args, request.Metadata);
-        AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.Mp4);
+        AddContainer(args, request.Container, faststart: request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov);
         args.Add(PlanPlaceholders.Output);
 
-        var effectiveCrf = request.CrfOverride ?? CrfFor(request.Quality);
+        var effectiveCrf = request.CrfOverride ?? CrfFor(request.Quality, request.VideoCodec);
         var rationale = uncalibrated
             ? $"{backendLabel} {encoder}: hardware candidate; quality mapping unverified on this build."
             : (request.VideoBitrateKbps is int vbr && vbr > 0
-                ? $"cpu libx264 {vbr}kbps preset {PresetFor(request.Speed)}; software baseline."
-                : $"cpu libx264 crf {effectiveCrf} preset {PresetFor(request.Speed)}; software baseline.");
+                ? $"cpu {encoder} {vbr}kbps; {request.Audio.Codec.Name()} audio."
+                : $"cpu {encoder} crf {effectiveCrf}; {request.Audio.Codec.Name()} audio.");
 
         return new ExecutionCandidate
         {
@@ -195,34 +199,14 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         var audio = MediaCompatibility.SelectPrimaryAudio(request, source)
             ?? throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.no_audio", "No audio stream selected."));
 
-        var codec = request.Container switch
-        {
-            ContainerFormat.M4a => AudioCodec.Aac,
-            ContainerFormat.Flac => AudioCodec.Flac,
-            ContainerFormat.Wav => AudioCodec.PcmS16le,
-            _ => throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.bad_container", "Audio export supports M4A/FLAC/WAV.")),
-        };
+        var codec = request.Audio.Codec;
 
         var args = GlobalPrefix(request.Trim?.Start);
         AddInput(args);
         AddTrimDuration(args, request.Trim);
         args.Add("-map"); args.Add($"0:{audio.SourceIndex}");
         args.Add("-vn");
-        switch (codec)
-        {
-            case AudioCodec.Aac:
-                args.Add("-c:a"); args.Add("aac");
-                args.Add("-b:a"); args.Add($"{request.Audio.BitRateKbps ?? 192}k");
-                break;
-            case AudioCodec.Flac:
-                args.Add("-c:a"); args.Add("flac");
-                break;
-            case AudioCodec.PcmS16le:
-                args.Add("-c:a"); args.Add("pcm_s16le");
-                break;
-        }
-        if (request.Audio.SampleRate is int ar2 && ar2 > 0) { args.Add("-ar"); args.Add(ar2.ToString(CultureInfo.InvariantCulture)); }
-        if (request.Audio.Channels is int ac2 && ac2 > 0) { args.Add("-ac"); args.Add(ac2.ToString(CultureInfo.InvariantCulture)); }
+        AddAudioEncoding(args, request);
         AddMetadataPolicy(args, request.Metadata);
         AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.M4a);
         args.Add(PlanPlaceholders.Output);
@@ -246,7 +230,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         {
             CandidateId = $"cpu-{codec.ToString().ToLowerInvariant()}",
             Backend = HardwareBackend.Cpu,
-            EncoderName = codec switch { AudioCodec.Aac => "aac", AudioCodec.Flac => "flac", _ => "pcm_s16le" },
+            EncoderName = codec.Encoder(),
             UsesGpuDecode = false,
             UsesGpuFilter = false,
             Arguments = args,
@@ -278,15 +262,14 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         foreach (var sub in source.SubtitleStreams)
         {
             if (!sub.IsTextSubtitle) continue;
-            if (request.Container == ContainerFormat.Mp4 && sub.Codec != "mov_text") continue;
+            if (request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov && sub.Codec != "mov_text") continue;
             args.Add("-map"); args.Add($"0:{sub.SourceIndex}");
             mapped++;
         }
 
         args.Add("-c"); args.Add("copy");
-        args.Add("-map_metadata"); args.Add("0");
-        args.Add("-map_chapters"); args.Add("0");
-        AddContainer(args, request.Container, faststart: request.Container == ContainerFormat.Mp4);
+        AddMetadataPolicy(args, request.Metadata);
+        AddContainer(args, request.Container, faststart: request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov);
         args.Add(PlanPlaceholders.Output);
 
         var expected = new ExpectedOutput
@@ -301,7 +284,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             StreamCount = mapped,
             VideoStreamCount = videoMapped,
             AudioStreamCount = audioMapped,
-            FastStart = request.Container == ContainerFormat.Mp4,
+            FastStart = request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov,
         };
 
         var candidate = new ExecutionCandidate
@@ -356,6 +339,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         if (policy == MetadataPolicy.StripPersonalTags)
         {
             args.Add("-map_metadata"); args.Add("-1");
+            args.Add("-map_metadata:s"); args.Add("-1");
             args.Add("-map_chapters"); args.Add("-1");
         }
         else
@@ -386,6 +370,20 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             case ContainerFormat.Wav:
                 args.Add("-f"); args.Add("wav");
                 break;
+            case ContainerFormat.Mov:
+                if (faststart) { args.Add("-movflags"); args.Add("+faststart"); }
+                args.Add("-f"); args.Add("mov");
+                break;
+            case ContainerFormat.Webm:
+                args.Add("-f"); args.Add("webm"); break;
+            case ContainerFormat.Mp3:
+                args.Add("-f"); args.Add("mp3"); break;
+            case ContainerFormat.Ogg:
+                args.Add("-f"); args.Add("ogg"); break;
+            case ContainerFormat.Opus:
+                args.Add("-f"); args.Add("opus"); break;
+            case ContainerFormat.Aac:
+                args.Add("-f"); args.Add("adts"); break;
             default:
                 throw new DomainException($"Unknown container {container}.");
         }
@@ -393,10 +391,24 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
     private static void AddVideoQuality(List<string> args, string encoder, ConversionRequest request)
     {
-        var crf = request.CrfOverride ?? CrfFor(request.Quality);
+        var crf = request.CrfOverride ?? CrfFor(request.Quality, request.VideoCodec);
         var bitrate = request.VideoBitrateKbps;
         switch (encoder)
         {
+            case "libx265":
+                args.Add("-preset"); args.Add(PresetFor(request.Speed));
+                args.Add("-x265-params"); args.Add("pools=4:frame-threads=2:log-level=error");
+                if (bitrate is > 0) { args.Add("-b:v"); args.Add($"{bitrate}k"); }
+                else { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                break;
+            case "libaom-av1":
+            case "libvpx-vp9":
+                args.Add("-threads"); args.Add("4");
+                args.Add("-row-mt"); args.Add("1");
+                args.Add("-cpu-used"); args.Add(request.Speed switch { SpeedTier.Faster => "8", SpeedTier.Slower => "4", _ => "6" });
+                args.Add("-b:v"); args.Add(bitrate is > 0 ? $"{bitrate}k" : "0");
+                if (bitrate is not > 0) { args.Add("-crf"); args.Add(crf.ToString(CultureInfo.InvariantCulture)); }
+                break;
             case "libx264":
                 args.Add("-preset"); args.Add(PresetFor(request.Speed));
                 if (bitrate is int b1 && b1 > 0) { args.Add("-b:v"); args.Add($"{b1}k"); }
@@ -423,12 +435,30 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         }
     }
 
-    private static int CrfFor(QualityTier quality) => quality switch
+    private static int CrfFor(QualityTier quality, VideoCodec codec) => (codec, quality) switch
     {
-        QualityTier.SmallerSize => 26,
-        QualityTier.HigherQuality => 20,
+        (VideoCodec.Hevc, QualityTier.SmallerSize) => 30,
+        (VideoCodec.Hevc, QualityTier.HigherQuality) => 22,
+        (VideoCodec.Hevc, _) => 26,
+        (VideoCodec.Av1 or VideoCodec.Vp9, QualityTier.SmallerSize) => 40,
+        (VideoCodec.Av1 or VideoCodec.Vp9, QualityTier.HigherQuality) => 28,
+        (VideoCodec.Av1 or VideoCodec.Vp9, _) => 34,
+        (_, QualityTier.SmallerSize) => 26,
+        (_, QualityTier.HigherQuality) => 20,
         _ => 23,
     };
+
+    private static void AddAudioEncoding(List<string> args, ConversionRequest request)
+    {
+        var audio = request.Audio;
+        args.Add("-c:a"); args.Add(audio.Codec.Encoder());
+        if (audio.Codec.HasBitrate())
+        { args.Add("-b:a"); args.Add($"{audio.BitRateKbps ?? 192}k"); }
+        var sampleRate = audio.SampleRate ?? (audio.Codec == AudioCodec.Opus ? 48000 : (int?)null);
+        if (sampleRate is > 0) { args.Add("-ar"); args.Add(sampleRate.Value.ToString(CultureInfo.InvariantCulture)); }
+        if (audio.Channels is > 0) { args.Add("-ac"); args.Add(audio.Channels.Value.ToString(CultureInfo.InvariantCulture)); }
+        if (audio.Codec == AudioCodec.Opus) { args.Add("-mapping_family"); args.Add("1"); }
+    }
 
     private static string PresetFor(SpeedTier speed) => speed switch
     {
@@ -467,8 +497,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         return new ExpectedOutput
         {
             Container = request.Container,
-            VideoCodec = VideoCodec.H264,
-            AudioCodec = audioCount > 0 ? AudioCodec.Aac : (AudioCodec?)null,
+            VideoCodec = request.VideoCodec,
+            AudioCodec = audioCount > 0 ? request.Audio.Codec : (AudioCodec?)null,
             Width = geometry.TargetWidth,
             Height = geometry.TargetHeight,
             PixelFormat = "yuv420p",
@@ -476,7 +506,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             StreamCount = 1 + audioCount,
             VideoStreamCount = 1,
             AudioStreamCount = audioCount,
-            FastStart = request.Container == ContainerFormat.Mp4,
+            FastStart = request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov,
         };
     }
 

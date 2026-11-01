@@ -4,9 +4,9 @@ using TransFlux.Domain.Media;
 namespace TransFlux.Domain.Plans;
 
 public enum ConversionMode { VideoTranscode = 0, AudioExtract = 1, Remux = 2 }
-public enum ContainerFormat { Mp4 = 0, Mkv = 1, M4a = 2, Flac = 3, Wav = 4 }
-public enum VideoCodec { H264 = 0, Hevc = 1, Av1 = 2, Copy = 3 }
-public enum AudioCodec { Aac = 0, Flac = 1, PcmS16le = 2, Copy = 3 }
+public enum ContainerFormat { Mp4 = 0, Mkv = 1, M4a = 2, Flac = 3, Wav = 4, Mov = 5, Webm = 6, Mp3 = 7, Ogg = 8, Opus = 9, Aac = 10 }
+public enum VideoCodec { H264 = 0, Hevc = 1, Av1 = 2, Copy = 3, Vp9 = 4 }
+public enum AudioCodec { Aac = 0, Flac = 1, PcmS16le = 2, Copy = 3, Mp3 = 4, Opus = 5, Vorbis = 6, Alac = 7, PcmS24le = 8 }
 public enum QualityTier { SmallerSize = 0, Balanced = 1, HigherQuality = 2 }
 public enum SpeedTier { Faster = 0, Balanced = 1, Slower = 2 }
 public enum ResizeMode { KeepDisplaySize = 0, Max1080p = 1 }
@@ -22,6 +22,12 @@ public static class ContainerFormats
         ContainerFormat.M4a => ".m4a",
         ContainerFormat.Flac => ".flac",
         ContainerFormat.Wav => ".wav",
+        ContainerFormat.Mov => ".mov",
+        ContainerFormat.Webm => ".webm",
+        ContainerFormat.Mp3 => ".mp3",
+        ContainerFormat.Ogg => ".ogg",
+        ContainerFormat.Opus => ".opus",
+        ContainerFormat.Aac => ".aac",
         _ => throw new DomainException($"Unknown container {c}"),
     };
 
@@ -32,6 +38,12 @@ public static class ContainerFormats
         ContainerFormat.M4a => "M4A",
         ContainerFormat.Flac => "FLAC",
         ContainerFormat.Wav => "WAV",
+        ContainerFormat.Mov => "MOV",
+        ContainerFormat.Webm => "WebM",
+        ContainerFormat.Mp3 => "MP3",
+        ContainerFormat.Ogg => "OGG",
+        ContainerFormat.Opus => "Opus",
+        ContainerFormat.Aac => "AAC / ADTS",
         _ => c.ToString(),
     };
 }
@@ -100,6 +112,7 @@ public sealed record ConversionRequest
     public required Guid SourceSnapshotId { get; init; }
     public ConversionMode Mode { get; init; } = ConversionMode.VideoTranscode;
     public ContainerFormat Container { get; init; } = ContainerFormat.Mp4;
+    public VideoCodec VideoCodec { get; init; } = VideoCodec.H264;
     public IReadOnlyList<int> SelectedStreamIndices { get; init; } = Array.Empty<int>();
     public QualityTier Quality { get; init; } = QualityTier.Balanced;
     public SpeedTier Speed { get; init; } = SpeedTier.Balanced;
@@ -116,7 +129,7 @@ public sealed record ConversionRequest
 
     public VideoCodec EffectiveVideoCodec => Mode switch
     {
-        ConversionMode.VideoTranscode => VideoCodec.H264,
+        ConversionMode.VideoTranscode => VideoCodec,
         ConversionMode.Remux => VideoCodec.Copy,
         _ => VideoCodec.Copy,
     };

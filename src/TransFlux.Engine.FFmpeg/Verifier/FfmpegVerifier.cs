@@ -3,6 +3,7 @@ using TransFlux.Application.Contracts;
 using TransFlux.Domain.Jobs;
 using TransFlux.Domain.Media;
 using TransFlux.Domain.Plans;
+using TransFlux.Domain.Rules;
 using TransFlux.Engine.FFmpeg.Core;
 using TransFlux.Engine.FFmpeg.Processes;
 using TransFlux.Engine.FFmpeg.Probe;
@@ -81,32 +82,35 @@ public sealed class FfmpegVerifier : IOutputVerifier
 
         var videoCount = actual.VideoStreams.Count();
         var audioCount = actual.AudioStreams.Count();
+        var streamCount = actual.Streams.Count;
         if (expected.VideoStreamCount != videoCount)
             problems.Add($"video stream count {videoCount} != expected {expected.VideoStreamCount}");
         if (expected.AudioStreamCount != audioCount)
             problems.Add($"audio stream count {audioCount} != expected {expected.AudioStreamCount}");
+        if (expected.StreamCount != streamCount)
+            problems.Add($"stream count {streamCount} != expected {expected.StreamCount}");
+        var expectedSubtitleCount = expected.StreamCount - expected.VideoStreamCount - expected.AudioStreamCount;
+        var subtitleCount = actual.SubtitleStreams.Count();
+        if (expectedSubtitleCount >= 0 && expectedSubtitleCount != subtitleCount)
+            problems.Add($"subtitle stream count {subtitleCount} != expected {expectedSubtitleCount}");
 
-        if (expected.VideoCodec is VideoCodec.H264)
+        if (expected.VideoCodec is { } videoCodec && videoCodec != VideoCodec.Copy)
         {
-            if (video is null) problems.Add("expected H.264 video stream but none present");
-            else if (!string.Equals(video.Codec, "h264", StringComparison.OrdinalIgnoreCase))
-                problems.Add($"video codec '{video.Codec}' != expected 'h264'");
+            var want = videoCodec.ProbeName();
+            if (video is null) problems.Add($"expected {want} video stream but none present");
+            else if (!string.Equals(video.Codec, want, StringComparison.OrdinalIgnoreCase))
+                problems.Add($"video codec '{video.Codec}' != expected '{want}'");
         }
 
         if (expected.AudioCodec is { } audioCodec)
         {
-            var want = audioCodec switch
-            {
-                AudioCodec.Aac => "aac",
-                AudioCodec.Flac => "flac",
-                AudioCodec.PcmS16le => "pcm_s16le",
-                _ => null,
-            };
+            var want = audioCodec == AudioCodec.Copy ? null : audioCodec.ProbeName();
             if (want is not null)
             {
                 if (audio is null) problems.Add($"expected {want} audio stream but none present");
-                else if (!string.Equals(audio.Codec, want, StringComparison.OrdinalIgnoreCase))
-                    problems.Add($"audio codec '{audio.Codec}' != expected '{want}'");
+                else foreach (var track in actual.AudioStreams)
+                    if (!string.Equals(track.Codec, want, StringComparison.OrdinalIgnoreCase))
+                        problems.Add($"audio codec '{track.Codec}' != expected '{want}'");
             }
             else if (audioCodec == AudioCodec.Copy && audio is null && expected.AudioStreamCount > 0)
             {
@@ -122,8 +126,20 @@ public sealed class FfmpegVerifier : IOutputVerifier
             && !string.Equals(video.PixelFormat, expected.PixelFormat, StringComparison.OrdinalIgnoreCase))
             problems.Add($"pixel format '{video.PixelFormat}' != expected '{expected.PixelFormat}'");
 
-        if (expected.FastStart && expected.Container == ContainerFormat.Mp4 && !IsMoovBeforeMdat(outputPath))
-            problems.Add("MP4 is not faststart (moov box not before mdat)");
+        if (expected.FastStart && expected.Container is ContainerFormat.Mp4 or ContainerFormat.Mov or ContainerFormat.M4a
+            && !IsMoovBeforeMdat(outputPath))
+            problems.Add("ISO BMFF output is not faststart (moov box not before mdat)");
+
+        var wantContainer = expected.Container switch
+        {
+            ContainerFormat.Mp4 or ContainerFormat.Mov or ContainerFormat.M4a => "mov",
+            ContainerFormat.Mkv or ContainerFormat.Webm => "matroska",
+            ContainerFormat.Ogg or ContainerFormat.Opus => "ogg",
+            ContainerFormat.Mp3 => "mp3", ContainerFormat.Flac => "flac", ContainerFormat.Wav => "wav", ContainerFormat.Aac => "aac",
+            _ => null,
+        };
+        if (wantContainer is not null && !actual.Format.FormatName.Split(',').Contains(wantContainer, StringComparer.OrdinalIgnoreCase))
+            problems.Add($"container '{actual.Format.FormatName}' != expected '{wantContainer}'");
 
         if (expected.DurationUs is long expectedUs && actual.DurationUs is long actualUs)
         {

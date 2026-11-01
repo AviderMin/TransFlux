@@ -1,21 +1,27 @@
 # TransFlux · Implementation status (this build)
 
-Date: 2026-10-31 · Branch: master · Status: **first working vertical slice implemented** (M0 + M1 + most of M2/M4; M3 partially, M5 packaging pending). This is a real build, not a design document.
+Current UX update (2026-11-01): the file-first card workbench replaces the earlier catalogue/table/dialog UI.
+Output targets now separate media form, container and codec; see [output format matrix and evidence](OUTPUT-FORMATS.md).
+See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
+Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
+
+Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified, M5 packaging pending. This is a real build, not a design document.
 
 ## What works (executed)
 
 | Area | Status | Evidence |
 |---|---|---|
 | Solution builds (Domain, Application, Engine.FFmpeg, Hardware.Windows, Infrastructure, App, 4 test projects) | ✅ 0 warnings / 0 errors | `dotnet build TransFlux.slnx -c Debug` |
-| Unit + integration tests | ✅ **171 passed / 0 failed** | Domain 83, Application 25, Infrastructure 25, Engine 38 |
+| Unit + integration tests | ✅ **265 passed / 0 failed** | Domain 83, Application 54, Infrastructure 29, Engine 99 (build 0 warnings / 0 errors) |
 | Real Reactor native window renders | ✅ | `docs/evidence/M4-ui-runtime.md`, `ui-tree.txt`, `screenshots/convert.png` |
 | Real end-to-end conversion (probe→plan→encode→verify→commit) | ✅ PASS, source unchanged | `docs/evidence/M1-E2E-runtime.md` |
 | Pinned GPL FFmpeg core (libx264/NVENC/QSV/AMF/AAC/FLAC) | ✅ hash-pinned | `tools/ffmpeg/core-manifest.json` |
 | CPU H.264/AAC MP4+MKV, audio extract (M4A/FLAC/WAV), remux whitelist | ✅ Engine tests | Engine integration tests |
 | Queue, state machine, cancel-at-commit-boundary, retry, one auto-fallback | ✅ Application tests | Application tests |
+| Layered output targets: 4 video containers + 7 audio containers, 49 video + 10 audio combinations | ✅ real encode/decode of all 59 combinations | `docs/evidence/OUTPUT-FORMATS.md` |
 | SQLite persistence, migrations, commit journal, crash reconciliation | ✅ Infrastructure tests | Infrastructure tests |
 | DXGI adapter enumeration + capability trials + cache | ✅ real DXGI | `docs/evidence/M3-hardware.md` |
-| Reactor UI: NavigationView shell, 转换/任务/预设/设置, advanced panel, queue cards | ✅ compiles + renders | `docs/evidence/M4-ui-runtime.md` |
+| Reactor UI: file-first task-card workbench, right-side output inspector, top-bar settings/about/history, execution bar | ✅ compiles + real-window checked | `docs/evidence/UX-workbench-redesign.md`, `docs/evidence/OUTPUT-FORMATS.md` |
 
 ## Architecture as implemented (docs/04 respected)
 
@@ -38,7 +44,7 @@ Every requirement in docs/02 flows through `TransFlux.Application.Contracts`; th
 
 ## Known limitations / not yet verified (honest)
 
-- Real NVENC/QSV/AMF trial-to-transcode not signed off as supported/performance claims; CPU libx264 is the recorded path.
+- Real NVENC/QSV/AMF trial-to-transcode not signed off as supported/performance claims; CPU libx264 is the recorded path, although the machine has an RTX 4060 Laptop GPU.
 - HDR tone-mapping, HEVC/AV1 output, subtitle burn-in, target-size/two-pass, run-time pause/resume — all P1, intentionally not implemented.
 - Accessibility (Narrator/DPI/high-contrast), visual theming, drag-drop implemented but need human/image-capable review.
 - Signed MSIX install/upgrade/offline (M0-06/M5) not completed.
@@ -56,7 +62,8 @@ dotnet run --project tools/TransFlux.E2E/TransFlux.E2E.csproj -c Debug         #
 
 ## Next minimal tasks (priority order)
 
-1. Resolve packaged MSIX (fix winapp loose-layout / generate signed MSIX; clean-VM offline install).
-2. Human visual + Narrator + DPI/theme review of the four pages.
-3. Real NVENC trial + measured performance/quality report; enable or explicitly disable GPU backends.
-4. Fix any P0 gaps found in a human walkthrough.
+1. Rebuild the Inno Setup installer from the current source (1.0.0.4) and re-verify install/launch/E2E/uninstall; 1.0.0.3 predates the output-format expansion.
+2. Signed MSIX packaging and clean-VM offline install/upgrade (M0-06/M5).
+3. Human visual + Narrator + 100/150/200% DPI/high-contrast/theme review of the current workbench.
+4. Real NVENC trial + measured performance/quality report on the RTX 4060 Laptop GPU; keep GPU backends explicitly unverified until signed off.
+5. Fix any P0 gaps found in a human walkthrough; record docs/06 performance budgets against a controlled benchmark.

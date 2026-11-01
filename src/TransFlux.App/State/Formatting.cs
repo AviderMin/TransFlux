@@ -1,6 +1,7 @@
 using System.Globalization;
 using TransFlux.Domain.Media;
 using TransFlux.Domain.Plans;
+using TransFlux.Domain.Rules;
 
 namespace TransFlux.App.State;
 
@@ -128,21 +129,14 @@ public static class Fmt
         _ => stage.ToString(),
     };
 
-    public static string AudioCodecName(AudioCodec codec) => codec switch
-    {
-        AudioCodec.Aac => "AAC",
-        AudioCodec.Flac => "FLAC",
-        AudioCodec.PcmS16le => "PCM 16-bit",
-        AudioCodec.Copy => "复制",
-        _ => codec.ToString(),
-    };
+    public static string AudioCodecName(AudioCodec codec) => codec.Name();
 
     /// <summary>Short "target format" line for a catalogue choice / task row.</summary>
     public static string TargetSummary(ConversionOptions options) => options.Mode switch
     {
         ConversionMode.Remux => options.Container.DisplayName() + " · 转封装",
         ConversionMode.AudioExtract => options.Container.DisplayName() + " · " + AudioCodecName(options.AudioCodec),
-        _ => options.Container.DisplayName() + " · H.264 / " + AudioCodecName(options.AudioCodec),
+        _ => options.Container.DisplayName() + " · " + options.VideoCodec.Name() + " · " + AudioCodecName(options.AudioCodec),
     };
 
     public static string FormatTimecode(TimeSpan? value)

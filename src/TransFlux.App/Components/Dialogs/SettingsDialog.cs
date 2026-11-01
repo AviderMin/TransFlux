@@ -29,13 +29,13 @@ public sealed record SettingsDialogProps(
 public sealed class SettingsDialog : Component<SettingsDialogProps>
 {
     private static readonly string[] ThemeItems = { UiText.ThemeSystem, UiText.ThemeLight, UiText.ThemeDark };
-    private static readonly string[] LanguageItems = { "跟随系统", "简体中文", "English" };
 
     public override Element Render()
     {
         var p = Props;
         var (draft, setDraft) = UseState(p.Settings);
         var (open, setOpen) = UseState(true);
+        var (saving, setSaving) = UseState(false);
         var (notice, setNotice) = UseState<string?>(null);
         var (identity, setIdentity) = UseState<CoreIdentity?>(null);
         var (capabilities, setCapabilities) = UseState<CapabilitySnapshot?>(null);
@@ -70,24 +70,23 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             catch (Exception ex) { setNotice(ex.Message); }
         }
 
-        async Task CommitAsync(AppSettings final)
+        async Task<bool> CommitAsync(AppSettings final)
         {
-            try { await p.Save(final); }
-            catch (Exception ex) { setNotice("保存失败：" + ex.Message); }
-            p.OnClosed();
+            if (saving) return false;
+            setSaving(true);
+            try { await p.Save(final); return true; }
+            catch (Exception ex) { setNotice("保存失败：" + ex.Message); return false; }
+            finally { setSaving(false); }
         }
 
         Element Section(string title, params Element[] children)
             => Ui.Card(VStack(Space.Md, new[] { TextBlock(title).SemiBold() }.Concat(children).ToArray()));
 
         var themeIndex = draft.Theme switch { "Light" => 1, "Dark" => 2, _ => 0 };
-        var languageIndex = draft.Language switch { "zh-Hans" => 1, "en" => 2, _ => 0 };
 
         var appearance = Section(UiText.Appearance,
             ComboBox(ThemeItems, themeIndex, i => Update(s => s with { Theme = i switch { 1 => "Light", 2 => "Dark", _ => "System" } }))
-                .Header(UiText.ThemeSystem).HAlign(HorizontalAlignment.Stretch),
-            ComboBox(LanguageItems, languageIndex, i => Update(s => s with { Language = i switch { 1 => "zh-Hans", 2 => "en", _ => "system" } }))
-                .Header(UiText.Language).HAlign(HorizontalAlignment.Stretch));
+                .Header(UiText.ThemeSystem).HAlign(HorizontalAlignment.Stretch));
 
         var output = Section(UiText.OutputRules,
             VStack(2, Ui.FieldLabel("默认输出位置（留空则使用源文件旁的 TransFlux Output）"),
@@ -96,6 +95,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
                         .Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)
                         .ToolTip(draft.DefaultOutputDirectory ?? UiText.DefaultOutput).VAlign(VerticalAlignment.Center).Grid(column: 0),
                     Button(UiText.ChooseFolder, () => _ = PickDefaultOutputAsync()).AutomationName("选择默认输出位置").Grid(column: 1))),
+            Button("使用源文件旁", () => Update(s => s with { DefaultOutputDirectory = null })).SubtleButton(),
             CheckBox(draft.PreserveTitleAndChaptersByDefault, v => Update(s => s with { PreserveTitleAndChaptersByDefault = v }),
                 "默认保留标题与章节（可能含个人信息）"));
 
@@ -109,10 +109,9 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
             ToggleSwitch(draft.FullVerification, v => Update(s => s with { FullVerification = v }),
                 onContent: "全片校验", offContent: "抽样校验", header: "输出验证"));
 
-        var privacy = Section("隐私与日志",
-            NumberBox(draft.LogRetentionDays, v => Update(s => s with { LogRetentionDays = Math.Clamp((int)Math.Round(v), 1, 365) }),
-                header: UiText.LogCleanup + "（天）").MinWidth(200),
-            TextBlock("默认无遥测、无在线检查、无媒体上传；日志清理不会删除输出文件。").Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap));
+        var privacy = Section("本地处理",
+            TextBlock("默认无遥测、无在线检查、无媒体上传。移除任务和清空历史均不删除源文件或输出文件。")
+                .Foreground(Theme.SecondaryText).FontSize(12).TextWrapping(TextWrapping.Wrap));
 
         var diagChildren = new List<Element>
         {
@@ -151,7 +150,7 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         var diagnostics = Section(UiText.Diagnostics, diagChildren.ToArray());
 
         var body = VStack(Space.Lg,
-            Ui.Dim("更改在保存后生效。").FontSize(12).TextWrapping(TextWrapping.Wrap),
+            Ui.Dim("保存后，并发限制影响后续任务；回退与验证策略影响此后开始的任务。默认输出规则用于新增文件。").FontSize(12).TextWrapping(TextWrapping.Wrap),
             notice is { } msg ? InfoBar("提示", msg).Informational().IsClosable(true).Closed(() => setNotice(null)) : null,
             appearance,
             output,
@@ -162,20 +161,17 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         return DialogChrome.Render(
             UiText.SettingsTitle,
             body,
-            UiText.SaveSettingsAction,
+            saving ? "正在保存…" : UiText.SaveSettingsAction,
             "取消",
             result =>
             {
-                var final = draft;
                 setOpen(false);
-                DialogChrome.DeferClose(() =>
-                {
-                    if (result == ContentDialogResult.Primary) _ = CommitAsync(final);
-                    else p.OnClosed();
-                });
+                DialogChrome.DeferClose(p.OnClosed);
             },
             contentWidth: 700,
             maxHeight: 580,
-            isOpen: open);
+            isOpen: open,
+            beforePrimaryClose: () => CommitAsync(draft),
+            primaryEnabled: !saving);
     }
 }

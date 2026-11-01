@@ -1,9 +1,9 @@
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Reactor.Layout;
 using Microsoft.UI.Xaml;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Shared;
-using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
 using TransFlux.Domain.Jobs;
@@ -11,157 +11,80 @@ using TransFlux.Domain.Plans;
 
 namespace TransFlux.App.Components.Workbench;
 
-/// <summary>
-/// One row of the task table. Columns are shared with <see cref="Header"/> so the
-/// table reads as aligned columns (文件 ｜ 目标 ｜ 状态/进度 ｜ 速度 ｜ 输出 ｜ 操作).
-/// Pure render — the live job row is passed in by the host.
-/// </summary>
+/// <summary>A responsive card whose identity survives enqueue, cancel, retry and completion.</summary>
 public static class TaskRow
 {
-    private static readonly string[] QualityItems = { "较小体积", "均衡", "更高画质" };
-
-    /// <summary>Column tracks shared by the header and every row.</summary>
-    public static GridSize[] Columns { get; } = new[]
+    public static Element Render(WorkbenchItem item, bool selected, bool paused,
+        Action select, Action toggle, Action remove, Action cancel, Action copy,
+        Action retry, Action editQueued, Action open, Action reveal, Action details)
     {
-        GridSize.Px(36), GridSize.Star(), GridSize.Px(110), GridSize.Px(190),
-        GridSize.Px(72), GridSize.Px(110), GridSize.Px(228),
-    };
+        var d = item.Draft;
+        var job = item.Execution;
+        var stateText = job is not null ? Fmt.JobStateText(job.State)
+            : d.Submitting ? "正在加入队列" : d.IsProbing ? "读取中" : d.Status == DraftStatus.Invalid ? "读取失败"
+            : item.Issues.Any(i => i.Blocking) ? "需要修改设置" : "待开始";
+        if (job?.State == JobState.Queued && paused) stateText = "等待继续";
+        var status = TextBlock(stateText).SemiBold().FontSize(12)
+            .Foreground(job is not null ? Ui.StateColor(job.State) : Theme.SecondaryText);
+        var lines = new List<Element>();
+        lines.Add(Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
+            CheckBox(selected, v => { if (v != selected) toggle(); }, string.Empty)
+                .Width(32).MinWidth(32).AutomationName("选择 " + d.FileName).Grid(column: 0),
+            Button(TextBlock(d.FileName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1), select)
+                .SubtleButton().HAlign(HorizontalAlignment.Stretch).ToolTip(d.Path)
+                .Set(b => b.HorizontalContentAlignment = HorizontalAlignment.Left)
+                .AutomationName("任务 " + d.FileName).Grid(column: 1),
+            status.VAlign(VerticalAlignment.Center).Margin(Space.Sm, 0, 0, 0).Grid(column: 2)));
+        var source = d.Snapshot is { } s
+            ? $"{Fmt.Resolution(s.PrimaryVideo)} · {Fmt.DurationMicros(s.DurationUs)} · {Fmt.Size(s.SizeBytes)}"
+            : d.Path;
+        lines.Add(Ui.Dim(source).FontSize(12).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(d.Path));
+        var quality = d.Options.Mode == ConversionMode.VideoTranscode
+            ? " · " + (d.Options.Quality switch { QualityTier.SmallerSize => "较小体积", QualityTier.HigherQuality => "更高质量", _ => "均衡" })
+                + (d.Options.TargetWidth is not null || d.Options.TargetHeight is not null ? $" · {d.Options.TargetWidth}×{d.Options.TargetHeight}"
+                    : d.Options.ResizeMode == ResizeMode.Max1080p ? " · 最高 1080p" : " · 保持原始") : string.Empty;
+        lines.Add(TextBlock("→ " + Fmt.TargetSummary(d.Options) + quality).FontSize(12).TextWrapping(TextWrapping.Wrap));
 
-    public static Element Header() => Border(Grid(
-            columns: Columns,
-            rows: [GridSize.Auto],
-            HeaderCell("").Grid(column: 0),
-            HeaderCell("文件").Grid(column: 1),
-            HeaderCell("目标格式").Grid(column: 2),
-            HeaderCell("状态 / 进度").Grid(column: 3),
-            HeaderCell("速度").Grid(column: 4),
-            HeaderCell("输出").Grid(column: 5),
-            HeaderCell("操作").Grid(column: 6))
-        .Padding(Space.Sm, Space.Xs)
-    ).WithBorder(Theme.DividerStroke, 1);
-
-    public static Element Render(
-        MediaDraft draft,
-        bool selected,
-        bool focused,
-        QueueRow? job,
-        Action<Guid> onToggleSelect,
-        Action<Guid> onFocus,
-        Action<Guid> onRemove,
-        Action<Guid> onOpenParam,
-        Action<Guid> onOpenOutput,
-        Action<Guid> onRevealOutput,
-        Action<Guid, QualityTier>? onQuality = null)
-    {
-        var (status, progress) = BuildStatus(draft, job);
-        var target = TextBlock(Fmt.TargetSummary(draft.Options)).FontSize(12)
-            .Foreground(Theme.PrimaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)
-            .ToolTip(Fmt.TargetSummary(draft.Options));
-
-        var speed = job is { IsTerminal: false }
-            ? TextBlock(Fmt.Speed(job.Progress?.Speed) + " · " + Fmt.Eta(job.Progress?.Eta)).FontSize(12)
-                .Foreground(Theme.SecondaryText).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)
-            : Ui.Dim("—").FontSize(12);
-
-        var output = job is { State: JobState.Succeeded, Output: not null }
-            ? TextBlock(job.Output.FinalPath).FontSize(12).Foreground(Theme.SecondaryText)
-                .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath)
-            : Ui.Dim("—").FontSize(12);
-
-        var actions = new List<Element>();
-        if (draft.Options.Mode == ConversionMode.VideoTranscode && onQuality is not null)
+        if (job is { IsActive: true } && job.State != JobState.CancelRequested)
         {
-            actions.Add(ComboBox(QualityItems, (int)draft.Options.Quality, i => onQuality(draft.MediaId, (QualityTier)i))
-                .Width(88).MinHeight(30)
-                .AutomationName("快捷质量 " + draft.FileName)
-                .ToolTip("快捷质量：仅影响此任务")
-                .WithKey("quality"));
+            if (job.State is JobState.Running or JobState.Verifying or JobState.Committing)
+                lines.Add(Ui.ProgressBar(job.Progress?.Fraction ?? 0));
+            var activity = job.State == JobState.Running
+                ? $"{Math.Clamp((int)Math.Round((job.Progress?.Fraction ?? 0) * 100), 0, 99)}% · {Fmt.Speed(job.Progress?.Speed)} · 剩余 {Fmt.Eta(job.Progress?.Eta)}"
+                : job.State == JobState.Verifying ? "正在检查输出，检查通过后才会发布文件。"
+                : job.State == JobState.Committing ? "正在安全保存，请稍候。" : "正在准备转换。";
+            lines.Add(Ui.Dim(activity).FontSize(12).TextWrapping(TextWrapping.Wrap));
         }
-        actions.Add(IconAction("\uE713", "设置参数", "设置参数", () => onOpenParam(draft.MediaId)).WithKey("param"));
-        actions.Add(IconAction("\uE74D", "移除文件", "移除", () => onRemove(draft.MediaId)).WithKey("remove"));
         if (job is { State: JobState.Succeeded, Output: not null })
         {
-            actions.Add(IconAction("\uE8E5", UiText.OpenOutput, UiText.OpenOutput, () => onOpenOutput(draft.MediaId)).WithKey("open"));
-            actions.Add(IconAction("\uE838", UiText.RevealOutput, UiText.RevealOutput, () => onRevealOutput(draft.MediaId)).WithKey("reveal"));
+            var inputSize = d.Snapshot?.SizeBytes ?? job.Job.SourceFingerprint.SizeBytes;
+            var elapsed = job.Attempt?.EndedUtc - job.Attempt?.StartedUtc;
+            lines.Add(TextBlock($"{Fmt.Size(inputSize)} → {Fmt.Size(job.Output.Size)} · 用时 {Fmt.Duration(elapsed)}")
+                .FontSize(12).Foreground(Theme.SystemSuccess));
+            lines.Add(Ui.Dim(job.Output.FinalPath).FontSize(12).TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).ToolTip(job.Output.FinalPath));
         }
+        if (job is { State: JobState.Failed or JobState.Interrupted or JobState.NeedsAttention }
+            || d.Status == DraftStatus.Invalid)
+            lines.Add(TextBlock(WorkbenchRules.FailureText(job?.Failure ?? d.Failure)).FontSize(12)
+                .Foreground(Theme.SystemCritical).TextWrapping(TextWrapping.Wrap));
+        if (item.CanEdit && d.IsReady)
+            foreach (var issue in item.Issues.Take(2))
+                lines.Add(TextBlock(WorkbenchRules.IssueText(issue)).FontSize(12).TextWrapping(TextWrapping.Wrap)
+                    .Foreground(issue.Blocking ? Theme.SystemCritical : Theme.SystemAttention));
 
-        var row = Grid(
-            columns: Columns,
-            rows: [GridSize.Auto],
-            CheckBox(selected, v => { if (v != selected) onToggleSelect(draft.MediaId); }, string.Empty)
-                .AutomationName("选择 " + draft.FileName).Grid(column: 0),
-            VStack(2,
-                TextBlock(draft.FileName).SemiBold().TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)
-                    .ToolTip(draft.Path),
-                TextBlock(Fmt.TrackSummary(draft.Snapshot)).FontSize(12).Foreground(Theme.SecondaryText)
-                    .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)).Grid(column: 1),
-            target.Grid(column: 2),
-            VStack(2, status, progress).Grid(column: 3),
-            speed.VAlign(VerticalAlignment.Center).Grid(column: 4),
-            output.VAlign(VerticalAlignment.Center).Grid(column: 5),
-            HStack(Space.Xs, actions.ToArray()).VAlign(VerticalAlignment.Center).Grid(column: 6));
-
-        var border = Border(row)
-            .Padding(Space.Sm, Space.Xs + 2)
+        var actions = new List<Element>();
+        void ActionButton(string label, Action action) => actions.Add(Button(label, action).SubtleButton().AutomationName(label + " " + d.FileName));
+        if (job is { State: JobState.Succeeded, Output: not null }) { ActionButton("打开文件", open); ActionButton("打开文件夹", reveal); }
+        if (job?.CanRetry == true || d.Status == DraftStatus.Invalid && d.CanEdit) ActionButton("重试", retry);
+        if (job?.State == JobState.Queued) ActionButton("移出队列并编辑", editQueued);
+        if (job?.CanCancel == true) ActionButton("取消任务", cancel);
+        if (job is not null && job.State != JobState.NeedsAttention)
+            ActionButton(job.State == JobState.Succeeded ? "再次转换" : "修改后转换", copy);
+        if (job is not null || d.Status == DraftStatus.Invalid) ActionButton("技术详情", details);
+        if (item.CanRemove) ActionButton("移除", remove);
+        if (actions.Count > 0) lines.Add(FlexRow(actions.ToArray()) with { Wrap = FlexWrap.Wrap, ColumnGap = 4, RowGap = 4 });
+        return Border(VStack(Space.Sm, lines.ToArray())).Padding(Space.Lg).CornerRadius(8)
             .Background(selected ? Theme.SubtleFill : Theme.CardBackground)
-            .WithBorder(Theme.DividerStroke, 1)
-            .IsTabStop(true)
-            .OnTapped((_, _) => onFocus(draft.MediaId))
-            .AutomationName("任务 " + draft.FileName)
-            .WithKey(draft.MediaId.ToString());
-
-        return border.IsVisible(true);
+            .WithBorder(selected ? Theme.Accent : Theme.CardStroke, 1).WithKey(item.Id.ToString());
     }
-
-    private static (Element Status, Element? Progress) BuildStatus(MediaDraft draft, QueueRow? job)
-    {
-        if (draft.Status == DraftStatus.Probing)
-        {
-            return (HStack(Space.Sm, ProgressRing().Width(14).Height(14), Ui.Dim(UiText.Reading).FontSize(12)), null);
-        }
-
-        if (draft.Status == DraftStatus.Invalid)
-        {
-            return (HStack(Space.Sm,
-                Ui.Pill(UiText.InvalidText, Theme.SystemCriticalBackground, Theme.SystemCritical),
-                Ui.Dim(draft.Failure?.UserMessageKey ?? draft.ErrorText ?? "读取失败").FontSize(12)
-                    .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)), null);
-        }
-
-        if (job is not null && !job.IsTerminal)
-        {
-            var fraction = job.Progress?.Fraction ?? 0;
-            var percent = Math.Clamp((int)Math.Round(fraction * 100), 0, 99);
-            var status = HStack(Space.Sm,
-                Ui.Pill(Fmt.JobStateText(job.State), Theme.SystemAttentionBackground, Theme.SystemAttention),
-                Ui.Dim(Fmt.StageText(job.Progress?.Stage ?? JobStage.Encoding) + " " + percent + "%").FontSize(12));
-            return (status, Ui.ProgressBar(fraction));
-        }
-
-        if (job is not null && job.State == JobState.Succeeded)
-        {
-            return (HStack(Space.Sm, Ui.Pill(UiText.Done, Theme.SystemSuccessBackground, Theme.SystemSuccess)), null);
-        }
-
-        if (job is not null && job.State is JobState.Failed or JobState.Interrupted or JobState.Canceled)
-        {
-            return (HStack(Space.Sm,
-                Ui.Pill(Fmt.JobStateText(job.State), Theme.SystemCriticalBackground, Theme.SystemCritical),
-                Ui.Dim(job.Failure?.UserMessageKey ?? UiText.Interrupted).FontSize(12)
-                    .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1)), null);
-        }
-
-        return (HStack(Space.Sm,
-            Ui.Pill(UiText.Ready, Theme.ControlFillSecondary, Theme.SecondaryText),
-            Ui.Dim(Fmt.DurationMicros(draft.Snapshot?.DurationUs)).FontSize(12)), null);
-    }
-
-    private static Element HeaderCell(string text)
-        => TextBlock(text).FontSize(12).Foreground(Theme.SecondaryText).SemiBold();
-
-    private static Element IconAction(string glyph, string automationName, string toolTip, Action onClick)
-        => Button(Icon(FontIcon(glyph, fontSize: 14)), onClick)
-            .SubtleButton().Width(30).Height(30).MinWidth(30).MinHeight(30).Padding(0)
-            .ToolTip(toolTip).AutomationName(automationName)
-            .Set(b => { b.HorizontalContentAlignment = HorizontalAlignment.Center; b.VerticalContentAlignment = VerticalAlignment.Center; });
 }

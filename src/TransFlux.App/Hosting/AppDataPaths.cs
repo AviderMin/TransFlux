@@ -6,6 +6,16 @@ public static class AppDataPaths
 {
     public static string GetRoot()
     {
+#if DEBUG
+        // Isolated manual smoke tests must not touch the installed user's workspace.
+        var testRoot = Environment.GetEnvironmentVariable("TRANSFLUX_DATA_DIR");
+        if (!string.IsNullOrWhiteSpace(testRoot))
+        {
+            var full = Path.GetFullPath(testRoot);
+            Directory.CreateDirectory(full);
+            return full;
+        }
+#endif
         try
         {
             var local = global::Windows.Storage.ApplicationData.Current.LocalFolder.Path;

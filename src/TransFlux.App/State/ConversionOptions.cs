@@ -9,6 +9,7 @@ public sealed record ConversionOptions
 {
     public ConversionMode Mode { get; init; } = ConversionMode.VideoTranscode;
     public ContainerFormat Container { get; init; } = ContainerFormat.Mp4;
+    public VideoCodec VideoCodec { get; init; } = VideoCodec.H264;
     public QualityTier Quality { get; init; } = QualityTier.Balanced;
     public SpeedTier Speed { get; init; } = SpeedTier.Balanced;
     public ResizeMode ResizeMode { get; init; } = ResizeMode.KeepDisplaySize;
@@ -32,10 +33,24 @@ public sealed record ConversionOptions
 
     public static readonly ConversionOptions Default = new();
 
+    public static ConversionOptions FromRequest(ConversionRequest r) => new()
+    {
+        Mode = r.Mode, Container = r.Container, VideoCodec = r.VideoCodec, Quality = r.Quality, Speed = r.Speed,
+        ResizeMode = r.Resize.Mode, AllowUpscale = r.Resize.AllowUpscale,
+        TargetWidth = r.Resize.TargetWidth, TargetHeight = r.Resize.TargetHeight,
+        AudioCodec = r.Audio.Codec, AudioBitRateKbps = r.Audio.BitRateKbps,
+        AudioSampleRate = r.Audio.SampleRate, AudioChannels = r.Audio.Channels,
+        MetadataPolicy = r.Metadata, Hardware = r.Hardware.Backend,
+        SelectedStreams = r.SelectedStreamIndices, OutputDirectory = r.Output.OutputDirectory,
+        OutputFileName = r.Output.FileNameOverride, TrimStart = r.Trim?.Start, TrimEnd = r.Trim?.End,
+        CrfOverride = r.CrfOverride, VideoBitrateKbps = r.VideoBitrateKbps, FrameRateOverride = r.FrameRateOverride,
+    };
+
     public static ConversionOptions FromTemplate(PresetRequestTemplate t) => new()
     {
         Mode = t.Mode,
         Container = t.Container,
+        VideoCodec = t.VideoCodec,
         Quality = t.Quality,
         Speed = t.Speed,
         ResizeMode = t.ResizeMode,
@@ -43,6 +58,18 @@ public sealed record ConversionOptions
         AudioCodec = t.AudioCodec,
         AudioBitRateKbps = t.AudioBitRateKbps,
         MetadataPolicy = t.MetadataPolicy,
+        TargetWidth = t.TargetWidth, TargetHeight = t.TargetHeight,
+        CrfOverride = t.CrfOverride, VideoBitrateKbps = t.VideoBitrateKbps, FrameRateOverride = t.FrameRateOverride,
+        AudioSampleRate = t.AudioSampleRate, AudioChannels = t.AudioChannels, Hardware = t.Hardware,
+    };
+
+    public PresetRequestTemplate ToTemplate() => new()
+    {
+        Mode = Mode, Container = Container, VideoCodec = VideoCodec, Quality = Quality, Speed = Speed, ResizeMode = ResizeMode,
+        AllowUpscale = AllowUpscale, AudioCodec = AudioCodec, AudioBitRateKbps = AudioBitRateKbps,
+        MetadataPolicy = MetadataPolicy, TargetWidth = TargetWidth, TargetHeight = TargetHeight,
+        CrfOverride = CrfOverride, VideoBitrateKbps = VideoBitrateKbps, FrameRateOverride = FrameRateOverride,
+        AudioSampleRate = AudioSampleRate, AudioChannels = AudioChannels, Hardware = Hardware,
     };
 
     /// <summary>Builds a domain trim range, or null when the inputs are incomplete/inverted.</summary>
@@ -58,6 +85,7 @@ public sealed record ConversionOptions
         SourceSnapshotId = mediaId,
         Mode = Mode,
         Container = Container,
+        VideoCodec = VideoCodec,
         SelectedStreamIndices = SelectedStreams,
         Quality = Quality,
         Speed = Speed,

@@ -34,7 +34,7 @@ public static class JobStateMachine
 
     /// <summary>Cancellation is refused once the job enters the commit boundary.</summary>
     public static bool AllowsCancel(JobState s)
-        => s is JobState.Queued or JobState.Preflighting or JobState.Running or JobState.Verifying;
+        => s is JobState.Queued or JobState.Preflighting or JobState.Running or JobState.Verifying or JobState.Recovering;
 
     public static bool IsActive(JobState s)
         => s is JobState.Preflighting or JobState.Running or JobState.Verifying or JobState.Committing or JobState.Recovering or JobState.CancelRequested;

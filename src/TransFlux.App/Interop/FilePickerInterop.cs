@@ -13,7 +13,7 @@ public static class FilePickerInterop
     private static readonly string[] DefaultMediaExtensions =
     {
         ".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm", ".ts", ".m2ts",
-        ".m4a", ".flac", ".wav", ".mp3", ".aac", ".ogg", ".opus",
+        ".m4a", ".flac", ".wav", ".mp3", ".aac", ".ogg", ".opus", ".oga", ".aiff", ".aif", ".wma", ".wmv", ".mka", ".mts", ".mpeg", ".mpg", ".vob", ".flv", ".3gp", ".mxf", ".ac3", ".weba",
     };
 
     public static async Task<IReadOnlyList<string>> PickFilesAsync(Microsoft.UI.Xaml.Window? window)
@@ -27,6 +27,7 @@ public static class FilePickerInterop
         };
         foreach (var ext in DefaultMediaExtensions)
             picker.FileTypeFilter.Add(ext);
+        picker.FileTypeFilter.Add("*"); // Let ffprobe determine content for uncommon local media extensions.
 
         Initialize(window, picker);
 

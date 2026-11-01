@@ -4,7 +4,7 @@
 
 产品主张：**拖入文件，选择用途，放心转换。** 通过可解释的硬件调度、可靠的输出保护与渐进式设置，在便捷操作、转换质量和吞吐之间取得平衡。
 
-当前状态：产品与技术设计完成，尚未实现应用代码。本文档包不代表任何功能或性能已经验证。
+当前状态：已实现原生工作台、FFmpeg 转换管线、队列及持久化。2026-11-01 工作台改为文件优先、右侧所选参数、完整任务卡片生命周期，详见 [UX 规范](docs/03-ui-ux.md) 与 [重构验证记录](docs/evidence/UX-workbench-redesign.md)。
 
 ## 开始阅读
 
@@ -17,7 +17,7 @@
 设计基线日期：2026-10-31（Asia/Shanghai）。应用自身沿用仓库 MIT 许可证；第三方媒体核心的分发许可独立管理。
 ## 实现状态（本次构建）
 
-已实现可运行的纵向切片：Reactor 原生界面、真实 FFmpeg 探测/转码/验证/安全提交、SQLite 持久化与恢复、队列与状态机、硬件能力探测（DXGI）。完整构建 0 警告 0 错误，测试 171 项全部通过，真实端到端转换通过且源文件不变。
+已实现可运行的纵向切片：Reactor 原生界面、真实 FFmpeg 探测/转码/验证/安全提交、SQLite 持久化与恢复、队列与状态机、硬件能力探测（DXGI）。输出目标按媒体形式、容器与编码分别选择，支持 11 种容器/输出类型，完整兼容矩阵和验证范围见 [格式扩展记录](docs/evidence/OUTPUT-FORMATS.md)。
 
 - 详细状态与未验证项：[docs/evidence/IMPLEMENTATION-STATUS.md](docs/evidence/IMPLEMENTATION-STATUS.md)
 - 端到端证据：[docs/evidence/M1-E2E-runtime.md](docs/evidence/M1-E2E-runtime.md)

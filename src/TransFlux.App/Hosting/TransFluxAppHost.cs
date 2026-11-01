@@ -88,6 +88,8 @@ public static class TransFluxAppHost
             System.Diagnostics.Debug.WriteLine("TransFlux recovery failed: " + ex);
         }
 
+        // Recovered work is visible before the user explicitly continues the queue.
+        scheduler.PauseQueueAsync(CancellationToken.None).GetAwaiter().GetResult();
         scheduler.Start();
 
         var presets = new PresetService(store);
@@ -96,7 +98,7 @@ public static class TransFluxAppHost
 
         _scheduler = scheduler;
         _store = store;
-        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, options, new HistoryService(store));
+        Services = new AppServices(probe, scheduler, capabilities, planner, presets, settingsService, engineCapabilities, options, new HistoryService(store), new WorkspacePersistence(store));
 
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {

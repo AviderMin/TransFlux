@@ -1,739 +1,302 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
+using Windows.System;
 using static Microsoft.UI.Reactor.Factories;
 using TransFlux.App.Components.Dialogs;
 using TransFlux.App.Components.Shared;
 using TransFlux.App.Components.Workbench;
 using TransFlux.App.Interop;
-using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
 using TransFlux.Application.Contracts;
 using TransFlux.Domain.Jobs;
-using TransFlux.Domain.Media;
 using TransFlux.Domain.Plans;
 using TransFlux.Domain.Presets;
-using TransFlux.Domain.Rules;
 
 namespace TransFlux.App.Components.Shell;
 
-/// <summary>Identity for one open parameter dialog; a fresh id remounts a fresh ContentDialog.</summary>
-public sealed record ParamRequest(Guid RequestId, Guid MediaId);
-
-/// <summary>Identity for one open batch dialog.</summary>
-public sealed record BatchRequest(Guid RequestId);
-
-/// <summary>
-/// Root component (Format-Factory style): custom title bar with 设置 / 关于 on the
-/// right, a left target-format catalogue (视频 / 音频 / 图片), and a right task list
-/// with 添加文件 / 添加文件夹 / 开始 / 暂停 / 删除 / 批处理设置. Parameter / batch /
-/// settings / about are ContentDialog overlays mounted only while open, keyed by a
-/// request id (never as closed layout children). No NavigationView.
-/// </summary>
+/// <summary>Native shell: selected-card inspector, lifecycle cards and a single execution bar.</summary>
 public sealed class AppRoot : Component<AppServices>
 {
-    // Latest closures captured for the native drop handlers (stable across renders).
-    private Func<IReadOnlyList<string>, Task<int>>? _addPaths;
-    private Action<NoticeModel?>? _setNotice;
+    private Func<IReadOnlyList<string>, Task<int>>? _import;
+    private Action<string?>? _error;
+    private bool _allowClose, _modal;
 
     public override Element Render()
     {
         var services = Props;
-
-        var (workbench, dispatch) = UseReducer<WorkbenchState, WorkbenchAction>(
-            WorkbenchReducer.Reduce, WorkbenchState.Empty, threadSafe: true);
-        var (settings, setSettings) = UseState<AppSettings?>(null);
-        var (settingsError, setSettingsError) = UseState<string?>(null);
+        var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        var window = UseWindow()?.NativeWindow;
+        var store = UseMemo(() => new WorkbenchStore(services.Jobs, services.Probe, services.Workspace,
+            action => { if (dispatcher is null || dispatcher.HasThreadAccess) action(); else dispatcher.TryEnqueue(() => action()); },
+            services.Options.MaxConcurrentProbes), services);
+        var snapshot = UseExternalStore(store.Subscribe, store.GetSnapshot);
+        var initialSettings = UseMemo(() => new AppSettings(), Array.Empty<object>());
+        var (settings, setSettings) = UseState(initialSettings);
+        var (defaults, setDefaults) = UseState(ConversionOptions.Default);
         var (presets, setPresets) = UseState<IReadOnlyList<Preset>>(Array.Empty<Preset>());
-        var (targetKey, setTargetKey) = UseState(TargetFormats.Default.Key);
-        var (defaultQuality, setDefaultQuality) = UseState(QualityTier.Balanced);
-        var (defaultOutputDir, setDefaultOutputDir) = UseState<string?>(null);
         var (filter, setFilter) = UseState(0);
-        var (notice, setNotice) = UseState<NoticeModel?>(null);
-        var (busyEnqueue, setBusyEnqueue) = UseState(false);
-        var (paramRequest, setParamRequest) = UseState<ParamRequest?>(null);
-        var (batchRequest, setBatchRequest) = UseState<BatchRequest?>(null);
-        var (settingsOpen, setSettingsOpen) = UseState(false);
-        var (settingsReq, setSettingsReq) = UseState(0);
-        var (aboutOpen, setAboutOpen) = UseState(false);
-        var (aboutReq, setAboutReq) = UseState(0);
-        var (undoBatch, setUndoBatch) = UseState<IReadOnlyList<MediaDraft>?>(null);
-        var (completion, setCompletion) = UseState<CompletionNotice?>(null);
-        var (historyOpen, setHistoryOpen) = UseState(false);
-        var (historyReq, setHistoryReq) = UseState(0);
-        var settingsInitialized = UseRef(false);
-        var seenSucceeded = UseRef<HashSet<Guid>?>(null);
-        var completionBaseline = UseRef(false);
+        var (dialog, setDialog) = UseState<string?>(null);
+        var (dialogKey, setDialogKey) = UseState(0);
+        var (detailsId, setDetailsId) = UseState<Guid?>(null);
+        var (exitOpen, setExitOpen) = UseState(false);
+        var (exiting, setExiting) = UseState(false);
+        _modal = dialog is not null || detailsId is not null;
+        _error = store.SetError;
 
-        var reactorWindow = UseWindow();
-        var dispatcher = DispatcherQueue.GetForCurrentThread();
-        var queue = UseMemo(() => new JobQueueStore(services.Jobs, dispatcher), services);
-        var snapshot = UseExternalStore(queue.Subscribe, queue.GetSnapshot);
-        var tokenSource = UseRef<CancellationTokenSource?>(null);
-        _setNotice = setNotice;
-
-        UseEffect(() => { queue.Start(); return () => queue.Dispose(); }, queue);
-
+        UseEffect(() => { store.Start(); return () => store.Dispose(); }, store);
         UseEffect(() =>
         {
             var cts = new CancellationTokenSource();
-            tokenSource.Current = cts;
-            return () => { try { cts.Cancel(); } catch { } };
-        }, Array.Empty<object>());
-
-        UseEffect(() =>
-        {
-            var cts = new CancellationTokenSource();
-            _ = Task.Run(async () =>
+            _ = LoadAsync();
+            async Task LoadAsync()
             {
                 try
                 {
                     var loaded = await services.Settings.GetAsync(cts.Token);
                     setSettings(loaded);
-                    if (settingsInitialized.Current) return;
-                    settingsInitialized.Current = true;
-                    if (TargetFormats.Find(loaded.LastTargetFormatKey ?? string.Empty) is { Enabled: true } rememberedFormat)
-                        setTargetKey(rememberedFormat.Key);
-                    if (Enum.TryParse<QualityTier>(loaded.LastQuality, ignoreCase: true, out var rememberedQuality)
-                        && Enum.IsDefined(rememberedQuality))
-                        setDefaultQuality(rememberedQuality);
+                    var format = TargetFormats.Find(loaded.LastTargetFormatKey ?? "") ?? TargetFormats.Default;
+                    var quality = Enum.TryParse<QualityTier>(loaded.LastQuality, out var q) && Enum.IsDefined(q) ? q : QualityTier.Balanced;
+                    setDefaults(format.ApplyTo(ConversionOptions.Default) with { Quality = quality,
+                        OutputDirectory = loaded.DefaultOutputDirectory,
+                        MetadataPolicy = loaded.PreserveTitleAndChaptersByDefault ? MetadataPolicy.PreserveTitleAndChapters : MetadataPolicy.StripPersonalTags });
+                    setPresets(await services.Presets.GetAllAsync(cts.Token));
                 }
                 catch (OperationCanceledException) { }
-                catch (Exception ex) { setSettingsError(ex.Message); }
-            });
+                catch (Exception ex) { store.SetError("设置或预设读取失败：" + ex.Message); }
+            }
             return () => cts.Cancel();
         }, services);
 
         UseEffect(() =>
         {
-            var succeeded = snapshot.Rows
-                .Where(r => r.State == JobState.Succeeded && r.Output is not null)
-                .ToList();
-            var seen = seenSucceeded.Current ??= new HashSet<Guid>();
-            if (!completionBaseline.Current)
+            if (window is null) return () => { };
+            void Closing(AppWindow sender, AppWindowClosingEventArgs e)
             {
-                // The first non-empty projection may contain jobs from an earlier
-                // session: baseline them so only *new* completions raise a banner.
-                if (snapshot.Rows.Count == 0) return;
-                foreach (var row in succeeded) seen.Add(row.Job.JobId);
-                completionBaseline.Current = true;
-                return;
+                if (_allowClose) return;
+                e.Cancel = true;
+                if (_modal) { store.SetError("请先关闭当前对话框，再退出应用。"); return; }
+                var current = store.GetSnapshot();
+                if (!current.Loaded) { _allowClose = true; window.Close(); return; }
+                if (current.Busy || current.Items.Any(i => i.Execution?.IsActive == true)) setExitOpen(true);
+                else _ = CloseSafelyAsync();
             }
-            QueueRow? latest = null;
-            foreach (var row in succeeded)
-                if (seen.Add(row.Job.JobId)) latest = row;
-            if (latest?.Output?.FinalPath is { } finalPath)
-                setCompletion(new CompletionNotice(
-                    System.IO.Path.GetFileName(finalPath),
-                    System.IO.Path.GetDirectoryName(finalPath)));
-        }, snapshot);
-
-        UseEffect(() =>
-        {
-            var cts = new CancellationTokenSource();
-            _ = Task.Run(async () =>
+            async Task CloseSafelyAsync()
             {
-                try { setPresets(await services.Presets.GetAllAsync(cts.Token)); }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { setNotice(NoticeModel.Error("预设读取失败", ex.Message)); }
-            });
-            return () => cts.Cancel();
-        }, services);
-
-        var effectiveSettings = settings ?? new AppSettings();
-        var selectedFormat = TargetFormats.Find(targetKey) ?? TargetFormats.Default;
-        var defaultOptions = selectedFormat.ApplyTo(ConversionOptions.Default with
-        {
-            Quality = defaultQuality,
-            MetadataPolicy = effectiveSettings.PreserveTitleAndChaptersByDefault
-                ? MetadataPolicy.PreserveTitleAndChapters
-                : MetadataPolicy.StripPersonalTags,
-            OutputDirectory = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory,
-        });
-
-        void ClearUndo()
-        {
-            if (undoBatch is not null) setUndoBatch(null);
-        }
-
-        // Every explicit user action other than 撤销 invalidates the delete buffer.
-        void UserDispatch(WorkbenchAction action)
-        {
-            ClearUndo();
-            dispatch(action);
-        }
-
-        void PersistLastUsed(Func<AppSettings, AppSettings> mutate)
-        {
-            if (settings is not { } current) return;
-            var next = mutate(current);
-            setSettings(next);
-            _ = SaveSettingsAsync(next);
-        }
-
-        void SelectQuality(QualityTier quality)
-        {
-            ClearUndo();
-            setDefaultQuality(quality);
-            ApplyQualityToSelected(quality);
-            if (!string.Equals(settings?.LastQuality, quality.ToString(), StringComparison.Ordinal))
-                PersistLastUsed(s => s with { LastQuality = quality.ToString() });
-        }
-
-        void ApplyQualityToRow(Guid mediaId, QualityTier quality)
-        {
-            ClearUndo();
-            dispatch(new UpdateOptions(new[] { mediaId }, o => o with { Quality = quality }));
-        }
-
-        void UndoDelete()
-        {
-            if (undoBatch is not { Count: > 0 } batch) return;
-            setUndoBatch(null);
-            dispatch(new AddDrafts(batch));
-            foreach (var draft in batch.Where(d => d.Status == DraftStatus.Probing))
-                ProbeOne(draft.MediaId, draft.Path);
-        }
-
-        void OpenCompletionFolder()
-        {
-            if (completion?.OutputDirectory is { } dir) _ = LauncherInterop.OpenFolderAsync(dir);
-        }
-
-        void OpenHistory()
-        {
-            ClearUndo();
-            setHistoryReq(historyReq + 1);
-            setHistoryOpen(true);
-        }
-
-        // ---- import / probe ----
-        void ProbeOne(Guid mediaId, string path)
-        {
-            _ = Task.Run(async () =>
-            {
-                var ct = tokenSource.Current?.Token ?? CancellationToken.None;
-                try
-                {
-                    var result = await services.Probe.ProbeAsync(new SourceReference { AbsolutePath = path, MediaId = mediaId }, ct);
-                    if (result.IsSuccess && result.Value is not null)
-                        dispatch(new ProbeCompleted(mediaId, result.Value, null, null));
-                    else
-                        dispatch(new ProbeCompleted(mediaId, null, result.Failure ?? FailureInfo.Of(FailureCode.ProbeFailed, "读取失败"), result.Failure?.TechnicalDetail));
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    dispatch(new ProbeCompleted(mediaId, null, FailureInfo.Of(FailureCode.ProbeFailed, "读取失败", ex.Message, retryable: true), ex.Message));
-                }
-            });
-        }
-
-        async Task<int> AddPathsAsync(IReadOnlyList<string> rawPaths)
-        {
-            ClearUndo();
-            var existing = workbench.Items.Select(i => i.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var drafts = rawPaths
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Where(x => !existing.Contains(x) && File.Exists(x))
-                .Select(x => new MediaDraft { MediaId = Guid.NewGuid(), Path = x, Status = DraftStatus.Probing, Options = defaultOptions })
-                .ToList();
-            if (drafts.Count == 0)
-            {
-                setNotice(NoticeModel.Error("未导入文件", "所选文件已在列表中或不是可读取的本地媒体文件。"));
-                return 0;
+                await services.Jobs.PauseQueueAsync(CancellationToken.None);
+                if (!await store.PersistAsync()) return;
+                _allowClose = true; window.Close();
             }
-            dispatch(new AddDrafts(drafts));
-            foreach (var d in drafts) ProbeOne(d.MediaId, d.Path);
-            return drafts.Count;
-        }
-        _addPaths = AddPathsAsync;
+            window.AppWindow.Closing += Closing;
+            return () => window.AppWindow.Closing -= Closing;
+        }, window, store);
 
+        async Task RunAsync(Func<Task> action)
+        {
+            try { await action(); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { store.SetError(ex.Message); }
+        }
+        void Run(Func<Task> action) => _ = RunAsync(action);
+        void OpenDialog(string name) { setDialogKey(dialogKey + 1); setDialog(name); }
+
+        async Task<int> ImportAsync(IReadOnlyList<string> paths)
+        {
+            var count = await store.ImportAsync(paths, defaults);
+            if (count == 0) store.SetError("未添加文件：文件可能已在待开始列表中、已不存在，或工作台仍在恢复。");
+            else setFilter(0);
+            return count;
+        }
+        _import = ImportAsync;
         async Task ImportFilesAsync()
         {
-            try
-            {
-                var files = await FilePickerInterop.PickFilesAsync(reactorWindow?.NativeWindow);
-                if (files.Count > 0) await AddPathsAsync(files);
-            }
-            catch (Exception ex) { setNotice(NoticeModel.Error("添加文件失败", ex.Message)); }
+            var paths = await FilePickerInterop.PickFilesAsync(window);
+            if (paths.Count > 0) await ImportAsync(paths);
         }
-
         async Task ImportFolderAsync()
         {
-            try
-            {
-                var folder = await FilePickerInterop.PickFolderAsync(reactorWindow?.NativeWindow);
-                if (folder is not null) await AddPathsAsync(FilePickerInterop.EnumerateMediaFiles(folder, recursive: true));
-            }
-            catch (Exception ex) { setNotice(NoticeModel.Error("添加文件夹失败", ex.Message)); }
+            var folder = await FilePickerInterop.PickFolderAsync(window);
+            if (folder is null) return;
+            var paths = await Task.Run(() => FilePickerInterop.EnumerateMediaFiles(folder, recursive: true));
+            await ImportAsync(paths);
         }
-
-        void SelectFormat(string key)
+        var selected = snapshot.Selection;
+        var selectedIds = selected.Select(i => i.Id).ToArray();
+        async Task ApplyAsync(Func<ConversionOptions, ConversionOptions> mutate)
         {
-            var fmt = TargetFormats.Find(key);
-            if (fmt is null || !fmt.Enabled) return;
-            ClearUndo();
-            setTargetKey(key);
-            if (!string.Equals(settings?.LastTargetFormatKey, key, StringComparison.Ordinal))
-                PersistLastUsed(s => s with { LastTargetFormatKey = key });
+            if (selected.Count == 0 || selected.Any(i => !i.CanEdit)) return;
+            await store.EditAsync(selectedIds, mutate);
+            var nextDefaults = mutate(selected[0].Draft.Options) with { OutputFileName = null, TrimStart = null, TrimEnd = null, SelectedStreams = [] };
+            setDefaults(nextDefaults);
+            var target = TargetFormats.Find(nextDefaults);
+            var remembered = settings with { LastTargetFormatKey = target?.Key, LastQuality = nextDefaults.Quality.ToString() };
+            setSettings(remembered);
+            await services.Settings.SaveAsync(remembered, CancellationToken.None);
         }
-
-        void ApplyQualityToSelected(QualityTier quality)
+        async Task PickOutputAsync()
         {
-            if (workbench.Selected.Count == 0) return;
-            dispatch(new UpdateOptions(workbench.Selected, o => o with { Quality = quality }));
+            var folder = await FilePickerInterop.PickFolderAsync(window);
+            if (folder is not null) await ApplyAsync(o => o with { OutputDirectory = folder });
         }
-
-        async Task PickDefaultOutputAsync()
-        {
-            ClearUndo();
-            try
-            {
-                var folder = await FilePickerInterop.PickFolderAsync(reactorWindow?.NativeWindow);
-                if (folder is null) return;
-                setDefaultOutputDir(folder);
-                if (workbench.Selected.Count > 0)
-                    dispatch(new UpdateOptions(workbench.Selected, o => o with { OutputDirectory = folder }));
-            }
-            catch (Exception ex) { setNotice(NoticeModel.Error("选择输出位置失败", ex.Message)); }
-        }
-
-        void OpenOutputDir()
-        {
-            var dir = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory;
-            if (string.IsNullOrWhiteSpace(dir))
-            {
-                setNotice(NoticeModel.Info("输出位置", "默认输出到源文件旁的 TransFlux Output 文件夹。"));
-                return;
-            }
-            _ = LauncherInterop.OpenFolderAsync(dir);
-        }
-
-        void ClearCompleted()
-        {
-            var done = workbench.Items
-                .Where(d => JobFor(d.MediaId) is { State: JobState.Succeeded })
-                .Select(d => d.MediaId)
-                .ToList();
-            if (done.Count > 0) UserDispatch(new RemoveDrafts(done));
-        }
-
-        HashSet<Guid> EnqueuedIds() => snapshot.Rows
-            .Where(r => r.Job.State is not (JobState.Failed or JobState.Canceled or JobState.Interrupted))
-            .Select(r => r.Job.RequestSnapshot.SourceSnapshotId)
-            .ToHashSet();
-
-        async Task StartAsync()
-        {
-            if (busyEnqueue) return;
-            ClearUndo();
-            var enqueued = EnqueuedIds();
-            var ready = workbench.ReadyItems.Where(d => !enqueued.Contains(d.MediaId)).ToList();
-            if (ready.Count == 0)
-            {
-                setNotice(NoticeModel.Error("没有可转换的项目", "请先导入文件，或等待正在转换的任务完成。"));
-                return;
-            }
-            setBusyEnqueue(true);
-            int ok = 0, blocked = 0, failed = 0;
-            string? firstError = null;
-            try
-            {
-                foreach (var draft in ready)
-                {
-                    if (draft.Snapshot is null) continue;
-                    var request = draft.Options.ToRequest(draft.MediaId, draft.Options.OutputDirectory ?? effectiveSettings.DefaultOutputDirectory);
-                    IReadOnlyList<CompatibilityIssue> issues;
-                    try { issues = MediaCompatibility.Validate(request, draft.Snapshot); }
-                    catch { issues = Array.Empty<CompatibilityIssue>(); }
-                    if (issues.Any(i => i.Blocking))
-                    {
-                        blocked++;
-                        firstError ??= issues.First(i => i.Blocking).Message;
-                        continue;
-                    }
-                    try
-                    {
-                        await services.Jobs.EnqueueAsync(new EnqueueRequest { Request = request, Source = draft.Snapshot }, CancellationToken.None);
-                        ok++;
-                    }
-                    catch (Exception ex) { failed++; firstError ??= ex.Message; }
-                }
-                if (ok > 0)
-                {
-                    try { await services.Jobs.ResumeQueueAsync(CancellationToken.None); queue.RefreshControl(); }
-                    catch (Exception ex) { firstError ??= ex.Message; }
-                }
-            }
-            finally { setBusyEnqueue(false); }
-
-            var msg = $"已开始 {ok} 项" + (blocked > 0 ? $"，{blocked} 项需处理" : string.Empty) + (failed > 0 ? $"，{failed} 项失败" : string.Empty);
-            setNotice(failed == 0 && blocked == 0
-                ? NoticeModel.Info("开始转换", msg)
-                : NoticeModel.Error("开始转换", firstError is null ? msg : msg + "。" + firstError));
-        }
-
-        async Task TogglePauseAsync()
-        {
-            ClearUndo();
-            try
-            {
-                if (snapshot.Paused) { await services.Jobs.ResumeQueueAsync(CancellationToken.None); queue.SetPaused(false); }
-                else { await services.Jobs.PauseQueueAsync(CancellationToken.None); queue.SetPaused(true); }
-                queue.RefreshControl();
-            }
-            catch (Exception ex) { setNotice(NoticeModel.Error("队列暂停失败", ex.Message)); }
-        }
-
-        void DeleteSelected()
-        {
-            var ids = workbench.Selected.Count > 0
-                ? workbench.Selected
-                : workbench.FocusedId is Guid f ? new[] { f } : Array.Empty<Guid>();
-            if (ids.Count == 0) return;
-            var removed = workbench.Items.Where(i => ids.Contains(i.MediaId)).ToList();
-            if (removed.Count == 0) return;
-            ClearUndo();
-            dispatch(new RemoveDrafts(ids));
-            setUndoBatch(removed);
-        }
-
         async Task SaveSettingsAsync(AppSettings next)
         {
+            await services.Settings.SaveAsync(next, CancellationToken.None);
+            services.Jobs.ConfigureExecution(next.MaxConcurrentTranscodes, next.AllowAutomaticFallback, next.FullVerification);
             setSettings(next);
-            try { await services.Settings.SaveAsync(next, CancellationToken.None); }
-            catch (Exception ex) { setSettingsError(ex.Message); }
+            setDefaults(defaults with { OutputDirectory = next.DefaultOutputDirectory,
+                MetadataPolicy = next.PreserveTitleAndChaptersByDefault ? MetadataPolicy.PreserveTitleAndChapters : MetadataPolicy.StripPersonalTags });
         }
-
-        QueueRow? JobFor(Guid mediaId) => snapshot.Rows
-            .Where(r => r.Job.RequestSnapshot.SourceSnapshotId == mediaId)
-            .OrderByDescending(r => r.Job.EnqueueOrder)
-            .FirstOrDefault();
-
-        void OpenOutput(Guid mediaId)
+        async Task SavePresetAsync(string name)
         {
-            var row = JobFor(mediaId);
-            if (row?.Output?.FinalPath is { } path) _ = LauncherInterop.OpenAsync(path);
+            if (selected.Count != 1 || !selected[0].CanEdit) return;
+            var o = selected[0].Draft.Options;
+            await services.Presets.SaveAsync(new Preset { PresetId = Guid.NewGuid(), Name = name,
+                Template = o.ToTemplate() }, CancellationToken.None);
+            setPresets(await services.Presets.GetAllAsync(CancellationToken.None));
         }
-
-        void RevealOutput(Guid mediaId)
+        async Task CancelAndExitAsync()
         {
-            var row = JobFor(mediaId);
-            if (row?.Output?.FinalPath is { } path) LauncherInterop.RevealInExplorer(path);
-        }
-
-        // ---- title bar ----
-        var titleBar = TitleBarView.Render(new TitleBarProps(
-            () => { ClearUndo(); setSettingsReq(settingsReq + 1); setSettingsOpen(true); },
-            () => { ClearUndo(); setAboutReq(aboutReq + 1); setAboutOpen(true); }));
-
-        // ---- left output settings ----
-        var selectedCount = workbench.Selected.Count;
-        var outputDirectoryText = defaultOutputDir ?? effectiveSettings.DefaultOutputDirectory ?? "源文件旁的 TransFlux Output";
-        var catalog = OutputSettingsPanel.Render(new OutputSettingsProps(
-            targetKey, defaultQuality, selectedCount, outputDirectoryText,
-            SelectFormat,
-            SelectQuality,
-            () => ApplyQualityToSelected(defaultQuality),
-            () => _ = PickDefaultOutputAsync(),
-            OpenOutputDir));
-
-        // ---- right task list ----
-        bool MatchesFilter(MediaDraft d)
-        {
-            var job = JobFor(d.MediaId);
-            var done = job is { State: JobState.Succeeded };
-            var failed = d.Status == DraftStatus.Invalid
-                || job is { State: JobState.Failed or JobState.Interrupted or JobState.Canceled };
-            return filter switch
+            setExiting(true);
+            try
             {
-                1 => !done && !failed,
-                2 => done,
-                3 => failed,
-                _ => true,
-            };
-        }
-
-        Element listArea;
-        if (workbench.Items.Count == 0)
-        {
-            listArea = Border(VStack(Space.Lg,
-                    Border(Icon(SymbolIcon("Video")).HAlign(HorizontalAlignment.Center).VAlign(VerticalAlignment.Center))
-                        .Width(64).Height(64).CornerRadius(16).Background(Theme.ControlFillSecondary).HAlign(HorizontalAlignment.Center),
-                    TextBlock(UiText.NoFilesTitle).SemiBold().FontSize(20).HAlign(HorizontalAlignment.Center),
-                    TextBlock("拖入文件即可开始（使用左侧当前输出设置）")
-                        .Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap).TextAlignment(TextAlignment.Center),
-                    Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton()
-                        .HAlign(HorizontalAlignment.Center).AutomationName(UiText.AddFiles))
-                .VerticalAlignment(VerticalAlignment.Center))
-                .Padding(Space.Lg);
-        }
-        else
-        {
-            var visible = workbench.Items.Where(MatchesFilter).ToList();
-            if (visible.Count == 0)
-            {
-                listArea = Border(Ui.Dim("当前筛选下没有任务。").HAlign(HorizontalAlignment.Center)
-                    .VAlign(VerticalAlignment.Center)).Padding(Space.Xl);
+                while (store.GetSnapshot().Busy) await Task.Delay(100);
+                await services.Jobs.PauseQueueAsync(CancellationToken.None);
+                foreach (var item in store.GetSnapshot().Items.Where(i => i.Execution?.CanCancel == true))
+                    await store.CancelAsync(item.Id);
+                while (store.GetSnapshot().Items.Any(i => i.Execution?.IsActive == true)) await Task.Delay(100);
+                if (!await store.PersistAsync()) { setExiting(false); return; }
+                _allowClose = true; window?.Close();
             }
-            else
-            {
-                var rows = visible.Select((draft, index) =>
-                    TaskRow.Render(
-                        draft,
-                        workbench.Selected.Contains(draft.MediaId),
-                        workbench.FocusedId == draft.MediaId || (workbench.FocusedId is null && index == 0),
-                        JobFor(draft.MediaId),
-                        id => UserDispatch(new ToggleSelect(id)),
-                        id => UserDispatch(new FocusDraft(id)),
-                        id => UserDispatch(new RemoveDrafts(new[] { id })),
-                        id => { ClearUndo(); setParamRequest(new ParamRequest(Guid.NewGuid(), id)); },
-                        OpenOutput,
-                        RevealOutput,
-                        ApplyQualityToRow)
-                    .WithKey(draft.MediaId.ToString())).ToArray();
-
-                listArea = ScrollViewer(VStack(0, rows))
-                    .HorizontalScrollMode(ScrollMode.Disabled)
-                    .VerticalScrollMode(ScrollMode.Auto)
-                    .Set(s =>
-                    {
-                        s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                        s.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-                    });
-            }
+            catch (Exception ex) { store.SetError("退出前停止任务失败：" + ex.Message); setExiting(false); }
         }
 
-        Element selectionGroup = HStack(Space.Xs,
-            Button(UiText.SelectAll, () => UserDispatch(new SelectAllDrafts())).SubtleButton()
-                .IsEnabled(workbench.Items.Count > 0).AutomationName(UiText.SelectAll),
-            Button(UiText.DeleteSelected, DeleteSelected).SubtleButton()
-                .IsEnabled(selectedCount > 0 || workbench.FocusedId is not null).AutomationName(UiText.DeleteSelected),
-            Button(selectedCount > 0 ? string.Format(UiText.BatchTitleFormat, selectedCount) : UiText.BatchSettings,
-                    () => { ClearUndo(); setBatchRequest(new BatchRequest(Guid.NewGuid())); })
-                .SubtleButton().IsEnabled(selectedCount > 0).AutomationName(UiText.BatchSettings));
-
-        Element queueGroup = HStack(Space.Sm,
-            Button("开始全部", () => _ = StartAsync()).AccentButton().MinWidth(96).AutomationName("开始全部"),
-            Button(snapshot.Paused ? UiText.Resume : UiText.Pause, () => _ = TogglePauseAsync())
-                .AutomationName(UiText.Pause).ToolTip("仅暂停启动新任务，当前任务继续"));
-
-        var toolbar = FlexRow(
-                HStack(Space.Sm,
-                    Button(UiText.AddFiles, () => _ = ImportFilesAsync()).AccentButton().AutomationName(UiText.AddFiles),
-                    Button(UiText.AddFolder, () => _ = ImportFolderAsync()).AutomationName(UiText.AddFolder)),
-                Empty().Flex(grow: 1, basis: 0),
-                selectionGroup,
-                queueGroup)
-            .Set(f => { f.ColumnGap = Space.Md; f.AlignItems = Microsoft.UI.Reactor.Layout.FlexAlign.Center; });
-
-        var filterBar = SelectorBar(new[]
+        bool Matches(WorkbenchItem i) => filter switch
         {
-            SelectorBarItem("全部"), SelectorBarItem("进行中"), SelectorBarItem("已完成"), SelectorBarItem("失败"),
-        }, filter, i => { ClearUndo(); setFilter(i); });
-        var filterRow = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto], rows: [GridSize.Auto],
-            filterBar.Grid(column: 0),
-            Empty().Grid(column: 1),
-            HStack(Space.Xs,
-                Button(UiText.HistoryRecords, OpenHistory).SubtleButton()
-                    .AutomationName(UiText.HistoryRecords).ToolTip("查看最近的转换记录"),
-                Button("清除已完成", ClearCompleted).SubtleButton()).Grid(column: 2));
+            1 => i.CanEdit,
+            2 => i.Execution is { IsActive: true } or { State: JobState.Queued },
+            3 => i.Execution?.State == JobState.Succeeded,
+            4 => i.Draft.Status == DraftStatus.Invalid || i.Issues.Any(x => x.Blocking)
+                || i.Execution?.State is JobState.Failed or JobState.Interrupted or JobState.NeedsAttention or JobState.Canceled,
+            _ => true,
+        };
+        var visible = snapshot.Items.Where(Matches).ToList();
+        var list = new List<Element>();
+        foreach (var item in visible)
+        {
+            var id = item.Id;
+            list.Add(TaskRow.Render(item, snapshot.Selected.Contains(id), snapshot.Paused,
+                () => store.Select(id), () => store.Select(id, true),
+                () => Run(() => store.RemoveAsync([id])), () => Run(() => store.CancelAsync(id)),
+                () => Run(async () => { await store.CopyAsync(id); setFilter(0); }),
+                () => Run(() => store.RetryAsync(id)), () => Run(() => store.EditQueuedAsync(id)),
+                () => { if (item.Execution?.Output?.FinalPath is { } path) Run(async () => { await LauncherInterop.OpenAsync(path); }); },
+                () => { if (item.Execution?.Output?.FinalPath is { } path) LauncherInterop.RevealInExplorer(path); },
+                () => setDetailsId(id)));
+        }
+        if (!snapshot.Loaded) list.Add(Ui.Dim("正在恢复工作台和未完成任务…").Margin(Space.Xl));
+        else if (snapshot.Items.Count == 0)
+            list.Add(VStack(Space.Lg, TextBlock("放入文件，开始转换").SemiBold().FontSize(24),
+                Ui.Dim("拖入文件或文件夹，然后在右侧选择输出格式。").TextWrapping(TextWrapping.Wrap),
+                Button("添加文件", () => Run(ImportFilesAsync)).AccentButton().HAlign(HorizontalAlignment.Left))
+                .Margin(Space.Xl).VAlign(VerticalAlignment.Center));
+        else if (list.Count == 0) list.Add(Ui.Dim("此筛选下没有任务。").Margin(Space.Xl));
+        var listScroll = ScrollViewer(VStack(Space.Md, list.ToArray())).VerticalScrollMode(ScrollMode.Auto)
+            .HorizontalScrollMode(ScrollMode.Disabled).Set(s => { s.HorizontalContentAlignment = HorizontalAlignment.Stretch; s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled; });
 
-        var batchBar = selectedCount > 0
-            ? Border(Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto, GridSize.Auto],
-                    rows: [GridSize.Auto],
-                    TextBlock(string.Format(UiText.SelectedCountFormat, selectedCount)).SemiBold()
-                        .VAlign(VerticalAlignment.Center).Grid(column: 0),
-                    Empty().Grid(column: 1),
-                    Button(UiText.BatchSettings, () => { ClearUndo(); setBatchRequest(new BatchRequest(Guid.NewGuid())); })
-                        .SubtleButton().AutomationName(UiText.BatchSettings).Grid(column: 2),
-                    Button(UiText.DeleteSelected, DeleteSelected).SubtleButton()
-                        .AutomationName(UiText.DeleteSelected).Grid(column: 3),
-                    Button(UiText.ClearSelection, () => UserDispatch(new ClearDraftSelection())).SubtleButton()
-                        .AutomationName(UiText.ClearSelection).Grid(column: 4))
-                .Padding(Space.Md, Space.Sm))
-                .Background(Theme.SubtleFill)
-                .CornerRadius(6)
-                .WithBorder(Theme.CardStroke, 1)
-                .WithKey("batch-bar")
-            : Empty();
+        var toolbar = HStack(Space.Sm,
+            Ui.WithAccelerator(Button("添加文件", () => Run(ImportFilesAsync)).AutomationName("添加文件"), VirtualKey.O, VirtualKeyModifiers.Control),
+            Ui.WithAccelerator(Button("添加文件夹", () => Run(ImportFolderAsync)).AutomationName("添加文件夹"), VirtualKey.O, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift),
+            Button("全选", () => store.SelectAll(true)).SubtleButton(),
+            Button("清除选择", () => store.SelectAll(false)).SubtleButton())
+            .IsEnabled(snapshot.Loaded && !exiting);
+        var filters = ComboBox(new[] { "全部", "待开始", "进行中", "已完成", "需要处理" }, filter, setFilter)
+            .Width(140).AutomationName("筛选任务");
+        var selectionBar = Grid(columns: [GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
+            Ui.Dim($"{snapshot.Items.Count} 个项目 · 已选 {selected.Count} 项").FontSize(12).VAlign(VerticalAlignment.Center).Grid(column: 0),
+            Button("移除已选", () => Run(() => store.RemoveAsync(selectedIds))).SubtleButton()
+                .IsEnabled(selected.Any(i => i.CanRemove)).ToolTip("仅移除待开始或已经结束的项目；运行中的任务请取消。").Grid(column: 1),
+            filters.Grid(column: 2));
+        var taskSurface = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Auto, GridSize.Star()],
+            toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Md),
+            selectionBar.Grid(row: 1).Margin(0, 0, 0, Space.Md), listScroll.Grid(row: 2)).Set(ConfigureDrop);
+        var inspector = Component<OutputSettingsPanel, OutputSettingsProps>(new OutputSettingsProps(selected, presets,
+            mutate => Run(() => ApplyAsync(mutate)), () => Run(PickOutputAsync),
+            () => Run(() => ApplyAsync(o => o with { OutputDirectory = null })), SavePresetAsync));
+        var main = Grid(columns: [GridSize.Star(), GridSize.Px(320)], rows: [GridSize.Star()],
+            taskSurface.Grid(column: 0), inspector.Grid(column: 1)) with { ColumnSpacing = Space.Lg };
 
-        var outputBar = Grid(columns: [GridSize.Auto, GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
-            Ui.FieldLabel("输出到").VAlign(VerticalAlignment.Center).Grid(column: 0),
-            TextBlock(outputDirectoryText).FontSize(12).Foreground(Theme.SecondaryText)
-                .TextTrimming(TextTrimming.CharacterEllipsis).MaxLines(1).VAlign(VerticalAlignment.Center)
-                .Margin(Space.Sm, 0, Space.Sm, 0).Grid(column: 1),
-            Button("更改", () => _ = PickDefaultOutputAsync()).SubtleButton().Grid(column: 2),
-            Button("打开", OpenOutputDir).SubtleButton().Grid(column: 3)) with { ColumnSpacing = Space.Xs };
-
-        var rightGrid = Grid(columns: [GridSize.Star()],
-            rows: [GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Auto, GridSize.Star(), GridSize.Auto],
-            toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Sm),
-            filterRow.Grid(row: 1).Margin(0, 0, 0, Space.Xs),
-            batchBar.Grid(row: 2).Margin(0, 0, 0, Space.Xs),
-            TaskRow.Header().Grid(row: 3),
-            listArea.Grid(row: 4),
-            outputBar.Grid(row: 5).Margin(0, Space.Sm, 0, 0));
-
-
-        var rightSurface = Border(rightGrid)
-            .Padding(Space.Lg)
-            .CornerRadius(8)
-            .Background(Theme.CardBackground)
-            .WithBorder(Theme.CardStroke, 1)
-            .Set(ConfigureDrop);
-
-        var workbenchArea = Grid(columns: [GridSize.Px(280), GridSize.Star()], rows: [GridSize.Star()],
-            catalog.Grid(column: 0),
-            rightSurface.Grid(column: 1)) with { ColumnSpacing = Space.Lg };
-
+        var startItems = snapshot.Items.Where(i => i.CanStart && (selectedIds.Length == 0 || selectedIds.Contains(i.Id))).ToArray();
+        var completed = snapshot.Items.Count(i => i.Execution?.State == JobState.Succeeded);
+        var failed = snapshot.Items.Count(i => i.Execution?.State is JobState.Failed or JobState.NeedsAttention or JobState.Interrupted);
+        var queued = snapshot.Items.Count(i => i.Execution?.State == JobState.Queued);
+        var active = snapshot.Items.Count(i => i.Execution?.IsActive == true);
+        var footer = Grid(columns: [GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
+            VStack(2, TextBlock($"{completed} 项完成 · {failed} 项需处理 · {active} 项转换中 · {queued} 项等待").SemiBold(),
+                Ui.Dim(snapshot.Paused ? "后续任务已暂停，当前转换继续。" : "源文件始终保留；同名输出自动使用新名称。").FontSize(12)).Grid(column: 0),
+            Button(snapshot.Paused ? "继续队列" : "暂停后续任务", () => Run(store.TogglePauseAsync))
+                .AutomationName("队列控制").IsEnabled(snapshot.Loaded && !snapshot.Busy && !exiting).Margin(Space.Sm, 0).Grid(column: 1),
+            Button(snapshot.Busy ? "正在加入…" : $"开始转换 {startItems.Length} 项", () => Run(() => store.StartAsync(startItems.Select(i => i.Id).ToArray())))
+                .AccentButton().AutomationName("开始转换").IsEnabled(startItems.Length > 0 && !snapshot.Busy && !exiting).Grid(column: 2)).Margin(0, Space.Lg, 0, 0);
         var banners = new List<Element>();
-        if (settingsError is { } err)
-            banners.Add(InfoBar("设置读取失败", err).Warning().IsClosable(false));
-        if (notice is { } n)
-            banners.Add(InfoBar(n.Title, n.Message)
-                .Severity(n.Success ? InfoBarSeverity.Success : InfoBarSeverity.Error)
-                .IsClosable(true)
-                .Closed(() => setNotice(null)));
-        if (undoBatch is { Count: > 0 } deleted)
-            banners.Add((InfoBar(string.Format(UiText.DeletedCountFormat, deleted.Count), UiText.UndoDeleteHint)
-                    .Warning()
-                    .IsClosable(true) with
-                {
-                    ActionButtonContent = UiText.UndoDelete,
-                    OnActionButtonClick = UndoDelete,
-                }).Closed(() => setUndoBatch(null)));
-        if (completion is { } done)
-            banners.Add((InfoBar(string.Format(UiText.ConversionCompleteFormat, done.FileName))
-                    .Success()
-                    .IsClosable(true) with
-                {
-                    ActionButtonContent = UiText.OpenOutputFolder,
-                    OnActionButtonClick = OpenCompletionFolder,
-                }).Closed(() => setCompletion(null)));
-
-        var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
-            VStack(Space.Sm, banners.ToArray()).Grid(row: 0).Margin(0, 0, 0, Space.Sm),
-            workbenchArea.Grid(row: 1))
-            .Padding(Space.PagePadding);
-
-        // ---- overlays (mount only while open; keyed by request id) ----
-        Element paramOverlay = Empty();
-        if (paramRequest is { } req)
+        if (snapshot.Error is { } error) banners.Add(InfoBar("提示", error).Warning().IsClosable(true).Closed(() => store.SetError(null)));
+        if (snapshot.CanUndo) banners.Add(HStack(Space.Sm, Ui.Dim("已移除项目，源文件和输出文件均保留。"), Button("撤销移除", () => Run(store.UndoAsync)).SubtleButton()));
+        var content = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
+            VStack(Space.Sm, banners.ToArray()).Grid(row: 0).Margin(0, 0, 0, Space.Sm), main.Grid(row: 1), footer.Grid(row: 2)).Padding(Space.Lg);
+        var top = TitleBarView.Render(new TitleBarProps(() => OpenDialog("settings"), () => OpenDialog("about"), () => OpenDialog("history")));
+        Element overlay = Empty();
+        if (dialog == "settings") overlay = Component<SettingsDialog, SettingsDialogProps>(new(services, settings, SaveSettingsAsync, () => setDialog(null))).WithKey("settings-" + dialogKey);
+        if (dialog == "about") overlay = Component<AboutDialog, AboutDialogProps>(new(() => setDialog(null))).WithKey("about-" + dialogKey);
+        if (dialog == "history") overlay = Component<HistoryDialog, HistoryDialogProps>(new(services,
+            async path => await ImportAsync([path]) > 0, () => setDialog(null))).WithKey("history-" + dialogKey);
+        if (detailsId is Guid detail && snapshot.Items.FirstOrDefault(i => i.Id == detail) is { } entry)
         {
-            var draft = workbench.Items.FirstOrDefault(i => i.MediaId == req.MediaId);
-            if (draft is not null)
-            {
-                paramOverlay = Component<ParameterDialog, ParameterDialogProps>(
-                        new ParameterDialogProps(services, draft, presets,
-                            (opts, applyToSame) =>
-                            {
-                                dispatch(new UpdateOptions(new[] { draft.MediaId }, _ => opts));
-                                if (!applyToSame) return;
-                                var same = workbench.Items
-                                    .Where(i => i.MediaId != draft.MediaId
-                                        && i.Options.Mode == draft.Options.Mode
-                                        && i.Options.Container == draft.Options.Container
-                                        && i.Options.AudioCodec == draft.Options.AudioCodec)
-                                    .Select(i => i.MediaId).ToList();
-                                if (same.Count > 0) dispatch(new UpdateOptions(same, _ => opts));
-                            },
-                            () => setParamRequest(null)))
-                    .WithKey(req.RequestId.ToString("n"));
-            }
+            var row = entry.Execution;
+            var failure = row?.Failure ?? entry.Draft.Failure;
+            overlay = DialogChrome.Render("技术详情", VStack(Space.Md,
+                TextBlock(entry.Draft.FileName).SemiBold(),
+                Ui.Dim(row?.Attempt?.PlanSnapshot.CandidatePaths.FirstOrDefault()?.Rationale ?? "尚未生成执行计划").TextWrapping(TextWrapping.Wrap),
+                TextBlock(failure?.TechnicalDetail ?? row?.Attempt?.StderrTail ?? row?.Output?.VerificationSummary ?? "没有额外错误信息。")
+                    .TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true)), "关闭", null,
+                _ => DialogChrome.DeferClose(() => setDetailsId(null)), contentWidth: 620);
         }
-
-        Element batchOverlay = Empty();
-        if (batchRequest is { } breq && selectedCount > 0)
-        {
-            var ids = workbench.Selected;
-            var first = workbench.Items.FirstOrDefault(i => i.MediaId == ids[0]);
-            if (first is not null)
-            {
-                var mixed = workbench.Items.Where(i => ids.Contains(i.MediaId)).Select(i => i.Options).Distinct().Count() > 1;
-                batchOverlay = Component<BatchDialog, BatchDialogProps>(
-                        new BatchDialogProps(services, ids, first.Options, mixed, presets,
-                            (targets, mutate) => dispatch(new UpdateOptions(targets, mutate)),
-                            () => setBatchRequest(null)))
-                    .WithKey(breq.RequestId.ToString("n"));
-            }
-        }
-
-        var settingsOverlay = settingsOpen
-            ? Component<SettingsDialog, SettingsDialogProps>(
-                    new SettingsDialogProps(services, effectiveSettings, SaveSettingsAsync, () => setSettingsOpen(false)))
-                .WithKey("settings-" + settingsReq)
-            : Empty();
-
-        var aboutOverlay = aboutOpen
-            ? Component<AboutDialog, AboutDialogProps>(new AboutDialogProps(() => setAboutOpen(false)))
-                .WithKey("about-" + aboutReq)
-            : Empty();
-
-        var historyOverlay = historyOpen
-            ? Component<HistoryDialog, HistoryDialogProps>(
-                    new HistoryDialogProps(services,
-                        async path => await AddPathsAsync(new[] { path }) > 0,
-                        () => setHistoryOpen(false)))
-                .WithKey("history-" + historyReq)
-            : Empty();
-
-        var root = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
-            titleBar.Grid(row: 0),
-            content.Grid(row: 1),
-            paramOverlay.Grid(row: 1),
-            batchOverlay.Grid(row: 1),
-            settingsOverlay.Grid(row: 1),
-            aboutOverlay.Grid(row: 1),
-            historyOverlay.Grid(row: 1));
-
-        return root
-            .RequestedTheme(AppTheme.Resolve(effectiveSettings.Theme))
-            .Background(Theme.SolidBackground);
+        if (exitOpen) overlay = DialogChrome.Render("退出转换器？", VStack(Space.Md,
+            TextBlock(exiting ? "正在停止任务并安全保存，请稍候…" : "仍有任务在执行。取消后临时输出会清理，源文件和已完成结果均保留。")
+                .TextWrapping(TextWrapping.Wrap),
+            Button("取消任务并退出", () => Run(CancelAndExitAsync)).IsEnabled(!exiting)), "继续转换", null,
+            _ => { if (!exiting) DialogChrome.DeferClose(() => setExitOpen(false)); }, contentWidth: 480, primaryEnabled: !exiting);
+        return Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star()],
+            top.Grid(row: 0), content.Grid(row: 1), overlay.Grid(row: 1)).RequestedTheme(AppTheme.Resolve(settings.Theme)).Background(Theme.SolidBackground);
     }
 
-    private void ConfigureDrop(Border border)
+    private void ConfigureDrop(FrameworkElement target)
     {
-        border.AllowDrop = true;
-        border.DragOver -= OnDragOver;
-        border.DragOver += OnDragOver;
-        border.Drop -= OnDrop;
-        border.Drop += OnDrop;
+        target.AllowDrop = true;
+        target.DragOver -= DragOver; target.DragOver += DragOver;
+        target.Drop -= Drop; target.Drop += Drop;
     }
-
-    private static void OnDragOver(object sender, DragEventArgs e)
+    private static void DragOver(object sender, DragEventArgs e)
+    { if (e.DataView.Contains(StandardDataFormats.StorageItems)) e.AcceptedOperation = DataPackageOperation.Copy; }
+    private async void Drop(object sender, DragEventArgs e)
     {
-        if (e.DataView.Contains(StandardDataFormats.StorageItems))
-        {
-            e.AcceptedOperation = DataPackageOperation.Copy;
-            if (e.DragUIOverride is not null) e.DragUIOverride.Caption = "导入到 TransFlux";
-        }
-    }
-
-    private async void OnDrop(object sender, DragEventArgs e)
-    {
+        var deferral = e.GetDeferral();
         try
         {
             if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
             var items = await e.DataView.GetStorageItemsAsync();
             var paths = new List<string>();
             foreach (var item in items)
-            {
                 if (item is StorageFile file) paths.Add(file.Path);
-                else if (item is StorageFolder folder) paths.AddRange(FilePickerInterop.EnumerateMediaFiles(folder.Path, recursive: true));
-            }
-            if (_addPaths is not null) await _addPaths(paths);
+                else if (item is StorageFolder folder)
+                    paths.AddRange(await Task.Run(() => FilePickerInterop.EnumerateMediaFiles(folder.Path, true)));
+            if (_import is not null) await _import(paths);
         }
-        catch (Exception ex)
-        {
-            _setNotice?.Invoke(NoticeModel.Error("拖放导入失败", ex.Message));
-        }
+        catch (Exception ex) { _error?.Invoke("导入失败：" + ex.Message); }
+        finally { deferral.Complete(); }
     }
 }
