@@ -118,3 +118,22 @@ About shows “版本 1.0.0.2”, E2E with installed FFmpeg PASS, uninstall clea
 - Verified: solution build 0/0, 171 tests pass, launched UI renders the new table/toolbar/output bar,
   installer rebuilt and re-verified (install/launch/uninstall, version 1.0.0.2).
   Screenshots: [workbench-v2.png](screenshots/workbench-v2.png), [workbench-p0-installed.png](screenshots/workbench-p0-installed.png).
+
+## 2026-11-01 — P1 usability pass (team delivery)
+
+Delivered: inline batch bar when tasks are selected (批量设置 / 删除 / 取消选择), per-row quick quality menu,
+remember last used target format + quality (AppSettings.LastTargetFormatKey / LastQuality), undo for deletion,
+completion InfoBar with 打开输出文件夹, and a SQLite-backed history dialog (open output / reveal / re-add source /
+clear history records only). Backend: TransFlux.Infrastructure.HistoryService + SqliteJobStore history helpers.
+
+Verification (executed):
+- `dotnet build TransFlux.slnx -c Debug` → **0 warnings, 0 errors**
+- `dotnet test TransFlux.slnx -c Debug` → **174 passed / 0 failed** (Domain 83, Application 25, Infrastructure 28, Engine.Integration 38)
+- UI Automation: workbench shows 质量 chips, 开始全部/暂停, 历史记录, 清空已完成, 输出到 bar;
+  “历史记录” dialog lists a real entry with 打开输出 / 打开文件夹 / 清空历史; rects inside window bounds.
+- Installed build: setup v1.0.0.2 install exit 0, launches, uninstall clean.
+
+Screenshots: [p1-workbench.png](screenshots/p1-workbench.png), [p1-history.png](screenshots/p1-history.png),
+[workbench-p1-installed.png](screenshots/workbench-p1-installed.png).
+
+Note: the QA teammate session was interrupted by the host; the Lead completed this final verification and closed task-9.
