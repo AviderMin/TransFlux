@@ -4,6 +4,7 @@ using System.Text;
 using TransFlux.Application.Contracts;
 using TransFlux.Domain.Jobs;
 using TransFlux.Engine.FFmpeg.Core;
+using TransFlux.Domain.Plans;
 using TransFlux.Engine.FFmpeg.Processes;
 
 namespace TransFlux.Engine.FFmpeg.Runner;
@@ -86,7 +87,7 @@ public sealed class FfmpegRunner : IMediaRunner
             if (exitCode == 0 && bytes is > 0)
                 return RunResult.Ok(exitCode, stopwatch.Elapsed, bytes, Tail(stderrTail));
 
-            var failure = ClassifyFailure(exitCode, stderrTail.ToString(), bytes);
+            var failure = ClassifyFailure(exitCode, stderrTail.ToString(), bytes, attempt.Candidate.Backend != HardwareBackend.Cpu);
             TryDelete(attempt.TempPath);
             return RunResult.Fail(exitCode, stopwatch.Elapsed, failure, Tail(stderrTail));
         }
@@ -216,7 +217,7 @@ public sealed class FfmpegRunner : IMediaRunner
         catch (IOException) { }
     }
 
-    private static FailureInfo ClassifyFailure(int exitCode, string stderr, long? bytes)
+    private static FailureInfo ClassifyFailure(int exitCode, string stderr, long? bytes, bool hardware)
     {
         var lower = stderr.ToLowerInvariant();
         if (lower.Contains("no space left") || lower.Contains("disk full") || lower.Contains("not enough space"))
@@ -224,7 +225,11 @@ public sealed class FfmpegRunner : IMediaRunner
         if (lower.Contains("permission denied") || lower.Contains("access is denied") || lower.Contains("access denied"))
             return FailureInfo.Of(FailureCode.AccessDenied, "run.access_denied", TailText(stderr));
         if (lower.Contains("unknown encoder") || lower.Contains("encoder") && lower.Contains("not found")
-            || lower.Contains("cannot load") || lower.Contains("failed to initialize"))
+            || lower.Contains("cannot load") || lower.Contains("failed to initialize")
+            || hardware && (lower.Contains("nvenc api version") || lower.Contains("open encoder")
+                || lower.Contains("no capable devices") || lower.Contains("no nvenc capable") || lower.Contains("no device")
+                || lower.Contains("unsupported device") || lower.Contains("error initializing") || lower.Contains("device failed")
+                || lower.Contains("device creation failed") || lower.Contains("failed to get adapter")))
             return FailureInfo.Of(FailureCode.EncoderInitFailed, "run.encoder_init_failed", TailText(stderr), retryable: true);
         if (bytes is null or 0)
             return FailureInfo.Of(FailureCode.ProcessFailed, "run.no_output",

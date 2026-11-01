@@ -6,6 +6,7 @@ using TransFlux.Domain.Media;
 using TransFlux.Domain.Plans;
 using TransFlux.Domain.Rules;
 using TransFlux.Engine.FFmpeg.Core;
+using TransFlux.Engine.FFmpeg.Capabilities;
 
 namespace TransFlux.Engine.FFmpeg.Planner;
 
@@ -94,15 +95,17 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
         var requested = request.Hardware.Backend;
         var hw = capabilities.Candidates
-            .Where(c => request.VideoCodec == VideoCodec.H264 && c.Available && H264HardwareEncoders.Contains(c.EncoderName))
+            .Where(c => request.VideoCodec == VideoCodec.H264 && c.Available && c.TrialCompleted && c.Direct3DAdapterIndex is >= 0 && H264HardwareEncoders.Contains(c.EncoderName))
             .Where(c => request.Hardware.EncoderName is null || string.Equals(c.EncoderName, request.Hardware.EncoderName, StringComparison.OrdinalIgnoreCase))
             .Where(c => requested == HardwareBackend.Auto || MapBackend(c.Backend) == requested)
+            .Where(c => request.Hardware.AdapterId is null || c.DeviceId == request.Hardware.AdapterId)
             .ToList();
 
         foreach (var cap in hw)
         {
             var backend = MapBackend(cap.Backend);
-            candidates.Add(BuildVideoCandidate(request, video, audioIndices, geometry, backend, cap.EncoderName, cap.Backend, usesGpu: false, uncalibrated: true));
+            candidates.Add(BuildVideoCandidate(request, video, audioIndices, geometry, backend, cap.EncoderName, cap.Backend,
+                usesGpu: false, uncalibrated: true, cap.Direct3DAdapterIndex, cap.DeviceId));
         }
 
         if (requested is HardwareBackend.NvidiaNvenc or HardwareBackend.IntelQsv or HardwareBackend.AmdAmf)
@@ -111,12 +114,16 @@ public sealed class FfmpegPlanner : IExecutionPlanner
                 throw new PlanValidationException(FailureInfo.Of(
                     FailureCode.DeviceUnavailable, "plan.device_unavailable",
                     $"Requested hardware backend {requested} has no verified encoder in the capability snapshot."));
-            // Prefer the explicitly requested backend, keeping CPU as a fallback candidate.
-            candidates = candidates.OrderByDescending(c => c.Backend == requested).ToList();
+            // The single automatic fallback must be CPU, not another potentially failing GPU.
+            candidates = [candidates.First(c => c.Backend == requested), cpu];
         }
-        else if (requested == HardwareBackend.Cpu && candidates.Count > 1)
+        else if (requested == HardwareBackend.Auto && candidates.Any(c => c.Backend != HardwareBackend.Cpu))
         {
-            candidates = candidates.Where(c => c.Backend == HardwareBackend.Cpu).ToList();
+            candidates = [candidates.First(c => c.Backend != HardwareBackend.Cpu), cpu];
+        }
+        else
+        {
+            candidates = [cpu];
         }
 
         var parameterPlan = candidates[0].Arguments.ToList();
@@ -132,9 +139,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         string encoder,
         string backendLabel,
         bool usesGpu,
-        bool uncalibrated)
+        bool uncalibrated,
+        int? adapterIndex = null,
+        string? deviceId = null)
     {
         var args = GlobalPrefix(request.Trim?.Start);
+        HardwareEncoding.AddDevice(args, encoder, adapterIndex);
         AddInput(args);
         AddTrimDuration(args, request.Trim);
 
@@ -148,15 +158,17 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         AddVideoQuality(args, encoder, request);
         if (request.VideoCodec == VideoCodec.Hevc && request.Container is ContainerFormat.Mp4 or ContainerFormat.Mov)
         { args.Add("-tag:v"); args.Add("hvc1"); }
-        args.Add("-pix_fmt"); args.Add("yuv420p");
+        if (adapterIndex is null) { args.Add("-pix_fmt"); args.Add("yuv420p"); }
         if (request.FrameRateOverride is double frameRate && frameRate > 0)
         {
             args.Add("-r"); args.Add(frameRate.ToString("0.###", CultureInfo.InvariantCulture));
         }
 
-        if (geometry.FilterChain.Count > 0)
+        var filters = geometry.FilterChain.ToList();
+        if (adapterIndex is not null) filters.Add(HardwareEncoding.UploadFilter(encoder));
+        if (filters.Count > 0)
         {
-            args.Add("-vf"); args.Add(string.Join(",", geometry.FilterChain));
+            args.Add("-vf"); args.Add(string.Join(",", filters));
         }
 
         if (audioIndices.Count > 0)
@@ -181,12 +193,12 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
         return new ExecutionCandidate
         {
-            CandidateId = $"{backendLabel}-{encoder}",
+            CandidateId = $"{backendLabel}-{encoder}" + (deviceId is null ? "" : ":" + deviceId),
             Backend = backend,
             EncoderName = encoder,
             UsesGpuDecode = usesGpu,
             UsesGpuFilter = false,
-            DeviceId = request.Hardware.AdapterId,
+            DeviceId = deviceId,
             Arguments = args,
             Rationale = rationale,
         };
@@ -569,7 +581,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             ResourceNeeds = new ResourceNeeds
             {
                 NeedsGpuEncoder = candidates.Any(c => c.Backend != HardwareBackend.Cpu),
-                AdapterId = request.Hardware.AdapterId,
+                AdapterId = candidates.FirstOrDefault(c => c.Backend != HardwareBackend.Cpu)?.DeviceId,
                 NeedsCpuHeavy = candidates.Any(c => c.Backend == HardwareBackend.Cpu),
                 NeedsVerification = true,
             },

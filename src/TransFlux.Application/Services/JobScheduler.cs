@@ -586,7 +586,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                 CapabilitySnapshot caps;
                 try
                 {
-                    caps = await _caps.GetAsync(new CapabilityQuery { IncludeTrialRun = false }, cts.Token).ConfigureAwait(false);
+                    caps = await _caps.GetAsync(new CapabilityQuery { IncludeTrialRun = true }, cts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text;
 
 namespace TransFlux.Engine.FFmpeg.Core;
 
@@ -94,6 +95,7 @@ public static class FfmpegCoreLocator
         {
             throw; // Integrity failures must not be swallowed by search.
         }
+        catch (CoreNotFoundException) { throw; }
         catch
         {
             return null;
@@ -139,12 +141,27 @@ public static class FfmpegCoreLocator
         var fpPath = ResolveRelative(manifestDir, fpRel)
             ?? throw new CoreNotFoundException($"Manifest '{manifestPath}' points at missing ffprobe '{fpRel}'.");
 
-        var cacheKey = $"{manifestPath}|{ffSha}|{fpSha}";
+        var runtime = new List<(string Path, string Hash)>();
+        if (root.TryGetProperty("runtimeFiles", out var files))
+            foreach (var file in files.EnumerateArray())
+            {
+                var relative = file.GetProperty("relativePath").GetString()!;
+                var path = Path.GetFullPath(Path.Combine(manifestDir, relative.Replace('/', Path.DirectorySeparatorChar)));
+                if (!path.StartsWith(Path.GetFullPath(manifestDir) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || !File.Exists(path)) throw new CoreNotFoundException($"Missing or invalid media runtime: {relative}");
+                runtime.Add((path, file.GetProperty("sha256").GetString()!));
+            }
+        var bundleHash = runtime.Count == 0 ? ffSha.ToUpperInvariant() : Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(string.Join("|", new[] { ffSha, fpSha }.Concat(runtime.Select(r => r.Hash))))));
+        var stamps = new[] { ffPath, fpPath }.Concat(runtime.Select(r => r.Path)).Select(p =>
+            { var info = new FileInfo(p); return $"{p}:{info.Length}:{info.LastWriteTimeUtc.Ticks}"; });
+        var cacheKey = $"{manifestPath}|{bundleHash}|{string.Join('|', stamps)}";
         return Cache.GetOrAdd(cacheKey, _ =>
         {
             VerifySha(ffPath, ffSha);
             VerifySha(fpPath, fpSha);
-            return new FfmpegCorePaths(ffPath, fpPath, ffSha.ToUpperInvariant(), version);
+            foreach (var item in runtime) VerifySha(item.Path, item.Hash);
+            return new FfmpegCorePaths(ffPath, fpPath, bundleHash, version);
         });
     }
 

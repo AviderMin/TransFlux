@@ -1,5 +1,9 @@
 # 12 · AI 编码交接总结
 
+## 最新增量 · 1.0.0.5 硬件兼容
+
+已修复裸 LUID 参数、GPU 绑定、自动模式 CPU 优先、未试跑缓存污染及驱动 API 不匹配；核心固定 Gyan 8.0.1 shared，manifest 覆盖运行库 DLL。RTX 4060 / 591.86 正常 GPU E2E 和真实初始化失败 → CPU 回退 E2E 均通过；Intel/AMD 未做实机验证。59 种输出组合回归通过。继续开发前阅读 [硬件证据](evidence/HARDWARE-COMPATIBILITY.md)，不要改回 latest 下载或裸 LUID 参数。下方 1.0.0.4 是此前构建记录。
+
 ## 最新交接 · 2026-11-01 UX 重构
 
 最新增量：输出目标已拆为媒体/容器/编码，扩展到 4 种视频容器、7 种音频输出类型。修改选项时先读 OutputFormatCatalog、OutputTargets、OutputFormatTests，保持界面与执行矩阵一致。

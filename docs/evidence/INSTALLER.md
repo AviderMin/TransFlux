@@ -1,8 +1,17 @@
 # Inno Setup installer — build & verification evidence
 
-Date: 2026-11-01. 当前发布：**1.0.0.4**（下方 Built artifact 为历史 1.0.0.2 记录，打包流程相同，均基于 SurgeLink 方案）。
+Date: 2026-11-01. 当前构建：**1.0.0.5**；下方保留历史构建记录。
 
-## 当前发布 · 1.0.0.4（2026-11-01）
+## 当前构建 · 1.0.0.5 硬件兼容修复
+
+- File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.5-x64.exe`
+- Size: **128,532,522 bytes / 122.6 MiB**；FileVersion **1.0.0.5**
+- SHA-256: `0D56EBB172E794063411FE877171DC8C93C8CAF5952E6DC8CF6D7423C81D0DE4`
+- `tools/package-exe.ps1` 自包含发布与 Inno Setup 编译成功；核心按 manifest 精确复制并校验，固定 Gyan 8.0.1 shared 及七个 DLL。
+- 全量 271 项测试通过。使用最终 payload 的核心执行真实 NVENC E2E PASS（约 1.35 秒），输出完整解码通过；开发目录 GPU → CPU 故障回退 E2E PASS，设置页完成隔离 UI 验证。
+- 本次没有覆盖用户安装或执行新版安装/卸载；1.0.0.4 下方的安装验证不作为本版本安装验证。详情见 [硬件修复证据](HARDWARE-COMPATIBILITY.md)。
+
+## 历史发布 · 1.0.0.4（2026-11-01）
 
 - File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.4-x64.exe`
 - Size: **117.4 MB**；FileVersion / ProductVersion **1.0.0.4**

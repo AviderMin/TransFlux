@@ -34,7 +34,8 @@ public interface IEngineCapabilities
 public sealed record HardwareValidationRequest
 {
     public required string EncoderName { get; init; }
-    public string? DeviceArgument { get; init; }
+    /// <summary>DXGI enumeration index, never a free-form command or LUID token.</summary>
+    public int? Direct3DAdapterIndex { get; init; }
     public string? PixelFormat { get; init; }
     public int Width { get; init; } = 640;
     public int Height { get; init; } = 360;
@@ -45,6 +46,7 @@ public sealed record HardwareValidationResult
 {
     public bool Success { get; init; }
     public string? FailureReason { get; init; }
+    public string? DiagnosticDetail { get; init; }
     public TimeSpan Elapsed { get; init; }
 }
 

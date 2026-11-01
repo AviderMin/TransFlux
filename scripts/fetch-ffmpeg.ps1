@@ -1,28 +1,37 @@
-# Fetches the pinned TransFlux media core (shared GPL build) into tools/ffmpeg and verifies SHA-256.
-# A rolling BtbN "latest" build; tools/ffmpeg/core-manifest.json pins the exact binaries by hash.
-param(
-  [string]$Url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
-  [string]$ExpectedFfmpegSha256 = "CA8204F0E87F90B7CDFE0F7217854733F7B0235F0D76671F82753852A4DEC9F7"
-)
+# Fetch the exact archive and validate every shipped executable/DLL before replacing any core file.
+param([switch]$Force)
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
-$dir = Join-Path $root 'tools/ffmpeg'
-$bin = Join-Path $dir 'bin'
-New-Item -ItemType Directory -Force $dir | Out-Null
-$zip = Join-Path $dir 'ffmpeg-gpl-shared.zip'
-if (-not (Test-Path $zip)) { Write-Host "Downloading $Url"; Invoke-WebRequest -Uri $Url -OutFile $zip }
-$tmp = Join-Path $dir '_extract'
-if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-Expand-Archive -Path $zip -DestinationPath $tmp -Force
-$srcBin = Get-ChildItem $tmp -Recurse -Directory -Filter bin | Select-Object -First 1
-if (!$srcBin) { throw 'bin folder not found in archive' }
-if (Test-Path $bin) { Remove-Item -Recurse -Force $bin }
-New-Item -ItemType Directory -Force $bin | Out-Null
-Get-ChildItem $srcBin.FullName -File | Where-Object { $_.Name -ne 'ffplay.exe' } | ForEach-Object { Copy-Item $_.FullName $bin -Force }
-Copy-Item (Join-Path (Split-Path $srcBin.FullName -Parent) 'LICENSE.txt') (Join-Path $dir 'LICENSE.txt') -Force -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force $tmp
-$ff = Join-Path $bin 'ffmpeg.exe'
-$hash = (Get-FileHash $ff -Algorithm SHA256).Hash
-Write-Host "ffmpeg SHA256: $hash"
-if ($ExpectedFfmpegSha256 -and $hash -ne $ExpectedFfmpegSha256) { throw "Core hash mismatch: expected $ExpectedFfmpegSha256 but got $hash" }
-Write-Host "Media core ready at $bin"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$coreRoot = Join-Path $repoRoot 'tools/ffmpeg'
+$manifest = Get-Content -LiteralPath (Join-Path $coreRoot 'core-manifest.json') -Raw | ConvertFrom-Json
+$entries = @($manifest.ffmpeg, $manifest.ffprobe) + @($manifest.runtimeFiles)
+function Test-CoreFile($path, $hash) {
+    return (Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $hash
+}
+if (!$Force) {
+    $ready = $true
+    foreach ($entry in $entries) { if (!(Test-CoreFile (Join-Path $coreRoot $entry.relativePath) $entry.sha256)) { $ready = $false; break } }
+    if ($ready) { Write-Output 'Pinned media core already verified.'; return }
+}
+$downloads = Join-Path $repoRoot 'artifacts/core-downloads'
+$null = New-Item -ItemType Directory -Path $downloads -Force
+$archivePath = Join-Path $downloads ([Uri]$manifest.sourceUrl).Segments[-1]
+if (!(Test-CoreFile $archivePath $manifest.archiveSha256)) {
+    Invoke-WebRequest -Uri $manifest.sourceUrl -OutFile $archivePath
+}
+if (!(Test-CoreFile $archivePath $manifest.archiveSha256)) { throw 'Media archive SHA-256 mismatch; existing core has not been changed.' }
+$stage = Join-Path $downloads ('stage-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $stage
+& tar.exe -xf $archivePath -C $stage "$($manifest.archiveRoot)/bin" "$($manifest.archiveRoot)/LICENSE"
+if ($LASTEXITCODE -ne 0) { throw 'Media archive extraction failed.' }
+$extracted = Join-Path $stage $manifest.archiveRoot
+foreach ($entry in $entries) {
+    if (!(Test-CoreFile (Join-Path $extracted $entry.relativePath) $entry.sha256)) { throw "Extracted core SHA-256 mismatch: $($entry.relativePath)" }
+}
+foreach ($entry in $entries) {
+    $target = Join-Path $coreRoot $entry.relativePath
+    $null = New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force
+    Copy-Item -LiteralPath (Join-Path $extracted $entry.relativePath) -Destination $target -Force
+}
+Copy-Item -LiteralPath (Join-Path $extracted 'LICENSE') -Destination (Join-Path $coreRoot 'LICENSE.txt') -Force
+Write-Output "Verified media core ready: $($manifest.ffmpeg.version)"

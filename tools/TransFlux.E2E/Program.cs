@@ -52,9 +52,20 @@ var planner = new FfmpegPlanner(core);
 var runner = new FfmpegRunner(core);
 var verifier = new FfmpegVerifier(core);
 var caps = new CapabilityService(engineCaps, store, clock);
+var hardwareSmoke = args.Contains("--hardware");
+var fallbackSmoke = args.Contains("--fallback-smoke");
+IMediaRunner effectiveRunner = runner;
+if (hardwareSmoke || fallbackSmoke)
+{
+    var detected = await caps.RefreshAsync(default);
+    foreach (var c in detected.Candidates)
+        Console.WriteLine($"hardware={c.EncoderName} adapter={c.DeviceId} index={c.Direct3DAdapterIndex} available={c.Available} {c.UnavailableReason} {c.DiagnosticDetail}");
+    if (!detected.HasAvailableGpuEncoder) throw new Exception("Hardware smoke requires a verified GPU encoder.");
+    if (fallbackSmoke) effectiveRunner = new InvalidLevelRunner(runner);
+}
 var outputPaths = new OutputPathService(fs, clock);
 var committer = new OutputCommitter(store, fs, clock);
-var scheduler = new JobScheduler(store, planner, probe, caps, runner, verifier, outputPaths, committer, fs, clock, options);
+var scheduler = new JobScheduler(store, planner, probe, caps, effectiveRunner, verifier, outputPaths, committer, fs, clock, options);
 await RecoveryService.RunAsync(store, committer, default);
 scheduler.Start();
 
@@ -79,6 +90,7 @@ var request = new ConversionRequest
     Speed = SpeedTier.Balanced,
     Audio = new AudioSpec { Codec = AudioCodec.Aac, BitRateKbps = 192 },
     Output = new OutputPolicy { OutputDirectory = outDir, FileNameOverride = "e2e-result" },
+    Hardware = hardwareSmoke || fallbackSmoke ? HardwarePreference.Auto : HardwarePreference.Cpu,
 };
 
 var sw = Stopwatch.StartNew();
@@ -119,7 +131,12 @@ if (ok)
     Console.WriteLine("output probe ok=" + outProbe.IsSuccess +
         (outProbe.IsSuccess ? $" v={outProbe.Value!.VideoStreams.Count()} a={outProbe.Value!.AudioStreams.Count()} {outProbe.Value!.PrimaryVideo?.Width}x{outProbe.Value!.PrimaryVideo?.Height} codec={outProbe.Value!.PrimaryVideo?.Codec}" : ""));
     Console.WriteLine("source unchanged=" + (srcHashBefore == srcHashAfter));
-    var pass = outProbe.IsSuccess && srcHashBefore == srcHashAfter;
+    var attempts = await store.GetAttemptsForJobAsync(jobId, default);
+    foreach (var attempt in attempts) Console.WriteLine($"attempt={attempt.Ordinal} device={attempt.DeviceIdentity ?? "CPU"} state={attempt.State} failure={attempt.Failure?.Code} detail={attempt.Failure?.TechnicalDetail}");
+    var pass = outProbe.IsSuccess && srcHashBefore == srcHashAfter
+        && (!hardwareSmoke || attempts.Count == 1 && attempts[0].DeviceIdentity is not null)
+        && (!fallbackSmoke || attempts.Count == 2 && attempts[0].DeviceIdentity is not null && attempts[1].DeviceIdentity is null);
+    Run(core.FfmpegPath, new[] { "-v", "error", "-i", finalPath, "-f", "null", "-" });
     Console.WriteLine(pass ? "E2E_RESULT=PASS" : "E2E_RESULT=FAIL");
     return pass ? 0 : 3;
 }
@@ -140,4 +157,19 @@ static string Sha(string path)
 {
     using var s = File.OpenRead(path);
     return Convert.ToHexStringLower(SHA256.HashData(s));
+}
+
+// Fault injection exercises the real runner, scheduler and CPU fallback without changing a driver.
+sealed class InvalidLevelRunner(IMediaRunner inner) : IMediaRunner
+{
+    public Task<RunResult> RunAsync(AttemptContext attempt, IProgress<EngineProgress> progress, CancellationToken ct)
+    {
+        if (attempt.Candidate.Backend != HardwareBackend.Cpu)
+        {
+            var injected = attempt.Candidate.Arguments.ToList();
+            injected.InsertRange(injected.Count - 1, new[] { "-level:v", "1" });
+            attempt = attempt with { Candidate = attempt.Candidate with { Arguments = injected } };
+        }
+        return inner.RunAsync(attempt, progress, ct);
+    }
 }

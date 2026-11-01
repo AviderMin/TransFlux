@@ -40,11 +40,15 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         var (identity, setIdentity) = UseState<CoreIdentity?>(null);
         var (capabilities, setCapabilities) = UseState<CapabilitySnapshot?>(null);
         var (diagError, setDiagError) = UseState<string?>(null);
+        var (probing, setProbing) = UseState(true);
+        var (showDiagnostics, setShowDiagnostics) = UseState(false);
+        var probeLifetime = UseRef<CancellationTokenSource?>(null);
         var window = UseWindow()?.NativeWindow;
 
         UseEffect(() =>
         {
             var cts = new CancellationTokenSource();
+            probeLifetime.Current = cts;
             _ = Task.Run(async () =>
             {
                 try
@@ -54,9 +58,21 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { setDiagError(ex.Message); }
+                finally { if (!cts.IsCancellationRequested) setProbing(false); }
             });
             return () => cts.Cancel();
         }, p.Services);
+
+        async Task RefreshHardwareAsync()
+        {
+            if (probing) return;
+            setProbing(true); setDiagError(null);
+            var ct = probeLifetime.Current?.Token ?? CancellationToken.None;
+            try { setCapabilities(await p.Services.Capabilities.RefreshAsync(ct)); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { setDiagError(ex.Message); }
+            finally { if (!ct.IsCancellationRequested) setProbing(false); }
+        }
 
         void Update(Func<AppSettings, AppSettings> mutate) => setDraft(mutate(draft));
 
@@ -125,6 +141,8 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
                     Ui.KeyValue("FFprobe", identity.FfprobePath)),
             Ui.Divider(),
             TextBlock("设备与候选路径").SemiBold(),
+            Button(probing ? "正在试编码检测…" : "重新检测硬件", () => _ = RefreshHardwareAsync())
+                .IsEnabled(!probing).AutomationName("重新检测硬件"),
         };
         if (capabilities is null)
         {
@@ -134,11 +152,24 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         {
             if (capabilities.Adapters.Count == 0) diagChildren.Add(Ui.Dim("未枚举到显示适配器。"));
             foreach (var adapter in capabilities.Adapters)
-                diagChildren.Add(Ui.KeyValue(adapter.Name, adapter.Vendor + " · 驱动 " + (adapter.DriverVersion ?? "未知")));
+                diagChildren.Add(VStack(Space.Xs,
+                    TextBlock(adapter.Name).SemiBold().TextWrapping(TextWrapping.Wrap),
+                    Ui.Dim($"{adapter.Vendor} · 驱动 {adapter.DriverVersion ?? "未知"} · 显存 {Fmt.Size(adapter.DedicatedMemoryBytes)}").FontSize(12).TextWrapping(TextWrapping.Wrap),
+                    Ui.Dim($"设备 {adapter.DxgiIndex} · {adapter.AdapterId}" + (adapter.IsSoftware ? " · 软件适配器，不用于硬件编码" : ""))
+                        .FontSize(12).TextWrapping(TextWrapping.Wrap)));
             diagChildren.Add(Ui.Divider());
             foreach (var candidate in capabilities.Candidates)
-                diagChildren.Add(Ui.KeyValue(candidate.EncoderName,
-                    candidate.Backend + " · " + (candidate.Available ? "可用" : "不可用：" + (candidate.UnavailableReason ?? "未知"))));
+            {
+                var device = capabilities.Adapters.FirstOrDefault(a => a.AdapterId == candidate.DeviceId);
+                diagChildren.Add(VStack(Space.Xs,
+                    TextBlock(candidate.EncoderName + (device is null ? "" : " · " + device.Name)).SemiBold().TextWrapping(TextWrapping.Wrap),
+                    TextBlock(candidate.Available ? (candidate.TrialCompleted ? "试编码通过，可用" : "编码器可用")
+                        : candidate.UnavailableReason ?? "不可用").FontSize(12).TextWrapping(TextWrapping.Wrap),
+                    showDiagnostics && candidate.DiagnosticDetail is { Length: > 0 } detail
+                        ? TextBlock(detail).FontSize(11).TextWrapping(TextWrapping.Wrap).Set(t => t.IsTextSelectionEnabled = true) : null));
+            }
+            diagChildren.Add(Button(showDiagnostics ? "隐藏技术详情" : "显示技术详情", () => setShowDiagnostics(!showDiagnostics))
+                .AutomationName(showDiagnostics ? "隐藏技术详情" : "显示技术详情").SubtleButton());
         }
         diagChildren.Add(Ui.Divider());
         diagChildren.Add(Ui.KeyValue("并发转码", p.Services.Options.MaxConcurrentTranscodes.ToString()));

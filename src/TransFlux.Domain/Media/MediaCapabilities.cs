@@ -11,8 +11,11 @@ public sealed record CandidateCapability
     public bool SupportsGpuDecode { get; init; }
     public bool SupportsGpuFilter { get; init; }
     public string? DeviceId { get; init; }
+    public int? Direct3DAdapterIndex { get; init; }
+    public bool TrialCompleted { get; init; }
     public bool Available { get; init; }
     public string? UnavailableReason { get; init; }
+    public string? DiagnosticDetail { get; init; }
     public IReadOnlyList<string> SupportedPixelFormats { get; init; } = Array.Empty<string>();
     public bool Supports10Bit { get; init; }
 }
@@ -43,4 +46,5 @@ public sealed record AdapterInfo
     public long? DedicatedMemoryBytes { get; init; }
     public bool IsSoftware { get; init; }
     public long Luid { get; init; }
+    public int DxgiIndex { get; init; }
 }

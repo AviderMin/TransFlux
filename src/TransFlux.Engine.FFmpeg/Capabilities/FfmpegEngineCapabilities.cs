@@ -113,18 +113,23 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
     {
         ArgumentNullException.ThrowIfNull(request);
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-n", "-loglevel", "error" };
-        if (!string.IsNullOrWhiteSpace(request.DeviceArgument))
-        {
-            foreach (var token in request.DeviceArgument.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                arguments.Add(token);
-        }
+        if (request.Direct3DAdapterIndex is < 0)
+            return new HardwareValidationResult { FailureReason = "显卡索引无效。" };
+        HardwareEncoding.AddDevice(arguments, request.EncoderName, request.Direct3DAdapterIndex);
         arguments.Add("-f"); arguments.Add("lavfi");
-        arguments.Add("-i"); arguments.Add($"testsrc=duration=1:size={Math.Max(2, request.Width)}x{Math.Max(2, request.Height)}:rate=30");
-        if (!string.IsNullOrWhiteSpace(request.PixelFormat))
+        arguments.Add("-i"); arguments.Add($"testsrc2=duration=1:size={Math.Max(2, request.Width)}x{Math.Max(2, request.Height)}:rate=30");
+        if (request.Direct3DAdapterIndex is not null)
+        {
+            arguments.Add("-vf"); arguments.Add(HardwareEncoding.UploadFilter(request.EncoderName));
+        }
+        else if (!string.IsNullOrWhiteSpace(request.PixelFormat))
         {
             arguments.Add("-pix_fmt"); arguments.Add(request.PixelFormat!);
         }
         arguments.Add("-c:v"); arguments.Add(request.EncoderName);
+        if (request.EncoderName == "h264_nvenc") arguments.AddRange(["-preset", "p4", "-rc", "vbr", "-cq", "23"]);
+        if (request.EncoderName == "h264_qsv") arguments.AddRange(["-preset", "medium", "-global_quality", "23"]);
+        if (request.EncoderName == "h264_amf") arguments.AddRange(["-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"]);
         arguments.Add("-t"); arguments.Add("1");
         arguments.Add("-f"); arguments.Add("null"); arguments.Add("-");
 
@@ -137,13 +142,13 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             if (result.TimedOut)
                 return new HardwareValidationResult { Success = false, FailureReason = $"Trial encode timed out after {timeout.TotalSeconds:0}s.", Elapsed = stopwatch.Elapsed };
             if (result.ExitCode != 0)
-                return new HardwareValidationResult { Success = false, FailureReason = Trim(result.Stderr), Elapsed = stopwatch.Elapsed };
+                return new HardwareValidationResult { Success = false, FailureReason = HardwareEncoding.FailureSummary(result.Stderr), DiagnosticDetail = Trim(result.Stderr), Elapsed = stopwatch.Elapsed };
             return new HardwareValidationResult { Success = true, Elapsed = stopwatch.Elapsed };
         }
         catch (OperationCanceledException)
         {
             stopwatch.Stop();
-            return new HardwareValidationResult { Success = false, FailureReason = "Trial encode canceled.", Elapsed = stopwatch.Elapsed };
+            throw;
         }
         catch (Exception ex)
         {

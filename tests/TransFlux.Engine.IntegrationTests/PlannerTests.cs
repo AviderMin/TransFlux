@@ -9,6 +9,34 @@ namespace TransFlux.Engine.IntegrationTests;
 
 public class PlannerTests
 {
+    [Theory]
+    [InlineData("nvidia", "h264_nvenc", HardwareBackend.NvidiaNvenc)]
+    [InlineData("intel", "h264_qsv", HardwareBackend.IntelQsv)]
+    [InlineData("amd", "h264_amf", HardwareBackend.AmdAmf)]
+    public async Task Auto_BindsVerifiedSelectedAdapter_ThenFallsBackToCpu(string backend, string encoder, HardwareBackend expected)
+    {
+        var source = SyntheticVideo(640, 360);
+        var request = TestSupport.TranscodeRequest(source) with { Hardware = HardwarePreference.ForAdapter("LUID-selected") };
+        var cap = new CandidateCapability { CandidateId = "gpu", Backend = backend, EncoderName = encoder,
+            DeviceId = "LUID-selected", Direct3DAdapterIndex = 2, TrialCompleted = true, Available = true };
+        var caps = TestSupport.EmptyCapabilities() with { Candidates = new[] { cap with { DeviceId = "other", Direct3DAdapterIndex = 0 }, cap } };
+        var result = await new FfmpegPlanner(TestSupport.Core).BuildAsync(request, source, caps, default);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var paths = result.Value!.CandidatePaths;
+        Assert.Equal(2, paths.Count);
+        Assert.Equal(expected, paths[0].Backend);
+        Assert.Equal("LUID-selected", paths[0].DeviceId);
+        Assert.Contains("d3d11va=tfbase:2", paths[0].Arguments);
+        Assert.DoesNotContain("LUID-selected", paths[0].Arguments);
+        Assert.Contains(paths[0].Arguments, a => a.Contains("hwupload"));
+        if (backend == "intel") Assert.Contains("qsv=tfencode@tfbase", paths[0].Arguments);
+        Assert.Equal(HardwareBackend.Cpu, paths[1].Backend);
+        Assert.DoesNotContain("-init_hw_device", paths[1].Arguments);
+        var untested = caps with { Candidates = new[] { cap with { TrialCompleted = false } } };
+        var safe = await new FfmpegPlanner(TestSupport.Core).BuildAsync(request, source, untested, default);
+        Assert.Equal(HardwareBackend.Cpu, Assert.Single(safe.Value!.CandidatePaths).Backend);
+    }
+
     private static async Task<SourceSnapshot> ProbeSampleAsync(string name = "planner-sample.mp4")
     {
         var path = await TestSupport.GenerateVideoAsync(name);

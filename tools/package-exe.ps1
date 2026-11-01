@@ -55,10 +55,15 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'src/TransFlux.App/Assets') -Destina
 $ffBin = Join-Path $repoRoot 'tools/ffmpeg/bin'
 $payloadFf = Join-Path $payload 'ffmpeg'
 $null = New-Item -ItemType Directory -Path $payloadFf -Force
-Copy-Item -Path (Join-Path $ffBin '*') -Destination $payloadFf -Recurse -Force
 $mf = Get-Content (Join-Path $repoRoot 'tools/ffmpeg/core-manifest.json') -Raw | ConvertFrom-Json
+foreach ($entry in @($mf.ffmpeg, $mf.ffprobe) + @($mf.runtimeFiles)) {
+    $source = Join-Path (Join-Path $repoRoot 'tools/ffmpeg') $entry.relativePath
+    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $entry.sha256) { throw "Core hash mismatch: $source" }
+    Copy-Item -LiteralPath $source -Destination $payloadFf -Force
+}
 $mf.ffmpeg.relativePath = 'ffmpeg.exe'
 $mf.ffprobe.relativePath = 'ffprobe.exe'
+foreach ($entry in $mf.runtimeFiles) { $entry.relativePath = Split-Path $entry.relativePath -Leaf }
 $mf.reproducibilityNote = 'Installed layout: ffmpeg.exe/ffprobe.exe and av*.dll sit beside this manifest under <install>\ffmpeg.'
 $mf | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $payloadFf 'core-manifest.json') -Encoding utf8
 # Licenses / notices / provenance.
@@ -71,7 +76,7 @@ $revision = & git -C $repoRoot rev-parse HEAD
 TransFlux source: local repository
 Build base revision: $revision
 Application license: MIT; see LICENSE.txt.
-Bundled media core: FFmpeg/ffprobe (GPLv3, BtbN win64-gpl-shared); see THIRD-PARTY-NOTICES/FFmpeg-LICENSE.txt and ffmpeg/core-manifest.json.
+Bundled media core: $($mf.distribution); see THIRD-PARTY-NOTICES/FFmpeg-LICENSE.txt and ffmpeg/core-manifest.json.
 "@ | Set-Content -LiteralPath (Join-Path $payload 'SOURCE.txt') -Encoding utf8
 foreach ($required in @('TransFlux.exe', 'TransFlux.dll', 'TransFlux.pri', 'Reactor.pri', 'coreclr.dll', 'Assets/AppIcon.ico', 'ffmpeg/ffmpeg.exe', 'ffmpeg/core-manifest.json')) {
     if (!(Test-Path -LiteralPath (Join-Path $payload $required))) { throw "Publish output is missing $required" }

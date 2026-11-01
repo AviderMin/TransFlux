@@ -47,7 +47,7 @@ public static class Ui
 
     public static Element KeyValue(string key, string value, double keyWidth = 84)
         => Grid(columns: [GridSize.Px(keyWidth), GridSize.Star()], rows: [GridSize.Auto],
-            TextBlock(key).Foreground(Theme.SecondaryText).VerticalAlignment(VerticalAlignment.Top).Grid(column: 0),
+            TextBlock(key).Foreground(Theme.SecondaryText).TextWrapping(TextWrapping.Wrap).VerticalAlignment(VerticalAlignment.Top).Grid(column: 0),
             TextBlock(value).TextWrapping(TextWrapping.Wrap).Grid(column: 1));
 
     public static Element PageHeader(string title, string subtitle, Element? actions = null)

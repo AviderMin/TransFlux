@@ -9,6 +9,7 @@ public sealed class CapabilityServiceTests
     private sealed class FakeEngine : IEngineCapabilities
     {
         public List<string> ValidateCalls { get; } = new();
+        public List<HardwareValidationRequest> Requests { get; } = new();
         public bool FailNvenc { get; set; }
 
         public CoreIdentity GetIdentity() => new() { CoreHash = "core-test", FfmpegVersion = "test" };
@@ -22,6 +23,7 @@ public sealed class CapabilityServiceTests
         public Task<HardwareValidationResult> ValidateEncoderAsync(HardwareValidationRequest request, CancellationToken ct)
         {
             ValidateCalls.Add(request.EncoderName);
+            Requests.Add(request);
             if (request.EncoderName == "h264_nvenc" && FailNvenc)
                 return Task.FromResult(new HardwareValidationResult
                 {
@@ -38,7 +40,41 @@ public sealed class CapabilityServiceTests
         var store = new SqliteJobStore(Path.Combine(dir.Path, "state.db"));
         await store.InitializeAsync(default);
         var engine = new FakeEngine();
-        return (store, new CapabilityService(engine, store, new SystemClock()), engine);
+        return (store, new CapabilityService(engine, store, new SystemClock(), () => new[]
+        {
+            new AdapterInfo { AdapterId = "LUID-one", Name = "NVIDIA one", VendorId = 0x10DE, DxgiIndex = 0 },
+            new AdapterInfo { AdapterId = "LUID-two", Name = "NVIDIA two", VendorId = 0x10DE, DxgiIndex = 2 },
+            new AdapterInfo { AdapterId = "software", Name = "Software", VendorId = 0x1002, DxgiIndex = 3, IsSoftware = true },
+        }), engine);
+    }
+
+    [Fact]
+    public async Task CheapQuery_DoesNotPreventLaterTrial_AndBindsEveryPhysicalAdapter()
+    {
+        using var dir = new TempDir();
+        var (store, svc, engine) = await CreateAsync(dir);
+        await using var guard = store;
+        var cheap = await svc.GetAsync(new CapabilityQuery { IncludeTrialRun = false }, default);
+        Assert.Empty(engine.Requests);
+        Assert.False(cheap.HasAvailableGpuEncoder);
+        var tested = await svc.GetAsync(new CapabilityQuery { IncludeTrialRun = true }, default);
+        Assert.True(tested.HasAvailableGpuEncoder);
+        Assert.Equal(new int?[] { 0, 2 }, engine.Requests.Where(r => r.EncoderName == "h264_nvenc").Select(r => r.Direct3DAdapterIndex));
+        Assert.DoesNotContain(engine.Requests, r => r.EncoderName == "h264_amf");
+        Assert.Equal(2, tested.Candidates.Count(c => c.Backend == "nvidia" && c.TrialCompleted && c.Available));
+    }
+
+    [Fact]
+    public async Task TargetedQuery_DoesNotPoisonFullSnapshot()
+    {
+        using var dir = new TempDir();
+        var (store, svc, engine) = await CreateAsync(dir);
+        await using var guard = store;
+        var targeted = await svc.GetAsync(new CapabilityQuery { IncludeTrialRun = true, TargetEncoders = new[] { "h264_qsv" } }, default);
+        Assert.DoesNotContain(targeted.Candidates, c => c.Backend == "nvidia");
+        var full = await svc.GetAsync(new CapabilityQuery { IncludeTrialRun = true }, default);
+        Assert.NotEqual(targeted.CapabilityHash, full.CapabilityHash);
+        Assert.Contains(full.Candidates, c => c.Backend == "nvidia" && c.Available);
     }
 
     [Fact]

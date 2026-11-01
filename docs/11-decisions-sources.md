@@ -1,5 +1,9 @@
 # 11 · 决策记录、资料与风险
 
+## ADR · 1.0.0.5 硬件兼容基线
+
+采纳：固定 Gyan FFmpeg 8.0.1 full_build-shared（GPLv3），替代需要 NVENC API 13.1 / 驱动 610.00 的 nightly。本机 RTX 4060 / 591.86 已通过真实 NVENC 调度、输出验证和解码；不自动升级用户驱动。归档、exe、DLL 全部固定哈希，升级必须重跑格式及硬件回归。GPL 分发路线不变。使用 DXGI ordinal 创建 D3D11 设备，LUID 仅为身份；H.264 Auto 选择已验证 GPU，再有限回退 CPU。来源、失败对照及 Intel/AMD 实机限制见 [证据](evidence/HARDWARE-COMPATIBILITY.md)。
+
 ## ADR · 2026-11-01 输出目标解耦
 
 按用户要求拆为媒体形式、容器、编码；取消界面固定组合及执行层固定 H.264/AAC 的限制。

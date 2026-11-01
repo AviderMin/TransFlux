@@ -1,5 +1,11 @@
 # 07 · 数据、接口与状态契约
 
+## 1.0.0.5 硬件契约增量
+
+AdapterInfo 增加 DxgiIndex（DXGI ordinal），CandidateCapability 增加 Direct3DAdapterIndex、TrialCompleted、DiagnosticDetail。HardwareValidationRequest 用可空整数 Direct3DAdapterIndex 代替自由文本 DeviceArgument；LUID 仅为身份，禁止作为裸 FFmpeg 参数。未试跑/无设备绑定的 GPU 候选不得用于计划。
+
+能力缓存 schema 3 包含 DXGI ordinal 和目标编码器集合；未试跑快照不持久化，成功 TTL 7 天，实际设备失败 TTL 10 分钟。manifest schema 2 增加 runtimeFiles，coreHash 含 DLL 哈希，文件长度/修改时间变化会触发重新校验。见 [兼容性证据](evidence/HARDWARE-COMPATIBILITY.md)。
+
 ## 2026-11-01 工作台契约增量
 
 - 输出分层扩展：ConversionRequest / PresetRequestTemplate 新增 VideoCodec（默认 H264）；ConversionMode 继续区分转码、音频输出和转封装。

@@ -32,7 +32,8 @@ public static class DxgiAdapterEnumerator
 
                     try
                     {
-                        adapter.GetDesc1(out var desc);
+                        hr = adapter.GetDesc1(out var desc);
+                        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
                         var luid = ((long)desc.AdapterLuid.HighPart << 32) | (uint)desc.AdapterLuid.LowPart;
                         var maxDedicated = unchecked((nuint)long.MaxValue);
                         result.Add(new AdapterInfo
@@ -48,6 +49,7 @@ public static class DxgiAdapterEnumerator
                                 : (long)desc.DedicatedVideoMemory,
                             IsSoftware = (desc.Flags & DxgiAdapterFlagSoftware) != 0,
                             Luid = luid,
+                            DxgiIndex = checked((int)index),
                         });
                     }
                     finally

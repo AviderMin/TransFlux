@@ -1,29 +1,59 @@
 {
-  "schemaVersion": 1,
-  "recordedUtc": "2026-11-01T00:30:00+08:00",
-  "distribution": "BtbN FFmpeg-Builds (win64-gpl-shared, shared libraries)",
-  "sourceUrl": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
-  "reproducibilityNote": "Rolling latest master shared GPL build pinned by SHA-256; ships ffmpeg/ffprobe + av*.dll (ffplay excluded). For release, pin a fixed tag and re-verify.",
-  "license": "GPLv3 (--enable-gpl --enable-version3), includes libx264/libx265. Distribution obligations apply; see docs/08.",
+  "schemaVersion": 2,
+  "recordedUtc": "2026-11-01T03:54:55.9717005+00:00",
+  "distribution": "Gyan FFmpeg 8.0.1 full_build-shared (GPLv3)",
+  "sourceUrl": "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build-shared.7z",
+  "archiveSha256": "8030DC469FBDE247B84CFC21A5C421F3965FFE779BC35DE08D78966E0C4A272C",
+  "archiveRoot": "ffmpeg-8.0.1-full_build-shared",
+  "sourceCodeUrl": "https://github.com/FFmpeg/FFmpeg/tree/n8.0.1",
+  "reproducibilityNote": "Fixed compatibility baseline: NVENC trial succeeds with NVIDIA 591.86 (NVENC API 13.0). Binaries and all shipped runtime DLLs are SHA-256 pinned; ffplay excluded.",
+  "license": "GPLv3 (--enable-gpl --enable-version3). FFmpeg remains a separate process; distribution obligations apply.",
   "ffmpeg": {
-    "version": "N-128227-g4811625b5f-20261031",
+    "version": "8.0.1-full_build-www.gyan.dev",
     "relativePath": "bin/ffmpeg.exe",
-    "sha256": "CA8204F0E87F90B7CDFE0F7217854733F7B0235F0D76671F82753852A4DEC9F7",
-    "sizeBytes": 573952
+    "sha256": "ED8C1EE14133F0E403116D789558411730A64FFAE800249237AA612982D43E94",
+    "sizeBytes": 612352
   },
   "ffprobe": {
     "relativePath": "bin/ffprobe.exe",
-    "sha256": "35BBE6CABFB598AFF8171EAC0BEADFF960441D4EDEFB765C6D07CD19EE7277B1",
-    "sizeBytes": 276480
+    "sha256": "1C16A2994B9579B4F40A5DB9770BA98FDB76F0532438AEAE5C23CCEE5D3FB185",
+    "sizeBytes": 226816
   },
-  "verifiedCapabilities": {
-    "gpl": true,
-    "libx264": true,
-    "libx265": true,
-    "h264_nvenc": true,
-    "h264_qsv": true,
-    "h264_amf": true,
-    "aac": true,
-    "flac": true
-  }
+  "runtimeFiles": [
+    {
+      "relativePath": "bin/avcodec-62.dll",
+      "sha256": "24DCF6D8BDF11A8D263B12823192C55C2BDAAE9ADCC7FDB40A21B88DEAC49C98",
+      "sizeBytes": 105488384
+    },
+    {
+      "relativePath": "bin/avdevice-62.dll",
+      "sha256": "564AA071EA017141CAF7F9F04A0D7578AE89B42EC2E1179DD996097B1C969AF1",
+      "sizeBytes": 6109184
+    },
+    {
+      "relativePath": "bin/avfilter-11.dll",
+      "sha256": "26ABA06403E274A23FD9EB245753ECD68D73226B099CA50A488056AAD3C55D08",
+      "sizeBytes": 94231040
+    },
+    {
+      "relativePath": "bin/avformat-62.dll",
+      "sha256": "493CF1B43FB624A75047895A42B1D83B249B8B655F79A43F5D5F2B2626817BF3",
+      "sizeBytes": 19859968
+    },
+    {
+      "relativePath": "bin/avutil-60.dll",
+      "sha256": "F5DFDE90B62F445BA1831A5F18FB76C607159428D28FE3FB6EA2471A2AD0847D",
+      "sizeBytes": 3073024
+    },
+    {
+      "relativePath": "bin/swresample-6.dll",
+      "sha256": "2E1E1022A07908C6CBF4EF7A60C990BAA0A6002643CE8434E58C0C7642E07DB1",
+      "sizeBytes": 492544
+    },
+    {
+      "relativePath": "bin/swscale-9.dll",
+      "sha256": "AB5F467C79E4B8A2A27459283950D4FE7C347266B9F3CF5F6F959B42506935CA",
+      "sizeBytes": 1920000
+    }
+  ]
 }

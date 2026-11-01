@@ -6,6 +6,24 @@ namespace TransFlux.Engine.IntegrationTests;
 public class CoreLocatorTests
 {
     [Fact]
+    public void RuntimeDllTampering_InvalidatesPriorSuccessfulVerification()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tf-core-runtime-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        foreach (var name in new[] { "ffmpeg.exe", "ffprobe.exe", "avcodec.dll" }) File.WriteAllText(Path.Combine(dir, name), name);
+        object Entry(string name) => new { relativePath = name, sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(Path.Combine(dir, name)))) };
+        File.WriteAllText(Path.Combine(dir, "core-manifest.json"), JsonSerializer.Serialize(new
+        {
+            schemaVersion = 2, ffmpeg = Entry("ffmpeg.exe"), ffprobe = Entry("ffprobe.exe"), runtimeFiles = new[] { Entry("avcodec.dll") },
+        }));
+        var valid = FfmpegCoreLocator.Locate(dir);
+        Assert.Equal(64, valid.CoreHash.Length);
+        File.AppendAllText(Path.Combine(dir, "avcodec.dll"), "tampered");
+        var failure = Assert.Throws<CoreIntegrityException>(() => FfmpegCoreLocator.Locate(dir));
+        Assert.EndsWith("avcodec.dll", failure.FilePath);
+    }
+
+    [Fact]
     public void Locate_FindsPinnedCoreWithHashAndVersion()
     {
         var core = FfmpegCoreLocator.Locate();
@@ -13,7 +31,7 @@ public class CoreLocatorTests
         Assert.True(File.Exists(core.FfprobePath), core.FfprobePath);
         Assert.False(string.IsNullOrWhiteSpace(core.CoreHash));
         Assert.Equal(64, core.CoreHash.Length);
-        Assert.Matches(@"^N-\d+-g[0-9a-f]+-\d{8}$", core.Version);
+        Assert.Equal("8.0.1-full_build-www.gyan.dev", core.Version);
     }
 
     [Fact]
