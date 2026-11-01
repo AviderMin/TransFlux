@@ -12,6 +12,8 @@ public static class Space
 
     public const double PagePadding = 24;
     public const double CompactPadding = 16;
+    // Symmetric content gutters keep scrollable rows centered (DIP).
+    public const double ScrollBarGutter = 12;
     public const double WindowMinWidth = 920;
     public const double WindowMinHeight = 640;
 }

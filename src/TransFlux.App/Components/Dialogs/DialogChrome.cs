@@ -36,7 +36,7 @@ public static class DialogChrome
         bool primaryEnabled = true,
         Func<Task<bool>>? beforeSecondaryClose = null)
     {
-        var scroll = ScrollViewer(Border(body).Padding(0, 0, Space.Lg, Space.Xl))
+        var scroll = ScrollViewer(Border(body).Padding(Space.ScrollBarGutter, 0, Space.ScrollBarGutter, Space.Xl))
             .Width(contentWidth)
             .MaxHeight(maxHeight)
             .HorizontalScrollMode(ScrollMode.Disabled)

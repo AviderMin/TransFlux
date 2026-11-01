@@ -323,7 +323,7 @@ public sealed class AppRoot : Component<AppServices>
                                 Run(() => { LauncherInterop.RevealInExplorer(path); return Task.CompletedTask; });
                         },
                         () => { if (item.Execution?.Output?.FinalPath is { } path) Run(() => { LauncherInterop.CopyText(path); return Task.CompletedTask; }); },
-                        () => setDetailsId(id)));
+                        () => setDetailsId(id))).Margin(Space.ScrollBarGutter, 0, Space.ScrollBarGutter, 0);
             }) with { Spacing = Space.Md }).LayoutAnimation();
 
         var canImport = snapshot.Loaded && settingsLoaded && !exiting;

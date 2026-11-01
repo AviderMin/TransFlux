@@ -1,6 +1,6 @@
 # TransFlux
 
-**1.0.0.7**：包含 1.0.0.5 硬件兼容基线、工作台 UX 重构及审查修复；[实测与开发记录](docs/evidence/HARDWARE-COMPATIBILITY.md)。
+**1.0.0.8**：包含 1.0.0.5 硬件兼容基线、工作台 UX 重构及审查修复；[实测与开发记录](docs/evidence/HARDWARE-COMPATIBILITY.md)。
 
 以 **WinUI 3 + Microsoft.UI.Reactor** 为界面核心的本地媒体转换软件。
 
@@ -9,6 +9,8 @@
 当前状态：已实现原生工作台、FFmpeg 转换管线、队列及持久化。2026-11-01 工作台改为文件优先、右侧所选参数、完整任务卡片生命周期，详见 [UX 规范](docs/03-ui-ux.md) 与 [重构验证记录](docs/evidence/UX-workbench-redesign.md)。
 
 ## 开始阅读
+
+- **下一阶段开发交接**：[全项目审查](docs/13-project-review.md)、[Dolby / HDR / 字幕烧录目标与路线](docs/14-advanced-media-roadmap.md)、[编码 AI 任务单](docs/15-advanced-media-handoff.md)。当前为规划；先修复可靠性和媒体语义，再实现高级功能。
 
 - [开发文档总入口](docs/README.md)：阅读顺序、约束与文档地图。
 - [项目定调与范围](docs/01-product-direction.md)：产品原则、版本边界、关键决策。

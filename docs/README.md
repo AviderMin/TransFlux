@@ -1,5 +1,9 @@
 # TransFlux 开发文档
 
+## 下一阶段编码入口 · 2026-11-01
+
+按顺序阅读 [13 全项目审查](13-project-review.md) → [14 Dolby/HDR/字幕烧录目标与路线](14-advanced-media-roadmap.md) → [15 编码 AI 任务单](15-advanced-media-handoff.md)。先修复恢复/选流/验证边界，再逐阶段开放高级功能；本组文档是方案，不代表新功能已实现。用户确认同时规划 Dolby 音频和 Dolby Vision。
+
 最新硬件修复：**1.0.0.5**，见 [硬件兼容性修复与实测](evidence/HARDWARE-COMPATIBILITY.md)（设备参数、驱动 API/核心基线、缓存、GPU → CPU 回退）。
 
 版本：1.1 · 日期：2026-11-01 · 状态：已实现纵向切片，正在按实测迭代。

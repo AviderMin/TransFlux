@@ -5,14 +5,14 @@ Output targets now separate media form, container and codec; see [output format 
 See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
 Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
 
-Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.7 built and verified, signed MSIX pending. This is a real build, not a design document.
+Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.8 built and verified, signed MSIX pending. This is a real build, not a design document.
 
 ## What works (executed)
 
 | Area | Status | Evidence |
 |---|---|---|
 | Solution builds (Domain, Application, Engine.FFmpeg, Hardware.Windows, Infrastructure, App, 4 test projects) | ✅ 0 warnings / 0 errors | `dotnet build TransFlux.slnx -c Debug` |
-| Unit + integration tests | ✅ **282 passed / 0 failed** | Domain 83, Application 64, Infrastructure 32, Engine 103 (build 0 warnings / 0 errors) |
+| Unit + integration tests | ✅ **366 passed / 0 failed** | Domain 120, Application 96, Infrastructure 32, Engine 118 (build 0 warnings / 0 errors) |
 | Real Reactor native window renders | ✅ | `docs/evidence/M4-ui-runtime.md`, `ui-tree.txt`, `screenshots/convert.png` |
 | Real end-to-end conversion (probe→plan→encode→verify→commit) | ✅ PASS, source unchanged | `docs/evidence/M1-E2E-runtime.md` |
 | Pinned GPL FFmpeg core (libx264/NVENC/QSV/AMF/AAC/FLAC) | ✅ hash-pinned | `tools/ffmpeg/core-manifest.json` |
@@ -67,10 +67,10 @@ dotnet run --project tools/TransFlux.E2E/TransFlux.E2E.csproj -c Debug         #
 3. Real NVENC trial + measured performance/quality report on the RTX 4060 Laptop GPU; keep GPU backends explicitly unverified until signed off.
 4. Fix any P0 gaps found in a human walkthrough; record docs/06 performance budgets against a controlled benchmark.
 
-Completed 2026-11-01: Inno Setup **1.0.0.7** built from the current review-remediation workspace; install/launch/installed-core E2E/uninstall verified — see [INSTALLER.md](INSTALLER.md).
+Completed 2026-11-01: Inno Setup **1.0.0.8** built from the current review-remediation workspace; install/launch/installed-core E2E/uninstall verified — see [INSTALLER.md](INSTALLER.md).
 
 ## Review remediation · 2026-11-01
 
 The follow-up review fixes are implemented: NeedsAttention manual-review boundary, queue reordering, manual-GPU fallback policy, remux stream selection, post-verification source recheck, dispatch-loop recovery, attempt/job recovery consistency, content-identity commit reconciliation, disk precheck and reservation cleanup, unknown-duration progress, settings-load gating, restored-card state, cancelable batched folder import, virtualized task list, multi-track selection, parameter reset, copy-path, redacted diagnostic export, and a grouped codec catalog with hardware-encoder badges.
 
-Verification: Debug build **0 warnings / 0 errors**, **282 tests passed**, and real E2E **PASS** with unchanged source. Accessibility (Narrator/DPI/high-contrast), signed MSIX, and Intel/AMD hardware validation remain release acceptance items, not claims made by this record.
+Verification: Debug build **0 warnings / 0 errors**, **366 tests passed**, and real E2E **PASS** with unchanged source. Accessibility (Narrator/DPI/high-contrast), signed MSIX, and Intel/AMD hardware validation remain release acceptance items, not claims made by this record.

@@ -69,10 +69,9 @@ public sealed class CodecCatalogSection : Component<CodecCatalogSectionProps>
     {
         var body = open
             ? codecs.Length == 0 ? Ui.DimCaption("核心未报告此类编解码器。")
-                : ScrollViewer(LazyVStack(codecs, codec => codec.Name,
-                    (codec, _) => CodecRow(codec, availableHardware)) with { Spacing = Space.Sm })
-                    .Height(320).HorizontalScrollMode(ScrollMode.Disabled).VerticalScrollMode(ScrollMode.Auto)
-                    .Set(s => { s.HorizontalContentAlignment = HorizontalAlignment.Stretch; s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled; })
+                : (LazyVStack(codecs, codec => codec.Name,
+                    (codec, _) => CodecRow(codec, availableHardware).Margin(Space.ScrollBarGutter, 0, Space.ScrollBarGutter, 0))
+                    with { Spacing = Space.Sm }).Height(320)
             : Empty();
         return Expander($"{label} · {codecs.Length}", body, isExpanded: open, onIsExpandedChanged: setOpen)
             .AutomationName($"{label}编解码器，共 {codecs.Length} 项")

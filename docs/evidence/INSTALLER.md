@@ -5,11 +5,11 @@ Date: 2026-11-01. 当前构建：**1.0.0.8**；下方保留历史构建记录。
 ## 当前构建 · 1.0.0.8（2026-11-01）
 
 - File: `artifacts/installer/x64/TransFlux-Setup-1.0.0.8-x64.exe`
-- Size: **128,533,808 bytes / 122.58 MiB**；安装包及 payload 的 exe/dll FileVersion 均为 **1.0.0.8**。
-- SHA-256: `74DF601FDCD976C6B7C6E01FE4D77FD3EAFFA6069A7463183F241D6D639BE576`（同目录 `.sha256`）。
-- 使用 `pwsh -File tools/package-exe.ps1 -Version 1.0.0.8` 完成 x64 Release 自包含发布及 Inno Setup 编译，无警告或错误。构建日志：`artifacts/installer/x64/build-1.0.0.8.log`。
-- 包含当前代码与最新主界面 3:2 比例、诊断编解码器三列布局，见 [布局审查](UI-layout-balance.md)。布局修改后全量 366 项测试已通过；本次版本递增未重复功能测试。
-- 本次仅构建并检查版本/哈希，未执行安装/卸载，不覆盖用户现有安装。
+- Size: **128,537,789 bytes / 122.58 MiB**；安装包及 payload 的 exe/dll FileVersion 均为 **1.0.0.8**。
+- SHA-256: `B7434E3E8974B26845850E797542ED466CDFA1722A0E85EBA912F6F42F1FF63E`（同目录 `.sha256`）。
+- 使用 `pwsh -File tools/package-exe.ps1 -Version 1.0.0.8` 完成 x64 Release 自包含发布及 Inno Setup 编译，无警告或错误。
+- 包含当前代码与最新主界面 3:2 比例、诊断编解码器折叠式分组布局，见 [布局审查](UI-layout-balance.md)。全量 **366 项测试通过**。
+- 实测（开发机）：静默安装到 `D:\tmp\TransFluxVerify-108` **exit 0** → `TransFlux.exe` FileVersion **1.0.0.8**、ProductVersion `1.0.0.8+d2747fcb91ab47149fce7a5bc9ba5f414f192f3a` → 使用安装目录 `ffmpeg\ffmpeg.exe` 运行真实 E2E **PASS**（2.69 s，源文件不变，CPU 路径）→ 静默卸载 **exit 0**，安装目录与 exe 清理干净。
 
 ## 历史构建 · 1.0.0.7（2026-11-01）
 

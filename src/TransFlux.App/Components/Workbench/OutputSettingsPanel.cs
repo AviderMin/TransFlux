@@ -268,7 +268,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             catch (Exception ex) { setNotice(Notices.SaveFailed(ex.Message)); }
         }
         if (notice is { } shown) body.Add(Ui.NoticeBar(shown, () => setNotice(null)));
-        var fields = VStack(Space.Md, body.ToArray());
+        var fields = VStack(Space.Md, body.ToArray()).Margin(Space.ScrollBarGutter, 0, Space.ScrollBarGutter, 0);
         var scroll = ScrollViewer(fields).HorizontalScrollMode(ScrollMode.Disabled).VerticalScrollMode(ScrollMode.Auto)
             .Set(s => { s.HorizontalContentAlignment = HorizontalAlignment.Stretch; s.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled; });
         return Ui.Card(Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Star(), GridSize.Auto],
