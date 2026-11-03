@@ -92,14 +92,22 @@ internal static class TestData
         ContainerFormat container = ContainerFormat.Mp4,
         AudioCodec audioCodec = AudioCodec.Aac,
         TrimRange? trim = null,
-        IReadOnlyList<int>? selected = null)
+        IReadOnlyList<int>? selected = null,
+        int requestVersion = 1,
+        VideoSelection? video = null,
+        AudioSelection? audioTracks = null,
+        SubtitleSelection? subtitles = null)
         => new()
         {
+            RequestVersion = requestVersion,
             SourceSnapshotId = Guid.NewGuid(),
             Mode = mode,
             Container = container,
             Audio = new AudioSpec { Codec = audioCodec },
             Trim = trim,
             SelectedStreamIndices = selected ?? Array.Empty<int>(),
+            VideoSelect = video ?? VideoSelection.Auto,
+            AudioTracks = audioTracks ?? AudioSelection.Auto,
+            Subtitles = subtitles ?? SubtitleSelection.AutoPreserve,
         };
 }

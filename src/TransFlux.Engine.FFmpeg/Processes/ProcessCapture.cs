@@ -9,11 +9,15 @@ public sealed record CaptureResult(
     string Stderr,
     bool StdoutTruncated,
     bool StderrTruncated,
-    bool TimedOut);
+    bool TimedOut,
+    bool Canceled = false);
 
 /// <summary>Helpers to run a managed child process to completion with bounded output capture.</summary>
 public static class ProcessCapture
 {
+    /// <summary>Upper bound for draining output after the process tree is gone.</summary>
+    private static readonly TimeSpan OutputDrainTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Runs a process to completion, capturing stdout/stderr up to byte/char caps.</summary>
     public static async Task<CaptureResult> RunAsync(
         string executable,
@@ -23,24 +27,45 @@ public static class ProcessCapture
         int maxStderrChars,
         CancellationToken ct)
     {
+        // Cancellation before launch is a normal "canceled" outcome, not an exception or a failure.
+        if (ct.IsCancellationRequested)
+            return new CaptureResult(-1, string.Empty, string.Empty, false, false, TimedOut: false, Canceled: true);
+
         using var managed = ManagedProcess.Start(executable, arguments);
         var proc = managed.Process;
 
-        var stdoutTask = ReadBoundedAsync(proc.StandardOutput, maxStdoutChars, ct);
-        var stderrTask = ReadBoundedAsync(proc.StandardError, maxStderrChars, ct);
+        // Drain independently of the caller token: after a cancel/timeout we still want the output
+        // produced up to the moment the process tree was torn down. The streams end when the tree is
+        // gone; a bounded drain below guarantees a stray inherited pipe handle can never hang the call.
+        using var readCts = new CancellationTokenSource();
+        var stdoutTask = ReadBoundedAsync(proc.StandardOutput, maxStdoutChars, readCts.Token);
+        var stderrTask = ReadBoundedAsync(proc.StandardError, maxStderrChars, readCts.Token);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         linked.CancelAfter(timeout);
         var timedOut = false;
+        var canceled = false;
         try
         {
             await proc.WaitForExitAsync(linked.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            timedOut = !ct.IsCancellationRequested;
+            // Caller cancellation and timeout are distinct outcomes: only the latter is a failure.
+            canceled = ct.IsCancellationRequested;
+            timedOut = !canceled;
             managed.KillTree();
             try { await proc.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+        }
+
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(OutputDrainTimeout).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Timeout or a broken pipe: abandon the reader and keep the text captured so far.
+            readCts.Cancel();
         }
 
         var stdout = await AwaitSafe(stdoutTask).ConfigureAwait(false);
@@ -49,7 +74,15 @@ public static class ProcessCapture
         int exit;
         try { exit = proc.HasExited ? proc.ExitCode : -1; } catch { exit = -1; }
 
-        return new CaptureResult(exit, stdout.Text, stderr.Text, stdout.Truncated, stderr.Truncated, timedOut);
+        // A cancellation that lands while the process is already exiting still counts as canceled:
+        // callers must never publish a result whose owning job was canceled.
+        if (ct.IsCancellationRequested)
+        {
+            canceled = true;
+            timedOut = false;
+        }
+
+        return new CaptureResult(exit, stdout.Text, stderr.Text, stdout.Truncated, stderr.Truncated, timedOut, canceled);
     }
 
     private readonly record struct BoundedText(string Text, bool Truncated);

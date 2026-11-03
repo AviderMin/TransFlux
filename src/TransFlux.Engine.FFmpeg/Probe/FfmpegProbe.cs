@@ -63,6 +63,8 @@ public sealed class FfmpegProbe : IMediaProbe
             return Result<SourceSnapshot>.Operational(FailureInfo.Of(FailureCode.ProbeFailed, "probe.start_failed", ex.Message));
         }
 
+        if (capture.Canceled)
+            return Result<SourceSnapshot>.Canceled();
         if (capture.TimedOut)
             return Result<SourceSnapshot>.Operational(FailureInfo.Of(
                 FailureCode.ProbeFailed, "probe.timeout", $"ffprobe timed out after {timeout.TotalSeconds:0}s."));

@@ -13,3 +13,13 @@ public interface ICommitReconciler
 {
     Task<CommitResult> ReconcileAsync(CommitJournalEntry entry, CancellationToken ct);
 }
+
+/// <summary>
+/// Optional capability for verifying that a previously recorded output is still the committed
+/// file (existence, size, and journal content hash when one is available). Used for jobs left in
+/// Committing whose journal was already closed; a database record alone is never proof.
+/// </summary>
+public interface IOutputRecordVerifier
+{
+    Task<CommitResult> VerifyOutputAsync(OutputRecord output, CancellationToken ct);
+}

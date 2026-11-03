@@ -1,5 +1,7 @@
 using TransFlux.Application.Contracts;
+using TransFlux.Application.Services;
 using TransFlux.Domain.Jobs;
+using TransFlux.Domain.Presets;
 
 namespace TransFlux.Infrastructure.Tests;
 
@@ -189,5 +191,108 @@ public sealed class OutputCommitterTests
         Assert.False(result.Success);
         Assert.Equal(FailureCode.VerifyFailed, result.Failure!.Code);
         Assert.Single(await store.GetOpenJournalsAsync(default)); // left open for NeedsAttention
+    }
+
+    [Fact]
+    public async Task Commit_OutputRecordWriteFailsAfterRename_LeavesPublishedJournalAndFinalFile()
+    {
+        using var dir = new TempDir();
+        var fs = new WindowsFileSystemService();
+        var clock = new SystemClock();
+        var inner = new SqliteJobStore(Path.Combine(dir.Path, "state.db"));
+        await inner.InitializeAsync(default);
+        await using var store = inner;
+        var job = TestData.NewJob(state: JobState.Committing);
+        await store.CreateJobAsync(job, default);
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Committing };
+        await store.CreateAttemptAsync(attempt, default);
+
+        var failingStore = new FailingSaveOutputStore(inner) { SaveOutputFailuresRemaining = 1 };
+        var committer = new OutputCommitter(failingStore, fs, clock);
+        var temp = dir.NewFile("a.tmp", "0123456789");
+        var final = Path.Combine(dir.Path, "out.mp4");
+
+        await Assert.ThrowsAsync<IOException>(() => committer.CommitAsync(new CommitRequest
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            TempPath = temp,
+            FinalPath = final,
+            ExpectedSize = 10,
+        }, default));
+
+        // The rename succeeded before the database write failed: the only output must survive.
+        Assert.True(File.Exists(final));
+        Assert.False(File.Exists(temp));
+        var journal = Assert.Single(await store.GetOpenJournalsAsync(default));
+        Assert.Equal(CommitPhase.Published, journal.Phase);
+        Assert.Empty(await store.GetOutputsForJobAsync(job.JobId, default));
+
+        // A later startup can verify the file identity and finish the record.
+        await RecoveryService.RunAsync(store, new OutputCommitter(store, fs, clock), default);
+        var output = Assert.Single(await store.GetOutputsForJobAsync(job.JobId, default));
+        Assert.Equal(final, output.FinalPath);
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
+    }
+
+    /// <summary>Delegating store that fails the OutputRecord write once; used to inject the
+    /// "rename succeeded but database write failed" crash window deterministically.</summary>
+    private sealed class FailingSaveOutputStore : IJobStore, ICommitJournalContentStore
+    {
+        private readonly SqliteJobStore _inner;
+
+        public FailingSaveOutputStore(SqliteJobStore inner) => _inner = inner;
+
+        public int SaveOutputFailuresRemaining { get; set; }
+
+        public Task InitializeAsync(CancellationToken ct) => _inner.InitializeAsync(ct);
+        public Task<long> NextEnqueueOrderAsync(CancellationToken ct) => _inner.NextEnqueueOrderAsync(ct);
+        public Task<bool> ReorderQueuedAsync(Guid jobId, Guid targetJobId, bool placeBefore, CancellationToken ct)
+            => _inner.ReorderQueuedAsync(jobId, targetJobId, placeBefore, ct);
+        public Task CreateJobAsync(Job job, CancellationToken ct) => _inner.CreateJobAsync(job, ct);
+        public Task UpdateJobAsync(Job job, long expectedRevision, CancellationToken ct)
+            => _inner.UpdateJobAsync(job, expectedRevision, ct);
+        public Task<Job?> GetJobAsync(Guid id, CancellationToken ct) => _inner.GetJobAsync(id, ct);
+        public Task<IReadOnlyList<Job>> GetJobsAsync(IReadOnlyCollection<JobState>? states, CancellationToken ct)
+            => _inner.GetJobsAsync(states, ct);
+        public Task CreateAttemptAsync(Attempt attempt, CancellationToken ct) => _inner.CreateAttemptAsync(attempt, ct);
+        public Task UpdateAttemptAsync(Attempt attempt, CancellationToken ct) => _inner.UpdateAttemptAsync(attempt, ct);
+        public Task<Attempt?> GetAttemptAsync(Guid id, CancellationToken ct) => _inner.GetAttemptAsync(id, ct);
+        public Task<IReadOnlyList<Attempt>> GetAttemptsForJobAsync(Guid jobId, CancellationToken ct)
+            => _inner.GetAttemptsForJobAsync(jobId, ct);
+
+        public Task SaveOutputAsync(OutputRecord record, CancellationToken ct)
+        {
+            if (SaveOutputFailuresRemaining > 0)
+            {
+                SaveOutputFailuresRemaining--;
+                throw new IOException("Injected output record write failure.");
+            }
+            return _inner.SaveOutputAsync(record, ct);
+        }
+
+        public Task<IReadOnlyList<OutputRecord>> GetOutputsAsync(CancellationToken ct) => _inner.GetOutputsAsync(ct);
+        public Task<IReadOnlyList<OutputRecord>> GetOutputsForJobAsync(Guid jobId, CancellationToken ct)
+            => _inner.GetOutputsForJobAsync(jobId, ct);
+        public Task UpsertJournalAsync(CommitJournalEntry entry, CancellationToken ct) => _inner.UpsertJournalAsync(entry, ct);
+        public Task<CommitJournalEntry?> GetJournalAsync(string token, CancellationToken ct) => _inner.GetJournalAsync(token, ct);
+        public Task<IReadOnlyList<CommitJournalEntry>> GetOpenJournalsAsync(CancellationToken ct) => _inner.GetOpenJournalsAsync(ct);
+        public Task DeleteJournalAsync(string token, CancellationToken ct) => _inner.DeleteJournalAsync(token, ct);
+        public Task<IReadOnlyList<Preset>> GetPresetsAsync(CancellationToken ct) => _inner.GetPresetsAsync(ct);
+        public Task UpsertPresetAsync(Preset preset, CancellationToken ct) => _inner.UpsertPresetAsync(preset, ct);
+        public Task DeletePresetAsync(Guid presetId, CancellationToken ct) => _inner.DeletePresetAsync(presetId, ct);
+        public Task SaveCapabilityAsync(string cacheKey, string payloadJson, DateTimeOffset testedUtc, CancellationToken ct)
+            => _inner.SaveCapabilityAsync(cacheKey, payloadJson, testedUtc, ct);
+        public Task<(string PayloadJson, DateTimeOffset TestedUtc)?> GetCapabilityAsync(string cacheKey, CancellationToken ct)
+            => _inner.GetCapabilityAsync(cacheKey, ct);
+        public Task<IReadOnlyDictionary<string, string>> GetSettingsAsync(CancellationToken ct) => _inner.GetSettingsAsync(ct);
+        public Task SaveSettingAsync(string key, string valueJson, CancellationToken ct) => _inner.SaveSettingAsync(key, valueJson, ct);
+        public Task<IReadOnlyList<Job>> MarkActiveJobsInterruptedAsync(CancellationToken ct) => _inner.MarkActiveJobsInterruptedAsync(ct);
+
+        Task ICommitJournalContentStore.UpsertJournalWithContentHashAsync(CommitJournalEntry entry, string contentSha256, CancellationToken ct)
+            => ((ICommitJournalContentStore)_inner).UpsertJournalWithContentHashAsync(entry, contentSha256, ct);
+
+        Task<string?> ICommitJournalContentStore.GetJournalContentHashAsync(string token, CancellationToken ct)
+            => ((ICommitJournalContentStore)_inner).GetJournalContentHashAsync(token, ct);
     }
 }

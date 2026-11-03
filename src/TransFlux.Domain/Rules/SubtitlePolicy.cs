@@ -38,27 +38,25 @@ public static class SubtitlePolicy
     }
 
     /// <summary>
-    /// Selects subtitle streams for a video transcode: user-selected streams when the
-    /// request pins stream indices, otherwise every subtitle stream of the source.
-    /// Streams the container cannot hold are excluded and reported as warnings.
+    /// Selects subtitle streams for a video transcode through the single stream resolver:
+    /// version-2 requests use AutoPreserve/None/Explicit, version-1 requests keep the legacy
+    /// SelectedStreamIndices filter. Streams the container cannot hold are excluded with a
+    /// per-track warning carrying the exclusion reason.
     /// </summary>
     public static SubtitleSelection SelectForTranscode(ConversionRequest request, SourceSnapshot source)
-    {
-        var candidates = source.SubtitleStreams.AsEnumerable();
-        if (request.SelectedStreamIndices.Count > 0)
-        {
-            var indices = request.SelectedStreamIndices.ToHashSet();
-            candidates = candidates.Where(s => indices.Contains(s.SourceIndex));
-        }
+        => SelectForContainer(request.Container, StreamSelectionResolver.Resolve(request, source).Subtitles);
 
+    /// <summary>Applies the container capability matrix to already-resolved subtitle candidates.</summary>
+    public static SubtitleSelection SelectForContainer(ContainerFormat container, IEnumerable<StreamDescriptor> candidates)
+    {
         var included = new List<SubtitleTarget>();
         var warnings = new List<string>();
         foreach (var sub in candidates)
         {
-            var encoder = TargetEncoder(request.Container, sub);
+            var encoder = TargetEncoder(container, sub);
             if (encoder.Length == 0)
             {
-                warnings.Add($"字幕流 #{sub.SourceIndex}（{Display(sub.Codec)}）无法写入 {request.Container.DisplayName()}，已跳过。");
+                warnings.Add($"字幕流 #{sub.SourceIndex}（{Display(sub.Codec)}）无法写入 {container.DisplayName()}，已跳过。");
                 continue;
             }
             included.Add(new SubtitleTarget(sub, encoder, IsCopy: encoder == "copy"));

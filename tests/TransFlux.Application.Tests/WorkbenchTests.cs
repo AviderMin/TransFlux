@@ -369,4 +369,107 @@ public sealed class WorkbenchTests
         Assert.Equal(18, preset.CrfOverride); Assert.Equal(44100, preset.AudioSampleRate);
         Assert.Null(preset.OutputDirectory); Assert.Null(preset.OutputFileName); Assert.Null(preset.TrimStart);
     }
+
+    [Fact]
+    public async Task PausedStartPersistsJobBinding_AndCardSurvivesRestart()
+    {
+        await using var h = new SchedulerHarness(); using var files = new Files(1); var saved = new MemoryWorkspace();
+        Guid jobId;
+        using (var store = Store(h, saved))
+        {
+            await Loaded(store); await store.ImportAsync(files.Paths, ConversionOptions.Default); await Ready(store, 1);
+            await h.Scheduler.PauseQueueAsync(default); h.Scheduler.Start();
+            var id = store.GetSnapshot().Items[0].Id;
+            await store.StartAsync([id]);
+            await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items[0].Execution?.State == JobState.Queued);
+            jobId = store.GetSnapshot().Items[0].Draft.JobId!.Value;
+            Assert.True(store.GetSnapshot().Paused);
+            Assert.Contains(saved.Entries!, e => e.JobId == jobId);
+        }
+
+        using var restored = Store(h, saved); await Loaded(restored);
+        await SchedulerHarness.WaitUntilAsync(() => restored.GetSnapshot().Items.Count == 1);
+        var card = Assert.Single(restored.GetSnapshot().Items);
+        Assert.Equal(jobId, card.Draft.JobId);
+        Assert.Equal(JobState.Queued, card.Execution?.State);
+    }
+
+    [Fact]
+    public async Task PausedRetryPersistsBinding_BeforeQueueStaysPaused()
+    {
+        await using var h = new SchedulerHarness(); using var files = new Files(1); var saved = new MemoryWorkspace();
+        using var store = Store(h, saved);
+        h.Runner.Handler = async (_, _, ct) => { await Task.Delay(Timeout.Infinite, ct); return RunResult.CanceledResult(TimeSpan.Zero); };
+        await Loaded(store); await store.ImportAsync(files.Paths, ConversionOptions.Default); await Ready(store, 1);
+        var id = store.GetSnapshot().Items[0].Id;
+        h.Scheduler.Start();
+        await store.StartAsync([id]);
+        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items[0].Execution?.State == JobState.Running);
+        await store.CancelAsync(id);
+        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items[0].Execution?.State == JobState.Canceled);
+
+        await h.Scheduler.PauseQueueAsync(default);
+        await store.RetryAsync(id);
+        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items[0].Execution is { State: JobState.Queued, Job.JobId: var retryId } && retryId != default);
+        var retry = store.GetSnapshot().Items[0].Draft.JobId!.Value;
+        Assert.True(store.GetSnapshot().Paused);
+        Assert.Contains(saved.Entries!, e => e.JobId == retry);
+    }
+
+    [Fact]
+    public void DiagnosticReportUsesExecutedCandidate_NotFirstPlannedCandidate()
+    {
+        var source = TestData.MakeSource();
+        var basePlan = TestData.MakePlan(2);
+        // Simulate GPU -> CPU fallback: first planned candidate is NVENC, executed candidate is CPU.
+        var plan = basePlan with { CandidatePaths = [basePlan.CandidatePaths[1], basePlan.CandidatePaths[0]] };
+        var job = new Job
+        {
+            JobId = Guid.NewGuid(), RequestSnapshot = TestData.MakeRequest(source.MediaId),
+            SourceFingerprint = source.Fingerprint, State = JobState.Succeeded, Revision = 3,
+            CreatedUtc = DateTimeOffset.UnixEpoch, UpdatedUtc = DateTimeOffset.UnixEpoch,
+        };
+        var attempt = new Attempt
+        {
+            AttemptId = Guid.NewGuid(), JobId = job.JobId, Ordinal = 2, PlanSnapshot = plan,
+            TempPath = @"C:\work\a.tmp", ReservedFinalPath = @"C:\out\a.mp4",
+            State = AttemptState.Succeeded, ExecutedCandidateId = "cpu-x264",
+        };
+        var item = new WorkbenchItem(new MediaDraft
+        {
+            MediaId = Guid.NewGuid(), Path = source.AbsolutePath, Status = DraftStatus.Ready, JobId = job.JobId,
+        }, new QueueRow(job, null, null, null, attempt));
+
+        var report = DiagnosticReport.Build(item, DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("执行候选: cpu-x264", report);
+        Assert.Contains("执行编码器: libx264", report);
+        Assert.DoesNotContain("执行编码器: h264_nvenc", report);
+    }
+
+    [Fact]
+    public void DiagnosticReportDoesNotGuessCandidateForLegacyAmbiguousAttempt()
+    {
+        var source = TestData.MakeSource();
+        var job = new Job
+        {
+            JobId = Guid.NewGuid(), RequestSnapshot = TestData.MakeRequest(source.MediaId),
+            SourceFingerprint = source.Fingerprint, State = JobState.Succeeded, Revision = 3,
+            CreatedUtc = DateTimeOffset.UnixEpoch, UpdatedUtc = DateTimeOffset.UnixEpoch,
+        };
+        var attempt = new Attempt
+        {
+            AttemptId = Guid.NewGuid(), JobId = job.JobId, Ordinal = 1, PlanSnapshot = TestData.MakePlan(2),
+            TempPath = @"C:\work\a.tmp", ReservedFinalPath = @"C:\out\a.mp4", State = AttemptState.Succeeded,
+        };
+        var item = new WorkbenchItem(new MediaDraft
+        {
+            MediaId = Guid.NewGuid(), Path = source.AbsolutePath, Status = DraftStatus.Ready, JobId = job.JobId,
+        }, new QueueRow(job, null, null, null, attempt));
+
+        var report = DiagnosticReport.Build(item, DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("执行编码器: 未知", report);
+        Assert.DoesNotContain("执行编码器: libx264", report);
+    }
 }

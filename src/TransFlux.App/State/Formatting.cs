@@ -77,7 +77,16 @@ public static class Fmt
         var audioTotal = snapshot.AudioStreams.Count();
         if (audioTotal > 0)
         {
-            var selected = options?.SelectedStreams.Count is > 0 ? options.SelectedStreams.Count : Math.Min(1, audioTotal);
+            var selected = options switch
+            {
+                null => Math.Min(1, audioTotal),
+                { Mode: ConversionMode.AudioExtract, AudioMode: AudioSelectionMode.Auto } => Math.Min(1, audioTotal),
+                { AudioMode: AudioSelectionMode.None } => 0,
+                { AudioMode: AudioSelectionMode.Explicit } => Math.Min(
+                    options.AudioStreamIndices.Count is > 0 ? options.AudioStreamIndices.Count : options.SelectedStreams.Count,
+                    audioTotal),
+                _ => audioTotal,
+            };
             var trackInfo = audioTotal > 1 ? $" · 共 {audioTotal} 条，输出 {selected} 条" : string.Empty;
             lines.Add($"音频流：{AudioText(snapshot.PrimaryAudio)}{trackInfo}");
         }

@@ -132,8 +132,9 @@ if (ok)
         (outProbe.IsSuccess ? $" v={outProbe.Value!.VideoStreams.Count()} a={outProbe.Value!.AudioStreams.Count()} {outProbe.Value!.PrimaryVideo?.Width}x{outProbe.Value!.PrimaryVideo?.Height} codec={outProbe.Value!.PrimaryVideo?.Codec}" : ""));
     Console.WriteLine("source unchanged=" + (srcHashBefore == srcHashAfter));
     var attempts = await store.GetAttemptsForJobAsync(jobId, default);
-    foreach (var attempt in attempts) Console.WriteLine($"attempt={attempt.Ordinal} device={attempt.DeviceIdentity ?? "CPU"} state={attempt.State} failure={attempt.Failure?.Code} detail={attempt.Failure?.TechnicalDetail}");
+    foreach (var attempt in attempts) Console.WriteLine($"attempt={attempt.Ordinal} device={attempt.DeviceIdentity ?? "CPU"} executed={attempt.ExecutedCandidateId ?? "missing"} state={attempt.State} failure={attempt.Failure?.Code} detail={attempt.Failure?.TechnicalDetail}");
     var pass = outProbe.IsSuccess && srcHashBefore == srcHashAfter
+        && attempts.All(a => !string.IsNullOrEmpty(a.ExecutedCandidateId))
         && (!hardwareSmoke || attempts.Count == 1 && attempts[0].DeviceIdentity is not null)
         && (!fallbackSmoke || attempts.Count == 2 && attempts[0].DeviceIdentity is not null && attempts[1].DeviceIdentity is null);
     Run(core.FfmpegPath, new[] { "-v", "error", "-i", finalPath, "-f", "null", "-" });

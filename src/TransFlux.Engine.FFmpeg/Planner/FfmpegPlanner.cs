@@ -72,18 +72,18 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
     private ValidatedPlan BuildVideoTranscode(ConversionRequest request, SourceSnapshot source, CapabilitySnapshot capabilities)
     {
-        var video = MediaCompatibility.SelectPrimaryVideo(request, source)
+        var selection = StreamSelectionResolver.Resolve(request, source);
+        var video = selection.Video
             ?? throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.no_video", "No video stream selected."));
         if (video.Width is not int w || video.Height is not int h || w <= 0 || h <= 0)
             throw new PlanValidationException(FailureInfo.Of(FailureCode.PlanInvalid, "plan.unknown_dimensions", "Video dimensions are unknown."));
 
-        var primaryAudio = MediaCompatibility.SelectPrimaryAudio(request, source);
-        var audioStreams = SelectAudioStreams(request, source, primaryAudio);
-        var subtitles = SubtitlePolicy.SelectForTranscode(request, source);
+        var audioStreams = selection.Audio.ToList();
+        var subtitles = SubtitlePolicy.SelectForContainer(request.Container, selection.Subtitles);
         var geometry = ComputeGeometry(video, request.Resize);
         var expected = BuildVideoExpectedOutput(request, source, geometry, video, audioStreams, subtitles.Included);
 
-        var warnings = BuildWarnings(request, source, subtitles.Warnings);
+        var warnings = BuildWarnings(request, source, selection, subtitles);
         var candidates = new List<ExecutionCandidate>();
 
         var cpuEncoder = request.VideoCodec switch
@@ -224,8 +224,20 @@ public sealed class FfmpegPlanner : IExecutionPlanner
 
     private ValidatedPlan BuildAudioExtract(ConversionRequest request, SourceSnapshot source, CapabilitySnapshot capabilities)
     {
-        var audio = MediaCompatibility.SelectPrimaryAudio(request, source)
-            ?? throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.no_audio", "No audio stream selected."));
+        var selection = StreamSelectionResolver.Resolve(request, source);
+        if (request.RequestVersion >= 2 && request.AudioTracks.Mode == AudioSelectionMode.Explicit
+            && selection.Audio.Count > 1)
+        {
+            // Defensive second guard: compatibility validation must already block this, but a
+            // plan must never silently drop extra explicitly selected tracks.
+            throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.audio_extract_single",
+                "音频提取一次只输出一条音轨，请只选择一条源音轨。"));
+        }
+        var audio = request.RequestVersion >= 2
+            ? (request.AudioTracks.Mode == AudioSelectionMode.Auto ? source.PrimaryAudio : selection.Audio.FirstOrDefault())
+            : MediaCompatibility.SelectPrimaryAudio(request, source);
+        if (audio is null)
+            throw new PlanValidationException(FailureInfo.Of(FailureCode.UnsupportedMedia, "plan.no_audio", "No audio stream selected."));
 
         var codec = request.Audio.Codec;
 
@@ -268,7 +280,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             Rationale = $"audio extract to {request.Container.DisplayName()} ({codec}).",
         };
 
-        var warnings = BuildWarnings(request, source, Array.Empty<string>());
+        var warnings = BuildWarnings(request, source, selection,
+            new SubtitlePolicy.SubtitleSelection(Array.Empty<SubtitlePolicy.SubtitleTarget>(), Array.Empty<string>()));
         return Assemble(request, source, capabilities, new[] { candidate }, expected, warnings, args.ToList());
     }
 
@@ -280,6 +293,7 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         AddInput(args);
 
         int mapped = 0, videoMapped = 0, audioMapped = 0, subtitleMapped = 0, attachmentMapped = 0;
+        var selection = StreamSelectionResolver.Resolve(request, source);
         var selectedStreams = MediaCompatibility.SelectRemuxStreams(request, source);
         var mappedAudio = new List<StreamDescriptor>();
         var mappedSubtitles = new List<StreamDescriptor>();
@@ -330,7 +344,8 @@ public sealed class FfmpegPlanner : IExecutionPlanner
             Rationale = $"remux to {request.Container.DisplayName()} with stream copy (whitelist enforced by compatibility matrix).",
         };
 
-        var warnings = BuildWarnings(request, source, Array.Empty<string>());
+        var warnings = BuildWarnings(request, source, selection,
+            SubtitlePolicy.SelectForContainer(request.Container, selection.Subtitles));
         return Assemble(request, source, capabilities, new[] { candidate }, expected, warnings, args.ToList());
     }
 
@@ -618,22 +633,6 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         _ => HardwareBackend.Cpu,
     };
 
-    /// <summary>Selected audio streams in source order. Without an explicit selection every
-    /// audio track is kept for every container, including MP4 — nothing is silently dropped.</summary>
-    private static List<StreamDescriptor> SelectAudioStreams(ConversionRequest request, SourceSnapshot source, StreamDescriptor? primaryAudio)
-    {
-        var selected = new List<StreamDescriptor>();
-        foreach (var index in request.SelectedStreamIndices)
-        {
-            var stream = source.Streams.FirstOrDefault(s => s.SourceIndex == index);
-            if (stream is { Kind: MediaKind.Audio }) selected.Add(stream);
-        }
-        if (selected.Count == 0)
-            selected.AddRange(source.AudioStreams);
-        if (selected.Count == 0 && primaryAudio is not null) selected.Add(primaryAudio);
-        return selected;
-    }
-
     private static ExpectedOutput BuildVideoExpectedOutput(ConversionRequest request, SourceSnapshot source, Geometry geometry,
         StreamDescriptor video, IReadOnlyList<StreamDescriptor> audioStreams, IReadOnlyList<SubtitlePolicy.SubtitleTarget> subtitles)
     {
@@ -663,12 +662,14 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         };
     }
 
-    private static List<string> BuildWarnings(ConversionRequest request, SourceSnapshot source, IReadOnlyList<string> subtitleWarnings)
+    private static List<string> BuildWarnings(ConversionRequest request, SourceSnapshot source,
+        StreamSelectionResolver.ResolvedStreamSelection selection, SubtitlePolicy.SubtitleSelection subtitles)
     {
         var warnings = new List<string>();
-        warnings.AddRange(subtitleWarnings);
-        if (request.Mode == ConversionMode.VideoTranscode && source.SubtitleStreams.Any() && subtitleWarnings.Count == 0)
-            warnings.Add("字幕随输出保留：可复制的流直接复制，其余转为目标容器的字幕编码（不做烧录）。");
+        warnings.AddRange(selection.Warnings);
+        warnings.AddRange(subtitles.Warnings);
+        if (request.Mode is ConversionMode.VideoTranscode or ConversionMode.Remux)
+            AddSubtitleWarnings(request, source, selection, subtitles, warnings);
         if (request.Metadata == MetadataPolicy.StripPersonalTags)
             warnings.Add("自由标签与章节已清除；音轨/字幕的语言与默认轨、强制轨标记保留。");
         else
@@ -685,6 +686,40 @@ public sealed class FfmpegPlanner : IExecutionPlanner
         if (request.Mode == ConversionMode.VideoTranscode && source.ColorClassification != ColorClassification.SdrBt709)
             warnings.Add($"Source colour classified as {source.ColorClassification}.");
         return warnings;
+    }
+
+    /// <summary>
+    /// Subtitle messaging must match the resolved selection: retained tracks are named as
+    /// retained/copied/converted, excluded tracks are named as excluded with the reason, and
+    /// a source with zero subtitle tracks never claims that "all subtitles are preserved".
+    /// </summary>
+    private static void AddSubtitleWarnings(ConversionRequest request, SourceSnapshot source,
+        StreamSelectionResolver.ResolvedStreamSelection selection, SubtitlePolicy.SubtitleSelection subtitles,
+        List<string> warnings)
+    {
+        if (!source.SubtitleStreams.Any()) return;
+
+        if (subtitles.Included.Count > 0)
+        {
+            var copied = subtitles.Included.Count(t => t.IsCopy);
+            var converted = subtitles.Included.Count - copied;
+            var detail = converted == 0
+                ? $"共 {subtitles.Included.Count} 条，均直接复制"
+                : $"共 {subtitles.Included.Count} 条（{copied} 条复制、{converted} 条转换）";
+            warnings.Add($"字幕随输出保留：{detail}，不做烧录。");
+            return;
+        }
+
+        if (selection.Subtitles.Count == 0)
+        {
+            var reason = request.RequestVersion >= 2
+                ? request.Subtitles.Mode == SubtitleSelectionMode.None ? "已选择不输出字幕" : "未选择任何字幕轨"
+                : "旧版选流未包含字幕轨";
+            warnings.Add($"字幕未写入输出：{reason}；源文件 {source.SubtitleStreams.Count()} 条字幕均被排除。");
+            return;
+        }
+
+        warnings.Add($"所选字幕轨（{selection.Subtitles.Count} 条）均无法写入 {request.Container.DisplayName()}，已从输出排除。");
     }
 
     private ValidatedPlan Assemble(

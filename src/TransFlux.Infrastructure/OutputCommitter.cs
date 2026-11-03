@@ -16,7 +16,7 @@ internal interface ICommitJournalContentStore
 /// <summary>Atomic, journal-backed output publication. Writes a Prepared intent, performs a
 /// no-replace move, records Published, persists the OutputRecord, then closes the journal.
 /// Implements <see cref="ICommitReconciler"/> so RecoveryService can reconcile open journals.</summary>
-public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
+public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler, IOutputRecordVerifier
 {
     private readonly IJobStore _store;
     private readonly IFileSystemService _fs;
@@ -147,6 +147,18 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
                             return Fail(FailureCode.VerifyFailed, "COMMIT_RECONCILE_HASH", ex.Message, entry.CommitToken);
                         }
 
+                        // Prove the staged content identity before it is exposed under the final
+                        // name. A mismatched temp must stay where it is, not be published.
+                        var storedHash = _store is ICommitJournalContentStore contentStore
+                            ? await contentStore.GetJournalContentHashAsync(entry.CommitToken, ct).ConfigureAwait(false)
+                            : null;
+                        if (!string.IsNullOrEmpty(storedHash)
+                            && !string.Equals(storedHash, recoveredHash, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT",
+                                "Temporary output content does not match the Prepared journal identity.", entry.CommitToken);
+                        }
+
                         try
                         {
                             _fs.MoveNoReplace(entry.TempPath, entry.FinalPath);
@@ -179,9 +191,63 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler
                         "Journal recorded a failed commit; no output was published.", entry.CommitToken);
             }
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return Fail(FailureCode.CommitFailed, "COMMIT_RECONCILE_FAILED", ex.Message, entry.CommitToken);
+        }
+    }
+
+    /// <summary>Verifies a recorded output without modifying it. Existence and size are mandatory;
+    /// when the journal row still carries a content hash the final content must match it too.</summary>
+    public async Task<CommitResult> VerifyOutputAsync(OutputRecord output, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        try
+        {
+            if (!_fs.FileExists(output.FinalPath))
+                return Fail(FailureCode.VerifyFailed, "COMMIT_OUTPUT_MISSING",
+                    $"Recorded output '{output.FinalPath}' does not exist.", output.CommitToken);
+
+            long finalSize;
+            try
+            {
+                finalSize = _fs.GetFileLength(output.FinalPath);
+            }
+            catch (Exception ex)
+            {
+                return Fail(FailureCode.VerifyFailed, "COMMIT_FINAL_UNREADABLE", ex.Message, output.CommitToken);
+            }
+
+            if (output.Size > 0 && finalSize != output.Size)
+                return Fail(FailureCode.VerifyFailed, "COMMIT_OUTPUT_SIZE_MISMATCH",
+                    $"Recorded output size {output.Size} does not match file size {finalSize}.", output.CommitToken);
+
+            var storedHash = _store is ICommitJournalContentStore contentStore
+                ? await contentStore.GetJournalContentHashAsync(output.CommitToken, ct).ConfigureAwait(false)
+                : null;
+            if (!string.IsNullOrEmpty(storedHash))
+            {
+                var finalHash = await ComputeContentHashAsync(output.FinalPath, ct).ConfigureAwait(false);
+                if (!string.Equals(storedHash, finalHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT",
+                        "Recorded output content does not match the commit journal identity.", output.CommitToken);
+                }
+            }
+
+            return new CommitResult { Success = true, CommitToken = output.CommitToken, FinalPath = output.FinalPath };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return Fail(FailureCode.CommitFailed, "COMMIT_OUTPUT_VERIFY_FAILED", ex.Message, output.CommitToken);
         }
     }
 

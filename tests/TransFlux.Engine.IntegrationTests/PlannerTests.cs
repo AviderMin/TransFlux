@@ -78,6 +78,34 @@ public class PlannerTests
         };
     }
 
+    private static StreamDescriptor AudioTrace(int index, string? language = null, string codec = "aac")
+        => new()
+        {
+            SourceIndex = index,
+            Kind = MediaKind.Audio,
+            Codec = codec,
+            Channels = 2,
+            ChannelLayout = "stereo",
+            SampleRate = 48000,
+            IsDefault = index == 1,
+            Language = language,
+        };
+
+    private static StreamDescriptor SubtitleTrace(int index, string codec = "subrip", string? language = null)
+        => new() { SourceIndex = index, Kind = MediaKind.Subtitle, Codec = codec, Language = language };
+
+    private static SourceSnapshot SyntheticWithStreams(params StreamDescriptor[] extra)
+    {
+        var source = SyntheticVideo(640, 360);
+        return source with { Streams = new[] { source.Streams[0] }.Concat(extra).ToArray() };
+    }
+
+    private static string[] Arguments(ValidatedPlan plan) => plan.CandidatePaths[0].Arguments.ToArray();
+
+    private static bool HasMap(string[] args, int sourceIndex)
+        => args.Select((arg, i) => (arg, next: i + 1 < args.Length ? args[i + 1] : null))
+            .Any(p => p.arg == "-map" && p.next == $"0:{sourceIndex}");
+
     [Fact]
     public async Task BuildTranscodePlan_ProducesTypedArgsAndExpectedOutput()
     {
@@ -201,5 +229,179 @@ public class PlannerTests
         Assert.Equal(0, plan.ExpectedOutput.VideoStreamCount);
         Assert.Equal(1, plan.ExpectedOutput.AudioStreamCount);
         Assert.Contains("-vn", plan.CandidatePaths[0].Arguments);
+    }
+    [Fact]
+    public async Task V2_AudioSelection_DoesNotDropSubtitles_AndMapsOnlySelectedAudio()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), SubtitleTrace(2), AudioTrace(3));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mp4,
+            AudioTracks = AudioSelection.Tracks(1),
+            Subtitles = SubtitleSelection.AutoPreserve,
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        var args = Arguments(plan);
+        Assert.True(HasMap(args, 0));
+        Assert.True(HasMap(args, 1));
+        Assert.False(HasMap(args, 3));
+        Assert.True(HasMap(args, 2));
+        Assert.Equal(1, plan.ExpectedOutput.AudioStreamCount);
+        Assert.Single(plan.ExpectedOutput.SubtitleLanguages);
+        Assert.Contains(plan.Warnings, w => w.Contains("字幕随输出保留"));
+        Assert.DoesNotContain(plan.Warnings, w => w.Contains("未写入输出"));
+    }
+
+    [Fact]
+    public async Task V2_SubtitleNone_EmitsNoSubtitleMap_AndWarningSaysExcluded()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), SubtitleTrace(2));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mp4,
+            AudioTracks = AudioSelection.Auto,
+            Subtitles = SubtitleSelection.None,
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        Assert.False(HasMap(Arguments(plan), 2));
+        Assert.Equal(0, plan.ExpectedOutput.StreamCount - 2); // one video + one audio only
+        Assert.Contains(plan.Warnings, w => w.Contains("字幕未写入输出") && w.Contains("已选择不输出字幕"));
+        Assert.DoesNotContain(plan.Warnings, w => w.Contains("字幕随输出保留"));
+    }
+
+    [Fact]
+    public async Task V2_SubtitleExplicit_Mkv_CopiesOnlyListedSubtitle()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), SubtitleTrace(2, "ass", "jpn"), SubtitleTrace(3, "subrip", "eng"));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mkv,
+            AudioTracks = AudioSelection.Auto,
+            Subtitles = SubtitleSelection.Tracks(3),
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        var args = Arguments(plan);
+        Assert.False(HasMap(args, 2));
+        Assert.True(HasMap(args, 3));
+        Assert.Equal(new[] { "eng" }, plan.ExpectedOutput.SubtitleLanguages);
+        Assert.Contains(plan.Warnings, w => w.Contains("字幕随输出保留") && w.Contains("1 条"));
+    }
+
+    [Fact]
+    public async Task V2_AudioExtract_MultipleExplicitTracks_IsBlockedWithSingleTrackMessage()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), AudioTrace(3));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.AudioExtract,
+            Container = ContainerFormat.M4a,
+            AudioTracks = AudioSelection.Tracks(1, 3),
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.False(result.IsSuccess);
+        Assert.Contains("一次只输出一条音轨", result.Failure!.TechnicalDetail);
+    }
+
+    [Fact]
+    public async Task V2_AudioExtract_SingleExplicitTrack_MapsExactlyThatTrack()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), AudioTrace(3));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.AudioExtract,
+            Container = ContainerFormat.M4a,
+            AudioTracks = AudioSelection.Tracks(3),
+            Audio = new AudioSpec { Codec = AudioCodec.Aac },
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        Assert.True(HasMap(Arguments(plan), 3));
+        Assert.False(HasMap(Arguments(plan), 1));
+        Assert.Equal(1, plan.ExpectedOutput.AudioStreamCount);
+    }
+
+    [Fact]
+    public async Task V2_AudioNone_TranscodeEmitsAnAndNoAudioStreams()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), SubtitleTrace(2));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mp4,
+            AudioTracks = AudioSelection.None,
+            Subtitles = SubtitleSelection.AutoPreserve,
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        Assert.Contains("-an", Arguments(plan));
+        Assert.Equal(0, plan.ExpectedOutput.AudioStreamCount);
+        Assert.Equal(1, plan.ExpectedOutput.StreamCount - 1); // video plus one subtitle
+    }
+
+    [Fact]
+    public async Task V2_ZeroSubtitles_DoesNotClaimAllSubtitlesArePreserved()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mp4,
+            AudioTracks = AudioSelection.Auto,
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        Assert.DoesNotContain(result.Value!.Warnings, w => w.Contains("全部保留") || w.Contains("字幕随输出保留"));
+    }
+    [Fact]
+    public async Task V1_AudioOnlySelection_KeepsLegacyCombinedFilterSemantics()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1), SubtitleTrace(2));
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 1,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mp4,
+            SelectedStreamIndices = new[] { 1 }, // legacy audio selection also filtered subtitles
+        };
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        Assert.False(HasMap(Arguments(plan), 2));
+        Assert.Empty(plan.ExpectedOutput.SubtitleLanguages);
+        Assert.Contains(plan.Warnings, w => w.Contains("旧版选流未包含字幕轨"));
     }
 }

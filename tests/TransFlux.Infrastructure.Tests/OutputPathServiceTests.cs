@@ -68,4 +68,64 @@ public sealed class OutputPathServiceTests
         Assert.True(Directory.Exists(alt));
         svc.Release(reserved);
     }
+
+    private static async Task<(OutputPathService Service, ReservedOutput Reserved)> ReserveInAsync(TempDir dir)
+    {
+        var service = new OutputPathService(new WindowsFileSystemService(), new SystemClock());
+        var source = dir.NewFile("input.mp4", "source-bytes");
+        var result = await service.ReserveAsync(new OutputReservationRequest
+        {
+            SourcePath = source,
+            Container = ContainerFormat.Mp4,
+            PreferredDirectory = dir.Path,
+        }, CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        return (service, result.Value!);
+    }
+
+    [Fact]
+    public async Task ReleaseReservation_DeletesLockOnly_AndKeepsWorkDirectoryAndStagedOutput()
+    {
+        using var dir = new TempDir();
+        var (service, reserved) = await ReserveInAsync(dir);
+        var staged = Path.Combine(reserved.WorkDirectory, "attempt-1.mp4");
+        File.WriteAllText(staged, "verified-output");
+
+        service.ReleaseReservation(reserved);
+
+        Assert.False(File.Exists(reserved.FinalPath + ".transflux-reserve"));
+        Assert.True(Directory.Exists(reserved.WorkDirectory));
+        Assert.True(File.Exists(staged), "releasing the naming reservation must not delete staged output");
+        Assert.False(File.Exists(reserved.FinalPath));
+    }
+
+    [Fact]
+    public async Task DeleteWorkDirectory_DeletesStagingButKeepsReservationLock()
+    {
+        using var dir = new TempDir();
+        var (service, reserved) = await ReserveInAsync(dir);
+        var staged = Path.Combine(reserved.WorkDirectory, "attempt-1.mp4");
+        File.WriteAllText(staged, "verified-output");
+
+        service.DeleteWorkDirectory(reserved);
+
+        Assert.True(File.Exists(reserved.FinalPath + ".transflux-reserve"));
+        Assert.False(Directory.Exists(reserved.WorkDirectory));
+        Assert.False(File.Exists(staged));
+    }
+
+    [Fact]
+    public async Task LegacyRelease_DeletesReservationAndWorkDirectory()
+    {
+        using var dir = new TempDir();
+        var (service, reserved) = await ReserveInAsync(dir);
+        var staged = Path.Combine(reserved.WorkDirectory, "attempt-1.mp4");
+        File.WriteAllText(staged, "verified-output");
+
+        service.Release(reserved);
+
+        Assert.False(File.Exists(reserved.FinalPath + ".transflux-reserve"));
+        Assert.False(Directory.Exists(reserved.WorkDirectory));
+        Assert.False(File.Exists(staged));
+    }
 }

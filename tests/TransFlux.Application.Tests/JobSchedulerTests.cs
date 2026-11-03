@@ -372,4 +372,98 @@ public class JobSchedulerTests
         await h.WaitForStateAsync(first, JobState.Canceled);
         await h.WaitForStateAsync(second, JobState.Succeeded);
     }
+
+    [Fact]
+    public async Task CommitFailure_PreservesTempAndWorkDirectory_AndMovesJobToNeedsAttention()
+    {
+        await using var h = new SchedulerHarness();
+        h.Runner.Handler = (attempt, _, _) =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(attempt.TempPath)!);
+            File.WriteAllText(attempt.TempPath, "verified-output");
+            return Task.FromResult(RunResult.Ok(0, TimeSpan.FromSeconds(1), 15, null));
+        };
+        h.Committer.OnCommit = (_, _) => Task.FromResult(new CommitResult
+        {
+            Success = false,
+            Failure = FailureInfo.Of(FailureCode.DbFailed, "error.dbFailed", "injected db failure"),
+        });
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        var job = await h.WaitForStateAsync(id, JobState.NeedsAttention);
+
+        var attempt = Assert.Single(h.Runner.Attempts);
+        Assert.Equal(JobState.NeedsAttention, job.State);
+        Assert.True(File.Exists(attempt.TempPath), "the verified temp output must be preserved after a failed commit");
+        Assert.Empty(h.OutputPaths.ReservationReleased);
+        Assert.Empty(h.OutputPaths.WorkDirectoriesDeleted);
+        Assert.Empty(await h.Store.GetOutputsForJobAsync(id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CommitException_PreservesTempAndWorkDirectory_AndMovesJobToNeedsAttention()
+    {
+        await using var h = new SchedulerHarness();
+        h.Runner.Handler = (attempt, _, _) =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(attempt.TempPath)!);
+            File.WriteAllText(attempt.TempPath, "verified-output");
+            return Task.FromResult(RunResult.Ok(0, TimeSpan.FromSeconds(1), 15, null));
+        };
+        h.Committer.OnCommit = (_, _) => throw new IOException("injected database write failure");
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        var job = await h.WaitForStateAsync(id, JobState.NeedsAttention);
+
+        var attempt = Assert.Single(h.Runner.Attempts);
+        Assert.Equal(JobState.NeedsAttention, job.State);
+        Assert.True(File.Exists(attempt.TempPath), "the verified temp output must be preserved after a commit exception");
+        Assert.Empty(h.OutputPaths.ReservationReleased);
+        Assert.Empty(h.OutputPaths.WorkDirectoriesDeleted);
+    }
+
+    [Fact]
+    public async Task CommitSuccess_ReleasesReservationAndDeletesWorkDirectory()
+    {
+        await using var h = new SchedulerHarness();
+        h.Runner.Handler = (attempt, _, _) =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(attempt.TempPath)!);
+            File.WriteAllText(attempt.TempPath, "verified-output");
+            return Task.FromResult(RunResult.Ok(0, TimeSpan.FromSeconds(1), 15, null));
+        };
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        await h.WaitForStateAsync(id, JobState.Succeeded);
+
+        Assert.Single(h.OutputPaths.ReservationReleased);
+        Assert.Single(h.OutputPaths.WorkDirectoriesDeleted);
+        var attempt = Assert.Single(h.Runner.Attempts);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(attempt.TempPath)));
+    }
+
+    [Fact]
+    public async Task VerificationFailure_CleansWorkDirectoryAndReservation()
+    {
+        await using var h = new SchedulerHarness();
+        h.Runner.Handler = (attempt, _, _) =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(attempt.TempPath)!);
+            File.WriteAllText(attempt.TempPath, "verified-output");
+            return Task.FromResult(RunResult.Ok(0, TimeSpan.FromSeconds(1), 15, null));
+        };
+        h.Verifier.Handler = (_, _) => Task.FromResult(
+            VerificationResult.Fail(FailureInfo.Of(FailureCode.VerifyFailed, "error.verifyFailed"), "bad output"));
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        var job = await h.WaitForStateAsync(id, JobState.Failed);
+
+        Assert.Equal(JobState.Failed, job.State);
+        Assert.Single(h.OutputPaths.ReservationReleased);
+        Assert.Single(h.OutputPaths.WorkDirectoriesDeleted);
+    }
 }

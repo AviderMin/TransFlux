@@ -8,6 +8,7 @@ using TransFlux.App.Components.Shared;
 using TransFlux.App.Resources;
 using TransFlux.App.State;
 using TransFlux.App.Theming;
+using TransFlux.Domain.Media;
 using TransFlux.Domain.Plans;
 using TransFlux.Domain.Presets;
 using TransFlux.Domain.Rules;
@@ -27,6 +28,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
         var wide = UseBreakpoint(1100);
         var (videoOpen, setVideoOpen) = UseState(false);
         var (audioOpen, setAudioOpen) = UseState(false);
+        var (subtitleOpen, setSubtitleOpen) = UseState(false);
         var (outputOpen, setOutputOpen) = UseState(false);
         var (presetOpen, setPresetOpen) = UseState(false);
         var (presetName, setPresetName) = UseState(string.Empty);
@@ -62,6 +64,33 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             => Expander(title, open ? VStack(Space.Md, fields) : Empty(), isExpanded: open, onIsExpandedChanged: changed)
                 .AutomationName(title).HAlign(HorizontalAlignment.Stretch)
                 .Set(e => e.HorizontalContentAlignment = HorizontalAlignment.Stretch);
+
+        // Stream-selection helpers: v2 semantics label the same intent for every selected card;
+        // bare source stream numbers are only shown when exactly one source is selected.
+        string AudioTrackLabel(StreamDescriptor track)
+            => $"音轨 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}";
+        string SubtitleTrackLabel(StreamDescriptor track)
+            => $"字幕 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}";
+        int AudioModeIndex(ConversionOptions x, bool allowExplicit) => x.AudioMode switch
+        {
+            AudioSelectionMode.Auto => 0,
+            AudioSelectionMode.None => 1,
+            AudioSelectionMode.Explicit when allowExplicit => 2,
+            _ => -1,
+        };
+        int SubtitleModeIndex(ConversionOptions x, bool allowExplicit) => x.SubtitleMode switch
+        {
+            SubtitleSelectionMode.AutoPreserve => 0,
+            SubtitleSelectionMode.None => 1,
+            SubtitleSelectionMode.Explicit when allowExplicit => 2,
+            _ => -1,
+        };
+        int ExtractAudioIndex(ConversionOptions x, StreamDescriptor[] tracks)
+        {
+            if (x.AudioMode != AudioSelectionMode.Explicit || x.AudioStreamIndices.Count != 1) return 0;
+            var found = Array.FindIndex(tracks, t => t.SourceIndex == x.AudioStreamIndices[0]);
+            return found < 0 ? 0 : found + 1;
+        }
 
         var body = new List<Element>();
         Element outputFooter = Empty();
@@ -173,30 +202,62 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                     videoFields.Add(Ui.DimCaption("自动选择可用编码器；硬件编码不保证更小或更快。").TextWrapping(TextWrapping.Wrap));
                     advancedGroups.Add(Group("视频参数", videoOpen, setVideoOpen, videoFields.ToArray()));
                 }
-                if (o.Mode != ConversionMode.Remux)
+                var snapshot = selection.Count == 1 ? selection[0].Draft.Snapshot : null;
+                var audioTracks = snapshot?.AudioStreams.ToArray() ?? Array.Empty<StreamDescriptor>();
+                var subtitleTracks = snapshot?.SubtitleStreams.ToArray() ?? Array.Empty<StreamDescriptor>();
+
+                // ---------------- Audio and audio tracks
+                var audioFields = new List<Element>();
+                if (o.Mode == ConversionMode.AudioExtract)
                 {
-                    var audioFields = new List<Element>();
-                    if (selection.Count == 1 && selection[0].Draft.Snapshot is { } source)
+                    if (selection.Count == 1 && audioTracks.Length > 0)
                     {
-                        var tracks = source.AudioStreams.ToArray();
-                        if (tracks.Length > 0)
+                        var labels = new[] { "自动（默认音轨）" }.Concat(audioTracks.Select(AudioTrackLabel)).ToArray();
+                        audioFields.Add(Combo("音轨（单轨）", labels,
+                            Index(x => ExtractAudioIndex(x, audioTracks), ExtractAudioIndex(o, audioTracks)),
+                            i => Apply(x => i == 0
+                                ? OutputTargets.WithAudioAuto(x)
+                                : OutputTargets.WithAudioTrack(x, audioTracks[i - 1].SourceIndex))));
+                        audioFields.Add(Ui.DimCaption("音频提取一次只输出一条音轨；批量时使用每个文件的默认音轨。").TextWrapping(TextWrapping.Wrap));
+                    }
+                    else if (selection.Count == 1)
+                        audioFields.Add(Ui.DimCaption("源文件没有可提取的音轨。").TextWrapping(TextWrapping.Wrap));
+                    else
+                        audioFields.Add(Ui.DimCaption("音频提取需逐个文件选择音轨；批量时使用每个文件的默认音轨。").TextWrapping(TextWrapping.Wrap));
+                }
+                else
+                {
+                    var allowExplicitAudio = selection.Count == 1 && audioTracks.Length > 0;
+                    var audioModeLabels = allowExplicitAudio
+                        ? new[] { "保留全部音轨", "不输出音轨", "指定音轨" }
+                        : new[] { "保留全部音轨", "不输出音轨" };
+                    audioFields.Add(Combo("音轨", audioModeLabels,
+                        Index(x => AudioModeIndex(x, allowExplicitAudio), AudioModeIndex(o, allowExplicitAudio)),
+                        i => Apply(x => OutputTargets.WithAudioMode(x, (AudioSelectionMode)i))));
+                    if (allowExplicitAudio && Same(x => x.AudioMode) && o.AudioMode == AudioSelectionMode.Explicit)
+                    {
+                        audioFields.Add(Ui.FieldLabel("指定音轨（可多选）"));
+                        foreach (var track in audioTracks)
                         {
-                            audioFields.Add(Ui.FieldLabel("音轨（可多选；全不选表示默认音轨）"));
-                            foreach (var track in tracks)
-                            {
-                                var trackIndex = track.SourceIndex;
-                                audioFields.Add(CheckBox(o.SelectedStreams.Contains(trackIndex), checkedOn =>
-                                    Apply(x =>
-                                    {
-                                        var selected = x.SelectedStreams.ToHashSet();
-                                        if (checkedOn) selected.Add(trackIndex); else selected.Remove(trackIndex);
-                                        return x with { SelectedStreams = selected.OrderBy(i => i).ToArray() };
-                                    }), $"音轨 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}")
-                                    .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
-                                    .IsEnabled(editable));
-                            }
+                            var trackIndex = track.SourceIndex;
+                            audioFields.Add(CheckBox(o.AudioStreamIndices.Contains(trackIndex), checkedOn =>
+                                Apply(x =>
+                                {
+                                    var selected = x.AudioStreamIndices.ToHashSet();
+                                    if (checkedOn) selected.Add(trackIndex); else selected.Remove(trackIndex);
+                                    return OutputTargets.WithAudioTrackSelection(x, selected.OrderBy(i => i).ToArray());
+                                }), AudioTrackLabel(track))
+                                .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
+                                .IsEnabled(editable));
                         }
                     }
+                    else if (o.AudioMode == AudioSelectionMode.None)
+                        audioFields.Add(Ui.DimCaption("输出不包含音轨。").TextWrapping(TextWrapping.Wrap));
+                    if (o.Mode == ConversionMode.Remux)
+                        audioFields.Add(Ui.DimCaption("转封装按源流直接复制所选音轨，不重新编码。").TextWrapping(TextWrapping.Wrap));
+                }
+                if (o.Mode != ConversionMode.Remux)
+                {
                     if (o.AudioCodec.HasBitrate())
                         audioFields.Add(Pair(
                             Number("音频码率 kbps", x => x.AudioBitRateKbps,
@@ -212,29 +273,40 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                             i => Apply(x => OutputTargets.WithPcmBitDepth(x, i == 1)))));
                     else audioFields.Add(channels);
                     audioFields.Add(Ui.DimCaption("声道数留空时保留源声道布局；PCM 为无损编码，不会恢复源文件已丢失的信息。").TextWrapping(TextWrapping.Wrap));
-                    advancedGroups.Add(Group("音频与音轨", audioOpen, setAudioOpen, audioFields.ToArray()));
                 }
-                else if (selection.Count == 1 && selection[0].Draft.Snapshot is { } remuxSource)
+                advancedGroups.Add(Group("音频与音轨", audioOpen, setAudioOpen, audioFields.ToArray()));
+
+                // ---------------- Subtitles (soft only; burn-in is a later task)
+                if (o.Mode != ConversionMode.AudioExtract)
                 {
-                    var remuxTracks = remuxSource.AudioStreams.ToArray();
-                    if (remuxTracks.Length > 0)
+                    var subtitleFields = new List<Element>();
+                    var allowExplicitSubtitles = selection.Count == 1 && subtitleTracks.Length > 0;
+                    var subtitleModeLabels = allowExplicitSubtitles
+                        ? new[] { "保留全部字幕（默认）", "不输出字幕", "指定字幕" }
+                        : new[] { "保留全部字幕（默认）", "不输出字幕" };
+                    subtitleFields.Add(Combo("字幕", subtitleModeLabels,
+                        Index(x => SubtitleModeIndex(x, allowExplicitSubtitles), SubtitleModeIndex(o, allowExplicitSubtitles)),
+                        i => Apply(x => OutputTargets.WithSubtitleMode(x, (SubtitleSelectionMode)i))));
+                    if (allowExplicitSubtitles && Same(x => x.SubtitleMode) && o.SubtitleMode == SubtitleSelectionMode.Explicit)
                     {
-                        var remuxFields = new List<Element> { Ui.FieldLabel("音轨（可多选；全不选表示默认音轨）") };
-                        foreach (var track in remuxTracks)
+                        subtitleFields.Add(Ui.FieldLabel("指定字幕（可多选；暂不支持烧录）"));
+                        foreach (var track in subtitleTracks)
                         {
                             var trackIndex = track.SourceIndex;
-                            remuxFields.Add(CheckBox(o.SelectedStreams.Contains(trackIndex), checkedOn =>
+                            subtitleFields.Add(CheckBox(o.SubtitleStreamIndices.Contains(trackIndex), checkedOn =>
                                 Apply(x =>
                                 {
-                                    var selected = x.SelectedStreams.ToHashSet();
+                                    var selected = x.SubtitleStreamIndices.ToHashSet();
                                     if (checkedOn) selected.Add(trackIndex); else selected.Remove(trackIndex);
-                                    return x with { SelectedStreams = selected.OrderBy(i => i).ToArray() };
-                                }), $"音轨 {track.SourceIndex} · {track.Language ?? "未知语言"} · {track.Codec}")
-                                .AutomationName($"音轨 {track.SourceIndex} {track.Language ?? "未知语言"}")
+                                    return OutputTargets.WithSubtitleTracks(x, selected.OrderBy(i => i).ToArray());
+                                }), SubtitleTrackLabel(track))
+                                .AutomationName($"字幕 {track.SourceIndex} {track.Language ?? "未知语言"}")
                                 .IsEnabled(editable));
                         }
-                        advancedGroups.Add(Group("音轨", audioOpen, setAudioOpen, remuxFields.ToArray()));
                     }
+                    else if (selection.Count == 1 && subtitleTracks.Length == 0)
+                        subtitleFields.Add(Ui.DimCaption("源文件没有字幕流。").TextWrapping(TextWrapping.Wrap));
+                    advancedGroups.Add(Group("字幕", subtitleOpen, setSubtitleOpen, subtitleFields.ToArray()));
                 }
             }
             var outputFields = new List<Element>();
@@ -252,7 +324,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             if (selection.Count == 1 && editable)
             {
                 advancedGroups.Add(Group("保存为预设", presetOpen, setPresetOpen,
-                    Ui.DimCaption("预设保存编码参数，不包含路径、文件名、裁剪范围和源音轨选择。").TextWrapping(TextWrapping.Wrap),
+                    Ui.DimCaption("预设保存编码参数，不包含路径、文件名、裁剪范围和源音轨/字幕选择。").TextWrapping(TextWrapping.Wrap),
                     TextBox(Optional<string>.Of(presetName), setPresetName, header: "预设名称").AutomationName("预设名称"),
                     Button("保存为预设", () => _ = SaveAsync()).SubtleButton()));
             }

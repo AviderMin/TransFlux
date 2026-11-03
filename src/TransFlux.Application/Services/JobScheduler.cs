@@ -551,6 +551,10 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         var cts = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
         _jobCts[jobId] = cts;
         ReservedOutput? reserved = null;
+        // Once the job enters Committing, the output may exist on disk even if the database or
+        // journal write fails. Every cleanup path must then preserve staging and reservation for
+        // RecoveryService/manual inspection instead of deleting the only verified output.
+        var preserveAttemptArtifacts = false;
         try
         {
             if (!await TryTransitionAsync(jobId, JobState.Preflighting, cts.Token).ConfigureAwait(false))
@@ -697,6 +701,9 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     PlanSnapshot = plan,
                     CoreHash = plan.CoreHash,
                     DeviceIdentity = candidate.DeviceId,
+                    // The candidate actually being executed, not necessarily CandidatePaths[0]
+                    // after automatic fallback; diagnostics must report the real path.
+                    ExecutedCandidateId = candidate.CandidateId,
                     TempPath = tempPath,
                     ReservedFinalPath = reserved.FinalPath,
                     State = AttemptState.Created,
@@ -892,6 +899,7 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     await FinishCanceledAsync(jobId).ConfigureAwait(false);
                     return;
                 }
+                preserveAttemptArtifacts = true;
                 await _store.UpdateAttemptAsync(attempt with { State = AttemptState.Committing }, CancellationToken.None).ConfigureAwait(false);
 
                 CommitResult commit;
@@ -922,8 +930,8 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                     await MarkAttemptTerminalAsync(attempt.AttemptId, AttemptState.Failed, failure, null, null, null).ConfigureAwait(false);
                     // Committing -> NeedsAttention (never Failed after the commit boundary).
                     await TryNeedsAttentionAsync(jobId, failure, CancellationToken.None).ConfigureAwait(false);
-                    ReleaseQuietly(reservedOutput);
-                    reserved = null;
+                    // Keep the reservation, work directory, staged temp and journal: the commit may
+                    // have crossed rename/publish before failing, and this may be the only copy.
                     return;
                 }
 
@@ -956,13 +964,19 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         catch (OperationCanceledException)
         {
             _activeAttempts.TryRemove(jobId, out _);
-            ReleaseQuietly(reserved);
+            if (!preserveAttemptArtifacts)
+            {
+                ReleaseQuietly(reserved);
+            }
             await FinishCanceledAsync(jobId).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _activeAttempts.TryRemove(jobId, out _);
-            ReleaseQuietly(reserved);
+            if (!preserveAttemptArtifacts)
+            {
+                ReleaseQuietly(reserved);
+            }
             await FailFromCurrentAsync(jobId,
                 FailureInfo.Of(FailureCode.Unknown, "error.unexpected", ex.Message), CancellationToken.None).ConfigureAwait(false);
         }
@@ -1166,13 +1180,16 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         ReleaseQuietly(reserved);
     }
 
+    /// <summary>Combined cleanup for an attempt that never crossed the commit boundary.
+    /// Releases the naming reservation and deletes the attempt work directory.</summary>
     private void ReleaseQuietly(ReservedOutput? reserved)
     {
         if (reserved is null)
         {
             return;
         }
-        try { _outputPaths.Release(reserved); } catch { }
+        try { _outputPaths.ReleaseReservation(reserved); } catch { }
+        try { _outputPaths.DeleteWorkDirectory(reserved); } catch { }
     }
 
     private void DeleteTempQuietly(string? path)

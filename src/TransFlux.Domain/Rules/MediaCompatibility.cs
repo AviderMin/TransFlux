@@ -15,6 +15,12 @@ public static class MediaCompatibility
     public static IReadOnlyList<CompatibilityIssue> Validate(ConversionRequest request, SourceSnapshot source)
     {
         var issues = new List<CompatibilityIssue>();
+        if (request.RequestVersion is < 1 or > 2)
+        {
+            issues.Add(CompatibilityIssue.Block("REQUEST_VERSION",
+                $"不支持的请求版本 {request.RequestVersion}；当前支持版本 1 和 2。"));
+            return issues;
+        }
         switch (request.Mode)
         {
             case ConversionMode.VideoTranscode:
@@ -57,6 +63,8 @@ public static class MediaCompatibility
         if (s.ColorClassification is not ColorClassification.SdrBt709)
             issues.Add(CompatibilityIssue.Block("NON_SDR",
                 "Only verified SDR BT.709 video may be transcoded. Use Remux for compatible HDR sources."));
+        if (r.RequestVersion >= 2 && SelectPrimaryVideo(r, s) is null)
+            issues.Add(CompatibilityIssue.Block("VIDEO_SELECTION", "所选视频轨不存在或不是视频轨，请重新选择。"));
         var v = SelectPrimaryVideo(r, s);
         if (v is { BitDepth: > 8 })
             issues.Add(CompatibilityIssue.Block("HIGH_BIT_DEPTH", "First release transcodes only 8-bit video."));
@@ -78,6 +86,28 @@ public static class MediaCompatibility
             issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose an audio container."));
         else if (!OutputFormatCatalog.AudioCodecs(r.Container).Contains(r.Audio.Codec))
             issues.Add(CompatibilityIssue.Block("CODEC_CONTAINER", "Audio codec does not match container."));
+        if (r.RequestVersion >= 2)
+        {
+            // Audio extraction is explicitly single-track. Never let a multi-track selection
+            // degrade into silently writing only the first track.
+            switch (r.AudioTracks.Mode)
+            {
+                case AudioSelectionMode.None:
+                    issues.Add(CompatibilityIssue.Block("AUDIO_EXTRACT_NONE",
+                        "音频提取需要输出一条音轨，当前设置为不输出音轨，请选择一条源音轨。"));
+                    break;
+                case AudioSelectionMode.Explicit when r.AudioTracks.SourceStreamIndices.Count > 1:
+                    issues.Add(CompatibilityIssue.Block("AUDIO_EXTRACT_SINGLE",
+                        "音频提取一次只输出一条音轨，请只选择一条源音轨。"));
+                    break;
+                case AudioSelectionMode.Explicit when r.AudioTracks.SourceStreamIndices.Count == 0:
+                    issues.Add(CompatibilityIssue.Block("AUDIO_EXTRACT_SINGLE",
+                        "音频提取一次只输出一条音轨，请选择一条源音轨或使用自动。"));
+                    break;
+            }
+            if (s.HasAudio && SelectPrimaryAudio(r, s) is null)
+                issues.Add(CompatibilityIssue.Block("AUDIO_EXTRACT_TRACK", "所选音轨不存在，请重新选择。"));
+        }
         if (r.Audio.Codec == AudioCodec.Flac)
         {
             var a = SelectPrimaryAudio(r, s);
@@ -171,6 +201,17 @@ public static class MediaCompatibility
         // other containers cannot carry them, so they are dropped there.
         bool KeepAttachments(ContainerFormat c) => c == ContainerFormat.Mkv;
 
+        if (r.RequestVersion >= 2)
+        {
+            var selection = StreamSelectionResolver.Resolve(r, s);
+            var wanted = new HashSet<int>();
+            if (selection.Video is { } video) wanted.Add(video.SourceIndex);
+            foreach (var audio in selection.Audio) wanted.Add(audio.SourceIndex);
+            foreach (var subtitle in selection.Subtitles) wanted.Add(subtitle.SourceIndex);
+            return s.Streams.Where(st => IsRemuxStream(st, KeepAttachments(r.Container))
+                && (st.Kind == MediaKind.Attachment || wanted.Contains(st.SourceIndex))).ToList();
+        }
+
         if (r.SelectedStreamIndices.Count == 0)
         {
             return s.Streams.Where(st => IsRemuxStream(st, KeepAttachments(r.Container))).ToList();
@@ -187,6 +228,7 @@ public static class MediaCompatibility
 
     public static StreamDescriptor? SelectPrimaryVideo(ConversionRequest r, SourceSnapshot s)
     {
+        if (r.RequestVersion >= 2) return StreamSelectionResolver.Resolve(r, s).Video;
         foreach (var idx in r.SelectedStreamIndices)
         {
             var st = s.Streams.FirstOrDefault(x => x.SourceIndex == idx);
@@ -197,6 +239,12 @@ public static class MediaCompatibility
 
     public static StreamDescriptor? SelectPrimaryAudio(ConversionRequest r, SourceSnapshot s)
     {
+        if (r.RequestVersion >= 2)
+        {
+            if (r.AudioTracks.Mode == AudioSelectionMode.None) return null;
+            if (r.AudioTracks.Mode == AudioSelectionMode.Auto) return s.PrimaryAudio;
+            return StreamSelectionResolver.Resolve(r, s).Audio.FirstOrDefault();
+        }
         foreach (var idx in r.SelectedStreamIndices)
         {
             var st = s.Streams.FirstOrDefault(x => x.SourceIndex == idx);

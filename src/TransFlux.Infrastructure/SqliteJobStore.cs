@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using TransFlux.Application.Contracts;
@@ -19,7 +20,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
         "id, request_json, source_fingerprint_json, enqueue_order, state, revision, active_attempt_id, created_utc, updated_utc, retry_of, request_hash, source_path";
 
     private const string AttemptColumns =
-        "id, job_id, ordinal, plan_json, core_hash, device_identity, temp_path, reserved_final_path, state, started_utc, ended_utc, exit_code, failure_json, fallback_reason, stderr_tail";
+        "id, job_id, ordinal, plan_json, core_hash, device_identity, temp_path, reserved_final_path, state, started_utc, ended_utc, exit_code, failure_json, fallback_reason, stderr_tail, executed_candidate_id";
 
     private const string OutputColumns =
         "job_id, attempt_id, final_path, size, verification_json, committed_utc, commit_token";
@@ -45,16 +46,22 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
     };
 
     private readonly string _databasePath;
+    private readonly IFileSystemService _fileSystem;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SqliteConnection? _connection;
     private bool _initialized;
     private long _lastEnqueueOrder;
 
-    public SqliteJobStore(string databasePath)
+    public SqliteJobStore(string databasePath) : this(databasePath, new WindowsFileSystemService())
+    {
+    }
+
+    public SqliteJobStore(string databasePath, IFileSystemService fileSystem)
     {
         if (string.IsNullOrWhiteSpace(databasePath))
             throw new ArgumentException("A database path is required.", nameof(databasePath));
         _databasePath = Path.GetFullPath(databasePath);
+        _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
     }
 
     public string DatabasePath => _databasePath;
@@ -378,7 +385,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
         return InGateAsync(async conn =>
         {
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO attempts(" + AttemptColumns + ") VALUES($id,$job,$ord,$plan,$core,$dev,$temp,$final,$state,$started,$ended,$exit,$fail,$fallback,$stderr);";
+            cmd.CommandText = "INSERT INTO attempts(" + AttemptColumns + ") VALUES($id,$job,$ord,$plan,$core,$dev,$temp,$final,$state,$started,$ended,$exit,$fail,$fallback,$stderr,$exec);";
             cmd.Parameters.AddWithValue("$id", attempt.AttemptId.ToString());
             cmd.Parameters.AddWithValue("$job", attempt.JobId.ToString());
             cmd.Parameters.AddWithValue("$ord", attempt.Ordinal);
@@ -394,6 +401,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             cmd.Parameters.AddWithValue("$fail", attempt.Failure is null ? DBNull.Value : CanonicalJson.Serialize(attempt.Failure));
             cmd.Parameters.AddWithValue("$fallback", (object?)attempt.FallbackReason ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$stderr", (object?)attempt.StderrTail ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$exec", (object?)attempt.ExecutedCandidateId ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }, ct);
     }
@@ -407,7 +415,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             cmd.CommandText =
                 "UPDATE attempts SET job_id=$job, ordinal=$ord, plan_json=$plan, core_hash=$core, device_identity=$dev, " +
                 "temp_path=$temp, reserved_final_path=$final, state=$state, started_utc=$started, ended_utc=$ended, " +
-                "exit_code=$exit, failure_json=$fail, fallback_reason=$fallback, stderr_tail=$stderr WHERE id=$id;";
+                "exit_code=$exit, failure_json=$fail, fallback_reason=$fallback, stderr_tail=$stderr, executed_candidate_id=$exec WHERE id=$id;";
             cmd.Parameters.AddWithValue("$job", attempt.JobId.ToString());
             cmd.Parameters.AddWithValue("$ord", attempt.Ordinal);
             cmd.Parameters.AddWithValue("$plan", CanonicalJson.Serialize(attempt.PlanSnapshot));
@@ -422,6 +430,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             cmd.Parameters.AddWithValue("$fail", attempt.Failure is null ? DBNull.Value : CanonicalJson.Serialize(attempt.Failure));
             cmd.Parameters.AddWithValue("$fallback", (object?)attempt.FallbackReason ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$stderr", (object?)attempt.StderrTail ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$exec", (object?)attempt.ExecutedCandidateId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$id", attempt.AttemptId.ToString());
             var rows = await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             if (rows == 0)
@@ -823,13 +832,13 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             return (IReadOnlyList<Job>)updated;
         }, ct);
 
-    private static async Task RecoverNeedsAttentionJobsAsync(SqliteConnection conn, CancellationToken ct)
+    private async Task RecoverNeedsAttentionJobsAsync(SqliteConnection conn, CancellationToken ct)
     {
         var candidates = new List<(Guid JobId, long Revision, Guid AttemptId, DateTimeOffset CommittedUtc)>();
         using (var cmd = conn.CreateCommand())
         {
             cmd.CommandText =
-                "SELECT j.id, j.revision, j.updated_utc, o.attempt_id, o.committed_utc FROM jobs j " +
+                "SELECT j.id, j.revision, j.updated_utc, o.attempt_id, o.committed_utc, o.final_path, o.size, o.commit_token FROM jobs j " +
                 "JOIN outputs o ON o.attempt_id=(" +
                 "SELECT o2.attempt_id FROM outputs o2 WHERE o2.job_id=j.id ORDER BY o2.committed_utc DESC LIMIT 1) " +
                 "WHERE j.state=$attention AND NOT EXISTS(" +
@@ -846,6 +855,18 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
                 // An output predating the NeedsAttention transition belongs to an older attempt
                 // and must not make a later failed attempt look successful.
                 if (committedUtc < jobUpdatedUtc) continue;
+
+                // A database row only records that a commit was intended. The file must still be
+                // the same one: existence and size are mandatory, and the journal hash is checked
+                // whenever the row still carries one.
+                var finalPath = reader.GetString(5);
+                var recordedSize = reader.GetInt64(6);
+                var commitToken = reader.GetString(7);
+                if (!await IsRecordedOutputVerifiedAsync(conn, finalPath, recordedSize, commitToken, ct).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
                 candidates.Add((Guid.Parse(reader.GetString(0)), reader.GetInt64(1),
                     Guid.Parse(reader.GetString(3)), committedUtc));
             }
@@ -882,6 +903,67 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             await jobCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
         tx.Commit();
+    }
+
+    /// <summary>Proves that a recorded output still refers to the committed file. Missing files,
+    /// size mismatches and content-hash mismatches all keep the job in NeedsAttention.</summary>
+    private async Task<bool> IsRecordedOutputVerifiedAsync(
+        SqliteConnection conn, string finalPath, long recordedSize, string commitToken, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(finalPath) || !_fileSystem.FileExists(finalPath))
+        {
+            return false;
+        }
+
+        long actualSize;
+        try
+        {
+            actualSize = _fileSystem.GetFileLength(finalPath);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        if (recordedSize > 0 && actualSize != recordedSize)
+        {
+            return false;
+        }
+
+        string? expectedHash = null;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT content_sha256 FROM commit_journal WHERE commit_token=$token;";
+            cmd.Parameters.AddWithValue("$token", commitToken);
+            var value = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            expectedHash = value is null or DBNull ? null : (string)value;
+        }
+        if (string.IsNullOrEmpty(expectedHash))
+        {
+            return true;
+        }
+
+        try
+        {
+            var actualHash = await ComputeFileSha256Async(finalPath, ct).ConfigureAwait(false);
+            return string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<string> ComputeFileSha256Async(string path, CancellationToken ct)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false);
+        return Convert.ToHexString(hash);
     }
 
     // ---- Helpers ----
@@ -942,6 +1024,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
         Failure = r.IsDBNull(12) ? null : JsonSerializer.Deserialize<FailureInfo>(r.GetString(12), Json),
         FallbackReason = r.IsDBNull(13) ? null : r.GetString(13),
         StderrTail = r.IsDBNull(14) ? null : r.GetString(14),
+        ExecutedCandidateId = r.IsDBNull(15) ? null : r.GetString(15),
     };
 
     private static OutputRecord ReadOutput(SqliteDataReader r) => new()
@@ -1102,6 +1185,9 @@ CREATE INDEX ix_journal_phase ON commit_journal(phase);
 "),
         new(3, @"
 ALTER TABLE commit_journal ADD COLUMN content_sha256 TEXT;
+"),
+        new(4, @"
+ALTER TABLE attempts ADD COLUMN executed_candidate_id TEXT;
 "),
     };
 }

@@ -30,7 +30,7 @@ public sealed class SqliteJobStoreTests
             var versions = new List<long>();
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) versions.Add(reader.GetInt64(0));
-            Assert.Equal(new long[] { 1, 2, 3 }, versions.ToArray());
+            Assert.Equal(new long[] { 1, 2, 3, 4 }, versions.ToArray());
         }
 
         using (var modeCmd = conn.CreateCommand())
@@ -263,7 +263,45 @@ public sealed class SqliteJobStoreTests
     }
 
     [Fact]
-    public async Task MarkActiveJobsInterrupted_RecoversNeedsAttentionWithOutputAndNoOpenJournal()
+    public async Task MarkActiveJobsInterrupted_RecoversNeedsAttentionWithVerifiedOutputAndNoOpenJournal()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+
+        var updated = new DateTimeOffset(2026, 1, 2, 4, 0, 0, TimeSpan.Zero);
+        var final = dir.NewFile("recovered.mp4", new string('x', 42));
+        var job = TestData.NewJob(state: JobState.NeedsAttention, revision: 4, enqueueOrder: 1) with
+        {
+            UpdatedUtc = updated,
+        };
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Failed };
+        job = job with { ActiveAttemptId = attempt.AttemptId };
+        await store.CreateJobAsync(job, default);
+        await store.CreateAttemptAsync(attempt, default);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = final,
+            Size = 42,
+            VerificationSummary = "recovered",
+            CommittedUtc = updated.AddMinutes(1),
+            CommitToken = "recover-token",
+        }, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        var recoveredJob = await store.GetJobAsync(job.JobId, default);
+        Assert.Equal(JobState.Succeeded, recoveredJob!.State);
+        Assert.Null(recoveredJob.ActiveAttemptId);
+        var recoveredAttempt = await store.GetAttemptAsync(attempt.AttemptId, default);
+        Assert.Equal(AttemptState.Succeeded, recoveredAttempt!.State);
+        Assert.Equal(updated.AddMinutes(1), recoveredAttempt.EndedUtc);
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_NeedsAttentionWithMissingFinal_StaysNeedsAttention()
     {
         using var dir = new TempDir();
         await using var store = new SqliteJobStore(DbPath(dir));
@@ -282,9 +320,9 @@ public sealed class SqliteJobStoreTests
         {
             JobId = job.JobId,
             AttemptId = attempt.AttemptId,
-            FinalPath = @"C:\out\recovered.mp4",
+            FinalPath = Path.Combine(dir.Path, "missing.mp4"),
             Size = 42,
-            VerificationSummary = "recovered",
+            VerificationSummary = "recorded but gone",
             CommittedUtc = updated.AddMinutes(1),
             CommitToken = "recover-token",
         }, default);
@@ -292,10 +330,195 @@ public sealed class SqliteJobStoreTests
         await store.MarkActiveJobsInterruptedAsync(default);
 
         var recoveredJob = await store.GetJobAsync(job.JobId, default);
-        Assert.Equal(JobState.Succeeded, recoveredJob!.State);
-        Assert.Null(recoveredJob.ActiveAttemptId);
-        var recoveredAttempt = await store.GetAttemptAsync(attempt.AttemptId, default);
-        Assert.Equal(AttemptState.Succeeded, recoveredAttempt!.State);
-        Assert.Equal(updated.AddMinutes(1), recoveredAttempt.EndedUtc);
+        Assert.Equal(JobState.NeedsAttention, recoveredJob!.State);
+        var unchangedAttempt = await store.GetAttemptAsync(attempt.AttemptId, default);
+        Assert.Equal(AttemptState.Failed, unchangedAttempt!.State);
+        Assert.Single(await store.GetOutputsForJobAsync(job.JobId, default));
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_NeedsAttentionWithSizeMismatch_StaysNeedsAttention()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+
+        var updated = new DateTimeOffset(2026, 1, 2, 4, 0, 0, TimeSpan.Zero);
+        var final = dir.NewFile("wrong-size.mp4", new string('x', 10));
+        var job = TestData.NewJob(state: JobState.NeedsAttention, revision: 4, enqueueOrder: 1) with
+        {
+            UpdatedUtc = updated,
+        };
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Failed };
+        job = job with { ActiveAttemptId = attempt.AttemptId };
+        await store.CreateJobAsync(job, default);
+        await store.CreateAttemptAsync(attempt, default);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = final,
+            Size = 42,
+            VerificationSummary = "size mismatch",
+            CommittedUtc = updated.AddMinutes(1),
+            CommitToken = "recover-token",
+        }, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(job.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task Attempt_RoundTrips_ExecutedCandidateId()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+        var job = TestData.NewJob();
+        await store.CreateJobAsync(job, default);
+
+        var attempt = TestData.NewAttempt(job.JobId) with { ExecutedCandidateId = "cpu-x264" };
+        await store.CreateAttemptAsync(attempt, default);
+
+        var loaded = await store.GetAttemptAsync(attempt.AttemptId, default);
+        Assert.Equal("cpu-x264", loaded!.ExecutedCandidateId);
+
+        await store.UpdateAttemptAsync(loaded with { ExecutedCandidateId = "nvidia:h264_nvenc:gpu0" }, default);
+        Assert.Equal("nvidia:h264_nvenc:gpu0",
+            (await store.GetAttemptAsync(attempt.AttemptId, default))!.ExecutedCandidateId);
+    }
+
+    [Fact]
+    public async Task Initialize_ReappliesMigration4_WhenExecutedCandidateColumnIsMissing()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        await using (var store = new SqliteJobStore(db))
+        {
+            await store.InitializeAsync(default);
+        }
+
+        // Simulate a database created before migration 4: remove its column and migration row.
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "ALTER TABLE attempts DROP COLUMN executed_candidate_id; DELETE FROM schema_migrations WHERE version=4;";
+            cmd.ExecuteNonQuery();
+        }
+
+        await using (var store = new SqliteJobStore(db))
+        {
+            await store.InitializeAsync(default);
+        }
+
+        using var check = new SqliteConnection($"Data Source={db}");
+        check.Open();
+        using (var cmd = check.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('attempts') WHERE name='executed_candidate_id';";
+            Assert.Equal(1L, Convert.ToInt64(cmd.ExecuteScalar()));
+        }
+        using (var cmd = check.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=4;";
+            Assert.Equal(1L, Convert.ToInt64(cmd.ExecuteScalar()));
+        }
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_NeedsAttentionWithJournalHashMismatch_StaysNeedsAttention()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+
+        var updated = new DateTimeOffset(2026, 1, 2, 4, 0, 0, TimeSpan.Zero);
+        var final = dir.NewFile("hash-mismatch.mp4", new string('x', 42));
+        var job = TestData.NewJob(state: JobState.NeedsAttention, revision: 4, enqueueOrder: 1) with
+        {
+            UpdatedUtc = updated,
+        };
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Failed };
+        job = job with { ActiveAttemptId = attempt.AttemptId };
+        await store.CreateJobAsync(job, default);
+        await store.CreateAttemptAsync(attempt, default);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = final,
+            Size = 42,
+            CommittedUtc = updated.AddMinutes(1),
+            CommitToken = "hash-token",
+        }, default);
+
+        var wrongHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes("different content")));
+        var journal = new CommitJournalEntry
+        {
+            CommitToken = "hash-token",
+            AttemptId = attempt.AttemptId,
+            JobId = job.JobId,
+            Phase = CommitPhase.Failed,
+            TempPath = Path.Combine(dir.Path, "gone.tmp"),
+            FinalPath = final,
+            SizeBytes = 42,
+            UpdatedUtc = updated,
+        };
+        await ((ICommitJournalContentStore)store)
+            .UpsertJournalWithContentHashAsync(journal, wrongHash, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(job.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_NeedsAttentionWithMatchingJournalHash_RecoversSucceeded()
+    {
+        using var dir = new TempDir();
+        await using var store = new SqliteJobStore(DbPath(dir));
+        await store.InitializeAsync(default);
+
+        var updated = new DateTimeOffset(2026, 1, 2, 4, 0, 0, TimeSpan.Zero);
+        var final = dir.NewFile("hash-match.mp4", new string('x', 42));
+        var job = TestData.NewJob(state: JobState.NeedsAttention, revision: 4, enqueueOrder: 1) with
+        {
+            UpdatedUtc = updated,
+        };
+        var attempt = TestData.NewAttempt(job.JobId) with { State = AttemptState.Failed };
+        job = job with { ActiveAttemptId = attempt.AttemptId };
+        await store.CreateJobAsync(job, default);
+        await store.CreateAttemptAsync(attempt, default);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = final,
+            Size = 42,
+            CommittedUtc = updated.AddMinutes(1),
+            CommitToken = "hash-token-ok",
+        }, default);
+
+        var matchingHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(final)));
+        var journal = new CommitJournalEntry
+        {
+            CommitToken = "hash-token-ok",
+            AttemptId = attempt.AttemptId,
+            JobId = job.JobId,
+            Phase = CommitPhase.Failed,
+            TempPath = Path.Combine(dir.Path, "gone.tmp"),
+            FinalPath = final,
+            SizeBytes = 42,
+            UpdatedUtc = updated,
+        };
+        await ((ICommitJournalContentStore)store)
+            .UpsertJournalWithContentHashAsync(journal, matchingHash, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
     }
 }

@@ -94,6 +94,9 @@ public sealed record Attempt
     public required ValidatedPlan PlanSnapshot { get; init; }
     public string CoreHash { get; init; } = string.Empty;
     public string? DeviceIdentity { get; init; }
+    /// <summary>CandidateId of the execution path this attempt actually ran. Null for legacy rows
+    /// written before the field existed; consumers must not guess it from CandidatePaths[0].</summary>
+    public string? ExecutedCandidateId { get; init; }
     public required string TempPath { get; init; }
     public required string ReservedFinalPath { get; init; }
     public AttemptState State { get; init; } = AttemptState.Created;

@@ -103,6 +103,89 @@ public class SubtitlePolicyTests
     }
 
     [Fact]
+    public void LegacyV1_AudioOnlySelection_StillFiltersSubtitlesOut()
+    {
+        var streams = new List<StreamDescriptor>
+        {
+            TestData.Video(index: 0), TestData.Audio(index: 1),
+            TestData.Subtitle(index: 2, codec: "subrip"), TestData.Subtitle(index: 3, codec: "ass"),
+        };
+        var source = TestData.Source(streams);
+        var legacy = TestData.Request(selected: new[] { 1 });
+        Assert.Equal(1, legacy.RequestVersion);
+        Assert.Empty(SubtitlePolicy.SelectForTranscode(legacy, source).Included);
+        Assert.Equal(2, SubtitlePolicy.SelectForTranscode(TestData.Request(), source).Included.Count);
+    }
+
+    [Fact]
+    public void V2_SelectingAnAudioTrack_DoesNotChangeSubtitlePreservation()
+    {
+        var streams = new List<StreamDescriptor>
+        {
+            TestData.Video(index: 0), TestData.Audio(index: 1),
+            TestData.Subtitle(index: 2, codec: "subrip"), TestData.Subtitle(index: 3, codec: "ass"),
+        };
+        var request = TestData.Request(requestVersion: 2, audioTracks: AudioSelection.Tracks(1));
+        var selection = SubtitlePolicy.SelectForTranscode(request, TestData.Source(streams));
+        Assert.Equal(new[] { 2, 3 }, selection.Included.Select(t => t.Stream.SourceIndex));
+    }
+
+    [Fact]
+    public void V2_SubtitleNone_ExcludesEverythingWhileAudioSelectionIsIndependent()
+    {
+        var streams = new List<StreamDescriptor>
+        {
+            TestData.Video(index: 0), TestData.Audio(index: 1), TestData.Audio(index: 3),
+            TestData.Subtitle(index: 2, codec: "subrip"),
+        };
+        var source = TestData.Source(streams);
+        var request = TestData.Request(requestVersion: 2,
+            audioTracks: AudioSelection.Tracks(3), subtitles: SubtitleSelection.None);
+        var resolved = StreamSelectionResolver.Resolve(request, source);
+        Assert.Equal(new[] { 3 }, resolved.Audio.Select(a => a.SourceIndex));
+        Assert.Empty(SubtitlePolicy.SelectForTranscode(request, source).Included);
+    }
+
+    [Fact]
+    public void V2_SubtitleExplicit_SelectsOnlyListedTracks()
+    {
+        var streams = new List<StreamDescriptor>
+        {
+            TestData.Video(index: 0), TestData.Audio(index: 1),
+            TestData.Subtitle(index: 2, codec: "subrip"), TestData.Subtitle(index: 3, codec: "ass"),
+        };
+        var request = TestData.Request(requestVersion: 2,
+            audioTracks: AudioSelection.Auto, subtitles: SubtitleSelection.Tracks(3));
+        var selection = SubtitlePolicy.SelectForTranscode(request, TestData.Source(streams));
+        Assert.Equal(3, Assert.Single(selection.Included).Stream.SourceIndex);
+    }
+
+    [Fact]
+    public void V2_AudioNone_ProducesNoAudio_WhileSubtitlesDefaultToAll()
+    {
+        var streams = new List<StreamDescriptor>
+        {
+            TestData.Video(index: 0), TestData.Audio(index: 1),
+            TestData.Subtitle(index: 2, codec: "subrip"), TestData.Subtitle(index: 3, codec: "ass"),
+        };
+        var request = TestData.Request(requestVersion: 2, audioTracks: AudioSelection.None);
+        var resolved = StreamSelectionResolver.Resolve(request, TestData.Source(streams));
+        Assert.Empty(resolved.Audio);
+        Assert.Equal(new[] { 2, 3 }, resolved.Subtitles.Select(s => s.SourceIndex));
+    }
+
+    [Fact]
+    public void V2_VideoExplicit_PinsSingleSourceVideo()
+    {
+        var v0 = TestData.Video(index: 0, isDefault: true);
+        var v1 = TestData.Video(index: 1, isDefault: false);
+        var source = TestData.Source(new[] { v0, v1, TestData.Audio(index: 2) });
+        var request = TestData.Request(requestVersion: 2, video: VideoSelection.Stream(1));
+        Assert.Same(v1, StreamSelectionResolver.Resolve(request, source).Video);
+        Assert.Same(v0, StreamSelectionResolver.Resolve(TestData.Request(requestVersion: 2), source).Video);
+    }
+
+    [Fact]
     public void TargetEncoder_QualityValues()
     {
         Assert.Equal("mov_text", SubtitlePolicy.TargetEncoder(ContainerFormat.Mp4, TestData.Subtitle(codec: "subrip")));

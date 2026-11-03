@@ -363,6 +363,8 @@ internal sealed class FakeOutputPathService : IOutputPathService
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "tf-tests", Guid.NewGuid().ToString("N"));
     public List<ReservedOutput> Released { get; } = new();
+    public List<ReservedOutput> ReservationReleased { get; } = new();
+    public List<ReservedOutput> WorkDirectoriesDeleted { get; } = new();
     public Func<OutputReservationRequest, Result<ReservedOutput>>? OnReserve { get; set; }
 
     public Task<Result<ReservedOutput>> ReserveAsync(OutputReservationRequest request, CancellationToken ct)
@@ -373,10 +375,12 @@ internal sealed class FakeOutputPathService : IOutputPathService
         }
         var token = Guid.NewGuid().ToString("N");
         var extension = request.Container.Extension();
+        var workDirectory = Path.Combine(Root, "work-" + token);
+        Directory.CreateDirectory(workDirectory);
         var reserved = new ReservedOutput
         {
             FinalPath = Path.Combine(Root, $"out-{token}{extension}"),
-            WorkDirectory = Root,
+            WorkDirectory = workDirectory,
             CommitToken = token,
             Extension = extension,
         };
@@ -385,19 +389,42 @@ internal sealed class FakeOutputPathService : IOutputPathService
 
     public void Release(ReservedOutput reserved)
     {
-        lock (Released)
-        {
-            Released.Add(reserved);
-        }
+        lock (Released) { Released.Add(reserved); }
+        ReleaseReservation(reserved);
+        DeleteWorkDirectory(reserved);
+    }
+
+    public void ReleaseReservation(ReservedOutput reserved)
+    {
+        lock (ReservationReleased) { ReservationReleased.Add(reserved); }
+        TryDeleteFile(reserved.FinalPath + ".transflux-reserve");
+    }
+
+    public void DeleteWorkDirectory(ReservedOutput reserved)
+    {
+        lock (WorkDirectoriesDeleted) { WorkDirectoriesDeleted.Add(reserved); }
+        TryDeleteDirectory(reserved.WorkDirectory);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); } catch { }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 }
 
-internal sealed class FakeCommitter : IOutputCommitter, ICommitReconciler
+internal sealed class FakeCommitter : IOutputCommitter, ICommitReconciler, IOutputRecordVerifier
 {
     public Func<CommitRequest, CancellationToken, Task<CommitResult>>? OnCommit { get; set; }
     public Func<CommitJournalEntry, CancellationToken, Task<CommitResult>>? OnReconcile { get; set; }
+    public Func<OutputRecord, CancellationToken, Task<CommitResult>>? OnVerifyOutput { get; set; }
     public int CommitCalls { get; private set; }
     public int ReconcileCalls { get; private set; }
+    public int VerifyOutputCalls { get; private set; }
 
     public Task<CommitResult> CommitAsync(CommitRequest request, CancellationToken ct)
     {
@@ -426,6 +453,21 @@ internal sealed class FakeCommitter : IOutputCommitter, ICommitReconciler
             Success = true,
             CommitToken = entry.CommitToken,
             FinalPath = entry.FinalPath,
+        });
+    }
+
+    public Task<CommitResult> VerifyOutputAsync(OutputRecord output, CancellationToken ct)
+    {
+        VerifyOutputCalls++;
+        if (OnVerifyOutput is not null)
+        {
+            return OnVerifyOutput(output, ct);
+        }
+        return Task.FromResult(new CommitResult
+        {
+            Success = true,
+            CommitToken = output.CommitToken,
+            FinalPath = output.FinalPath,
         });
     }
 }

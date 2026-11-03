@@ -15,7 +15,7 @@ public static partial class DiagnosticReport
         var job = item.Execution;
         var attempt = job?.Attempt;
         var plan = attempt?.PlanSnapshot;
-        var candidate = plan?.CandidatePaths.FirstOrDefault();
+        var candidate = ResolveExecutedCandidate(attempt);
         var expected = plan?.ExpectedOutput;
         var failure = job?.Failure ?? d.Failure;
 
@@ -29,7 +29,8 @@ public static partial class DiagnosticReport
         sb.AppendLine();
         sb.AppendLine("-- 执行信息 --");
         sb.AppendLine("核心哈希: " + (attempt?.CoreHash ?? "—"));
-        sb.AppendLine("执行编码器: " + (candidate?.EncoderName ?? "—"));
+        sb.AppendLine("执行候选: " + (attempt?.ExecutedCandidateId ?? "未记录"));
+        sb.AppendLine("执行编码器: " + (candidate?.EncoderName ?? "未知"));
         sb.AppendLine("执行后端: " + (candidate?.Backend.ToString() ?? "—"));
         sb.AppendLine("设备: " + (candidate?.DeviceId ?? attempt?.DeviceIdentity ?? "—"));
         sb.AppendLine("回退原因: " + (attempt?.FallbackReason ?? "无"));
@@ -52,6 +53,20 @@ public static partial class DiagnosticReport
         sb.AppendLine("技术详情: " + (failure?.TechnicalDetail ?? "无"));
         sb.AppendLine("FFmpeg 尾部: " + (attempt?.StderrTail ?? "无"));
         return Redact(sb.ToString());
+    }
+
+    /// <summary>
+    /// Resolves the candidate an attempt actually executed. Historical rows may lack the id;
+    /// a single-candidate plan is unambiguous, otherwise the value is unknown and must not be
+    /// replaced by a guess such as CandidatePaths[0] (GPU failure followed by CPU success).
+    /// </summary>
+    public static ExecutionCandidate? ResolveExecutedCandidate(Attempt? attempt)
+    {
+        var plan = attempt?.PlanSnapshot;
+        if (plan is null) return null;
+        if (!string.IsNullOrEmpty(attempt!.ExecutedCandidateId))
+            return plan.CandidatePaths.FirstOrDefault(c => c.CandidateId == attempt.ExecutedCandidateId);
+        return plan.CandidatePaths.Count == 1 ? plan.CandidatePaths[0] : null;
     }
 
     /// <summary>Default privacy: absolute Windows/UNC paths and the current user profile are removed.</summary>

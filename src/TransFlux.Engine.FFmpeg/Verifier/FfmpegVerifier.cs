@@ -29,6 +29,7 @@ public sealed class FfmpegVerifier : IOutputVerifier
     public async Task<VerificationResult> VerifyAsync(VerificationRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (ct.IsCancellationRequested) ThrowCanceled(ct);
         var expected = request.Plan.ExpectedOutput;
         var outputPath = request.OutputPath;
 
@@ -43,7 +44,7 @@ public sealed class FfmpegVerifier : IOutputVerifier
 
         var probe = new FfmpegProbe(_core, ProbeTimeout);
         var probeResult = await probe.ProbeAsync(new SourceReference { AbsolutePath = outputPath }, ct).ConfigureAwait(false);
-        if (probeResult.IsCanceled) return new VerificationResult { Passed = false, Summary = "Verification canceled." };
+        if (probeResult.IsCanceled) ThrowCanceled(ct);
         if (!probeResult.IsSuccess || probeResult.Value is null)
             return VerificationResult.Fail(
                 probeResult.Failure ?? FailureInfo.Of(FailureCode.VerifyFailed, "verify.probe_failed", "ffprobe could not read output."),
@@ -55,6 +56,7 @@ public sealed class FfmpegVerifier : IOutputVerifier
         if (problems.Count == 0)
         {
             var decode = await SampleDecodeAsync(outputPath, actual.DurationUs, request.FullDecode, ct).ConfigureAwait(false);
+            if (decode.Canceled) ThrowCanceled(ct);
             if (!decode.Ok) problems.Add(decode.Error ?? "sampled decode failed");
         }
 
@@ -258,15 +260,16 @@ public sealed class FfmpegVerifier : IOutputVerifier
         }
     }
 
-    private async Task<(bool Ok, string? Error)> SampleDecodeAsync(string path, long? durationUs, bool full, CancellationToken ct)
+    internal async Task<(bool Ok, bool Canceled, string? Error)> SampleDecodeAsync(string path, long? durationUs, bool full, CancellationToken ct)
     {
         if (full)
         {
             var fullArgs = new List<string> { "-hide_banner", "-nostdin", "-v", "error", "-i", path, "-f", "null", "-" };
             var fullResult = await ProcessCapture.RunAsync(_core.FfmpegPath, fullArgs, TimeSpan.FromMinutes(10), 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+            if (fullResult.Canceled) return (false, true, null);
             return fullResult.TimedOut
-                ? (false, "full decode timed out")
-                : fullResult.ExitCode == 0 ? (true, null) : (false, $"full decode failed: {Trim(fullResult.Stderr)}");
+                ? (false, false, "full decode timed out")
+                : fullResult.ExitCode == 0 ? (true, false, null) : (false, false, $"full decode failed: {Trim(fullResult.Stderr)}");
         }
 
         var points = new List<TimeSpan> { TimeSpan.Zero };
@@ -291,11 +294,19 @@ public sealed class FfmpegVerifier : IOutputVerifier
             args.Add("-f"); args.Add("null"); args.Add("-");
 
             var result = await ProcessCapture.RunAsync(_core.FfmpegPath, args, TimeSpan.FromSeconds(20), 128 * 1024, 64 * 1024, ct).ConfigureAwait(false);
-            if (result.TimedOut) return (false, $"sampled decode at {point.TotalSeconds:0.###}s timed out");
-            if (result.ExitCode != 0) return (false, $"sampled decode at {point.TotalSeconds:0.###}s failed: {Trim(result.Stderr)}");
+            if (result.Canceled) return (false, true, null);
+            if (result.TimedOut) return (false, false, $"sampled decode at {point.TotalSeconds:0.###}s timed out");
+            if (result.ExitCode != 0) return (false, false, $"sampled decode at {point.TotalSeconds:0.###}s failed: {Trim(result.Stderr)}");
         }
-        return (true, null);
+        return (true, false, null);
     }
+
+    /// <summary>
+    /// Cancellation must surface as OCE so JobScheduler's existing catch marks the attempt/job
+    /// canceled; returning Passed=false would be misread as an ordinary verification failure.
+    /// </summary>
+    private static void ThrowCanceled(CancellationToken ct) =>
+        throw new OperationCanceledException("Verification canceled.", ct);
 
     private static string Trim(string value) => value.Length <= 500 ? value : value[^500..];
 }

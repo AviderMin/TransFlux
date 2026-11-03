@@ -78,10 +78,23 @@ public sealed class OutputPathService : IOutputPathService
         }
     }
 
+    /// <summary>Legacy combined cleanup kept for compatibility. Releases the naming reservation
+    /// and deletes the attempt work directory. Unresolved commits must not call this.</summary>
     public void Release(ReservedOutput reserved)
+    {
+        ReleaseReservation(reserved);
+        DeleteWorkDirectory(reserved);
+    }
+
+    public void ReleaseReservation(ReservedOutput reserved)
     {
         if (reserved is null) return;
         TryDeleteFile(OutputReservation.LockPath(reserved.FinalPath));
+    }
+
+    public void DeleteWorkDirectory(ReservedOutput reserved)
+    {
+        if (reserved is null) return;
         try
         {
             if (Directory.Exists(reserved.WorkDirectory)) Directory.Delete(reserved.WorkDirectory, recursive: true);

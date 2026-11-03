@@ -50,20 +50,48 @@ public class RecoveryServiceTests
     }
 
     [Fact]
-    public async Task PublishedJournal_IsClosed_AndOutputRecorded()
+    public async Task PublishedJournal_IsReconciledAndRecordsOutput()
     {
         var store = new InMemoryJobStore();
         var job = MakeJob(JobState.Committing);
         await store.CreateJobAsync(job, CancellationToken.None);
         var journal = MakeJournal(job.JobId, Guid.NewGuid(), CommitPhase.Published);
         await store.UpsertJournalAsync(journal, CancellationToken.None);
+        var committer = new FakeCommitter();
 
-        await RecoveryService.RunAsync(store, new FakeCommitter(), CancellationToken.None);
+        await RecoveryService.RunAsync(store, committer, CancellationToken.None);
 
+        // Published journals must go through the same identity reconciliation as Prepared ones.
+        Assert.Equal(1, committer.ReconcileCalls);
         Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
         var outputs = await store.GetOutputsForJobAsync(job.JobId, CancellationToken.None);
         Assert.Single(outputs);
         Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task PublishedJournal_ReconcileFailure_KeepsJournalAndMovesJobToNeedsAttention()
+    {
+        var store = new InMemoryJobStore();
+        var job = MakeJob(JobState.Committing);
+        await store.CreateJobAsync(job, CancellationToken.None);
+        var journal = MakeJournal(job.JobId, Guid.NewGuid(), CommitPhase.Published);
+        await store.UpsertJournalAsync(journal, CancellationToken.None);
+        var committer = new FakeCommitter
+        {
+            OnReconcile = (_, _) => Task.FromResult(new CommitResult
+            {
+                Success = false,
+                Failure = FailureInfo.Of(FailureCode.VerifyFailed, "COMMIT_PUBLISHED_MISSING", "final missing"),
+            }),
+        };
+
+        await RecoveryService.RunAsync(store, committer, CancellationToken.None);
+
+        Assert.Equal(1, committer.ReconcileCalls);
+        Assert.NotNull(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
+        Assert.Empty(await store.GetOutputsForJobAsync(job.JobId, CancellationToken.None));
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(job.JobId, default))!.State);
     }
 
     [Fact]
@@ -108,7 +136,7 @@ public class RecoveryServiceTests
     }
 
     [Fact]
-    public async Task ExistingOutput_ClosesJournal_WithoutCallingCommitter()
+    public async Task ExistingOutput_StillReconcilesIdentityBeforeClosingJournal()
     {
         var store = new InMemoryJobStore();
         var job = MakeJob(JobState.Succeeded);
@@ -129,8 +157,9 @@ public class RecoveryServiceTests
 
         await RecoveryService.RunAsync(store, committer, CancellationToken.None);
 
+        // A database output record is historical fact, not proof that the file still exists.
+        Assert.Equal(1, committer.ReconcileCalls);
         Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
-        Assert.Equal(0, committer.ReconcileCalls);
         Assert.Equal(0, committer.CommitCalls);
     }
 
@@ -148,6 +177,81 @@ public class RecoveryServiceTests
 
         Assert.Equal(1, committer.CommitCalls);
         Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CommittingJob_RecordedOutputMissingFinal_MovesToNeedsAttention()
+    {
+        var store = new InMemoryJobStore();
+        var job = MakeJob(JobState.Committing);
+        await store.CreateJobAsync(job, CancellationToken.None);
+        var attempt = MakeAttempt(job.JobId);
+        await store.CreateAttemptAsync(attempt, CancellationToken.None);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = @"C:\out\missing.mp4",
+            Size = 1234,
+            CommitToken = "t",
+            CommittedUtc = DateTimeOffset.UnixEpoch,
+        }, CancellationToken.None);
+        var committer = new FakeCommitter
+        {
+            OnVerifyOutput = (_, _) => Task.FromResult(new CommitResult
+            {
+                Success = false,
+                Failure = FailureInfo.Of(FailureCode.VerifyFailed, "COMMIT_OUTPUT_MISSING", "final missing"),
+            }),
+        };
+
+        await RecoveryService.RunAsync(store, committer, CancellationToken.None);
+
+        Assert.Equal(1, committer.VerifyOutputCalls);
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(job.JobId, default))!.State);
+        Assert.Single(await store.GetOutputsForJobAsync(job.JobId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CommittingJob_RecordedOutputVerified_MarksSucceeded()
+    {
+        var store = new InMemoryJobStore();
+        var job = MakeJob(JobState.Committing);
+        await store.CreateJobAsync(job, CancellationToken.None);
+        var attempt = MakeAttempt(job.JobId);
+        await store.CreateAttemptAsync(attempt, CancellationToken.None);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = job.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = @"C:\out\verified.mp4",
+            Size = 1234,
+            CommitToken = "t",
+            CommittedUtc = DateTimeOffset.UnixEpoch,
+        }, CancellationToken.None);
+        var committer = new FakeCommitter();
+
+        await RecoveryService.RunAsync(store, committer, CancellationToken.None);
+
+        Assert.Equal(1, committer.VerifyOutputCalls);
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
+        Assert.Equal(AttemptState.Succeeded, (await store.GetAttemptAsync(attempt.AttemptId, default))!.State);
+    }
+
+    private static Attempt MakeAttempt(Guid jobId)
+    {
+        var source = TestData.MakeSource();
+        return new Attempt
+        {
+            AttemptId = Guid.NewGuid(),
+            JobId = jobId,
+            Ordinal = 1,
+            PlanSnapshot = TestData.MakePlan(),
+            TempPath = @"C:\work\temp.mp4",
+            ReservedFinalPath = @"C:\out\final.mp4",
+            State = AttemptState.Committing,
+            StartedUtc = DateTimeOffset.UnixEpoch,
+        };
     }
 
     private sealed class PlainCommitter : IOutputCommitter

@@ -207,8 +207,12 @@ public sealed class WorkbenchStore : IDisposable
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException) { SetNotice(Notices.EnqueueFailed(ex.Message)); }
             }
+            // The card→job binding must be durable before the queue can run, whether or not
+            // the user had paused the queue. A paused enqueue that is not persisted would lose
+            // its visible card on the next crash.
+            var persisted = await PersistAsync().ConfigureAwait(false);
             // Never override a pause the user (or startup recovery) explicitly requested.
-            if (!wasPaused && await PersistAsync().ConfigureAwait(false))
+            if (!wasPaused && persisted)
                 await _jobs.ResumeQueueAsync(_lifetime.Token).ConfigureAwait(false);
         }
         finally
@@ -315,8 +319,10 @@ public sealed class WorkbenchStore : IDisposable
                 // The retry event may precede this return; preserve the original card identity.
                 _drafts.RemoveAll(d => d.MediaId != id && d.JobId == retry);
             }
+            // Same durability rule as StartAsync: persist the retry binding even while paused.
+            var persisted = await PersistAsync().ConfigureAwait(false);
             // Never override a pause the user (or startup recovery) explicitly requested.
-            if (!wasPaused && await PersistAsync().ConfigureAwait(false))
+            if (!wasPaused && persisted)
                 await _jobs.ResumeQueueAsync(_lifetime.Token).ConfigureAwait(false);
         }
         finally

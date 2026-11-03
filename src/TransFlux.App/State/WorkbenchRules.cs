@@ -19,13 +19,36 @@ public static class WorkbenchRules
     {
         if (draft.Snapshot is not { } source) return Array.Empty<CompatibilityIssue>();
         var o = draft.Options;
-        var issues = MediaCompatibility.Validate(o.ToRequest(draft.MediaId), source).ToList();
+        var request = o.ToRequest(draft.MediaId);
+        var issues = MediaCompatibility.Validate(request, source).ToList();
         if ((o.TrimStart.HasValue || o.TrimEnd.HasValue)
             && (o.TrimStart is not { } start || o.TrimEnd is not { } end || start < TimeSpan.Zero || end <= start
                 || source.DurationUs is long us && end.TotalMicroseconds > us))
             issues.Add(CompatibilityIssue.Block("TRIM_RANGE", "裁剪范围无效，请检查开始和结束时间。"));
         if (o.Mode == ConversionMode.VideoTranscode && source.SubtitleStreams.Any())
-            issues.Add(CompatibilityIssue.Warn("SUBTITLE_LOSS", "此输出将不包含字幕；需要保留时请选择兼容的转封装。"));
+        {
+            // Warning follows the resolved selection instead of assuming every transcode
+            // loses subtitles: auto-preserved or explicitly kept tracks must not warn loss.
+            var selection = StreamSelectionResolver.Resolve(request, source);
+            var subtitles = SubtitlePolicy.SelectForContainer(request.Container, selection.Subtitles);
+            if (subtitles.Included.Count == 0)
+            {
+                var reason = request.RequestVersion >= 2 && request.Subtitles.Mode == SubtitleSelectionMode.None
+                    ? "已选择不输出字幕"
+                    : subtitles.Warnings.Count > 0
+                        ? $"所选字幕轨无法写入 {request.Container.DisplayName()}"
+                        : "当前选流未包含字幕轨";
+                issues.Add(CompatibilityIssue.Warn("SUBTITLE_LOSS",
+                    $"此输出不包含字幕（{reason}）；源文件 {source.SubtitleStreams.Count()} 条字幕不会写入输出。"));
+            }
+            else if (subtitles.Warnings.Count > 0)
+            {
+                issues.Add(CompatibilityIssue.Warn("SUBTITLE_EXCLUDED",
+                    $"部分字幕轨无法写入 {request.Container.DisplayName()}，将不会出现在输出中。"));
+            }
+        }
+        foreach (var warning in StreamSelectionResolver.Resolve(request, source).Warnings)
+            issues.Add(CompatibilityIssue.Warn("STREAM_SELECTION", warning));
         return issues;
     }
     public static string IssueText(CompatibilityIssue issue) => issue.Code switch
@@ -39,6 +62,10 @@ public static class WorkbenchRules
         "TRIM_REMUX" => "转封装不支持裁剪，请清除裁剪或选择视频转码。",
         "TRIM_RANGE" => "裁剪范围无效，请检查开始和结束时间。",
         "BAD_CONTAINER" or "CODEC_CONTAINER" => "输出格式与编码不兼容，请重新选择输出格式。",
+        "AUDIO_EXTRACT_SINGLE" or "AUDIO_EXTRACT_NONE" or "AUDIO_EXTRACT_TRACK"
+            => "音频提取一次只输出一条音轨，请只选择一条源音轨。",
+        "SUBTITLE_LOSS" => issue.Message,
+        "SUBTITLE_EXCLUDED" => issue.Message,
         _ => issue.Message,
     };
     public static string FailureText(FailureInfo? failure) => failure?.Code switch

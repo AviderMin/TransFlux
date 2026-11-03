@@ -12,6 +12,9 @@ public enum SpeedTier { Faster = 0, Balanced = 1, Slower = 2 }
 public enum ResizeMode { KeepDisplaySize = 0, Max1080p = 1 }
 public enum MetadataPolicy { StripPersonalTags = 0, PreserveTitleAndChapters = 1 }
 public enum HardwareBackend { Auto = 0, Cpu = 1, NvidiaNvenc = 2, IntelQsv = 3, AmdAmf = 4 }
+public enum VideoSelectionMode { Auto = 0, Explicit = 1 }
+public enum AudioSelectionMode { Auto = 0, None = 1, Explicit = 2 }
+public enum SubtitleSelectionMode { AutoPreserve = 0, None = 1, Explicit = 2 }
 
 public static class ContainerFormats
 {
@@ -110,15 +113,78 @@ public sealed record OutputPolicy
     public string? FileNameOverride { get; init; }
 }
 
+/// <summary>
+/// Explicit single-video selection for RequestVersion 2. Auto resolves to the source's
+/// primary video stream; Explicit pins exactly one source stream index.
+/// </summary>
+public sealed record VideoSelection
+{
+    public VideoSelectionMode Mode { get; init; } = VideoSelectionMode.Auto;
+    public int? SourceStreamIndex { get; init; }
+
+    public static VideoSelection Auto => new();
+    public static VideoSelection Stream(int sourceStreamIndex) => new()
+    {
+        Mode = VideoSelectionMode.Explicit,
+        SourceStreamIndex = sourceStreamIndex,
+    };
+}
+
+/// <summary>
+/// RequestVersion 2 audio policy. Auto keeps every source audio track; None deliberately
+/// produces no audio; Explicit keeps exactly the listed source audio stream indices.
+/// </summary>
+public sealed record AudioSelection
+{
+    public AudioSelectionMode Mode { get; init; } = AudioSelectionMode.Auto;
+    public IReadOnlyList<int> SourceStreamIndices { get; init; } = Array.Empty<int>();
+
+    public static AudioSelection Auto => new();
+    public static AudioSelection None => new() { Mode = AudioSelectionMode.None };
+    public static AudioSelection Tracks(params int[] sourceStreamIndices) => new()
+    {
+        Mode = AudioSelectionMode.Explicit,
+        SourceStreamIndices = sourceStreamIndices,
+    };
+}
+
+/// <summary>
+/// RequestVersion 2 subtitle policy. AutoPreserve keeps every source subtitle the target
+/// container can carry; None deliberately emits no subtitles; Explicit keeps exactly the
+/// listed source subtitle stream indices. Burn-in is intentionally not part of this model.
+/// </summary>
+public sealed record SubtitleSelection
+{
+    public SubtitleSelectionMode Mode { get; init; } = SubtitleSelectionMode.AutoPreserve;
+    public IReadOnlyList<int> SourceStreamIndices { get; init; } = Array.Empty<int>();
+
+    public static SubtitleSelection AutoPreserve => new();
+    public static SubtitleSelection None => new() { Mode = SubtitleSelectionMode.None };
+    public static SubtitleSelection Tracks(params int[] sourceStreamIndices) => new()
+    {
+        Mode = SubtitleSelectionMode.Explicit,
+        SourceStreamIndices = sourceStreamIndices,
+    };
+}
+
 /// <summary>Immutable user request. Versioned separately from presets and plans.</summary>
 public sealed record ConversionRequest
 {
+    /// <summary>
+    /// Request schema version. Version 1 is the legacy model where SelectedStreamIndices
+    /// filters video, audio and subtitles together; version 2 uses the explicit selections
+    /// below and ignores SelectedStreamIndices. New requests are always written as version 2.
+    /// </summary>
     public int RequestVersion { get; init; } = 1;
     public required Guid SourceSnapshotId { get; init; }
     public ConversionMode Mode { get; init; } = ConversionMode.VideoTranscode;
     public ContainerFormat Container { get; init; } = ContainerFormat.Mp4;
     public VideoCodec VideoCodec { get; init; } = VideoCodec.H264;
+    /// <summary>Legacy request-v1 selection; kept verbatim so old snapshots keep their meaning.</summary>
     public IReadOnlyList<int> SelectedStreamIndices { get; init; } = Array.Empty<int>();
+    public VideoSelection VideoSelect { get; init; } = new();
+    public AudioSelection AudioTracks { get; init; } = new();
+    public SubtitleSelection Subtitles { get; init; } = new();
     public QualityTier Quality { get; init; } = QualityTier.Balanced;
     public SpeedTier Speed { get; init; } = SpeedTier.Balanced;
     public ResizeSpec Resize { get; init; } = ResizeSpec.KeepDisplay();

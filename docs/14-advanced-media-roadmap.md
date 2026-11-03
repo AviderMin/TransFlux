@@ -150,7 +150,7 @@ DV 重编码首批实验只允许不裁剪、不改帧率、不改变帧数/顺�
 
 | 阶段 | 目标和主要入口 | 完成条件 / 后续开关 |
 |---|---|---|
-| G0 可靠性闸门 | 先修 13 的 R01/R02/R03/R09/R10/R11；RecoveryService、JobScheduler、OutputPathService、WorkbenchStore、ProcessCapture | 真实文件/SQLite 故障注入通过，假成功/唯一临时成果丢失被阻止；UI 与实际选流一致 |
+| G0 可靠性闸门（✅ 2026-11-01 完成） | 先修 13 的 R01/R02/R03/R05/R07/R09/R10/R11；RecoveryService、JobScheduler、OutputPathService、WorkbenchStore、ProcessCapture | 真实文件/SQLite 故障注入通过，假成功/唯一临时成果丢失被阻止；UI 与实际选流一致；证据见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md) |
 | G1 媒体契约 | RequestTypes、StreamDescriptor、ValidatedPlan、FfprobeJsonParser、ColorClassifier、SubtitlePolicy、WorkbenchRules | v1 迁移、逐轨解析、LossReport、future-version 拒绝；全矩阵仍可回归。后续功能不直接消费原始用户请求 |
 | G2 无损保留 | OutputFormatCatalog、Planner、Verifier；音频 Copy 与安全 HDR/DV stream-copy | AC3/EAC3/TrueHD 与 HDR10/HLG 的小矩阵验证；DV 8.1 单列真实 RPU 验证。按 case 开放，不整体“Dolby=true” |
 | G3 文本字幕烧录 SDR | FilterGraph、prepare artifacts、Runner、OutputSettingsPanel | SRT/ASS/字体/转义/裁剪/旋转/VFR 通过，画面确实含字且策略正确；CPU 路线先开放 |
@@ -160,6 +160,12 @@ DV 重编码首批实验只允许不裁剪、不改帧率、不改变帧数/顺�
 | G7 Dolby 专项 | DV profile5/7、HDR10+ 动态重编码、受限 DV 重编码、可选专业 Atmos provider | 逐项专项样片与依赖/许可核查，有独立发布闸门；没有证据的功能保持禁用，不阻止已验收的普通能力发布 |
 
 推荐执行顺序 G0 → G1 → G2 → G3 → G4 → G5 → G6 → G7。不估计未经测量的开发天数；每阶段以可运行纵向切片结束，禁止一次性添加全部模型、空接口和假 UI。
+
+## 进度记录（2026-11-01）
+
+- **G0 可靠性闸门：已完成**。R01/R02/R03/R05/R07/R09/R10/R11 已修复并有失败测试→通过证据，见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md)。
+- **G1–G7：未开始**。Dolby 音频、Dolby Vision、HDR 转换、内封字幕烧录的支持矩阵与验证状态没有变化；本页首段的“待实现”仍然有效。
+- 本轮未生成新安装包，未进行真实 HDR/DV/Atmos 样片或 GPU 实机验收。
 
 ## 验证矩阵与可交付证据
 

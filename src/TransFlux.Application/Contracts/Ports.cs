@@ -80,11 +80,27 @@ public sealed record ReservedOutput
     public required string Extension { get; init; }
 }
 
-public interface IOutputPathService
+/// <summary>Releases only the naming/scheduling reservation (the lock file) for a final path.
+/// The attempt work directory and any staged output remain untouched.</summary>
+public interface IOutputReservationReleaser
+{
+    void ReleaseReservation(ReservedOutput reserved);
+}
+
+/// <summary>Deletes an attempt work directory (staging area). Callers must only use this after
+/// the attempt no longer needs to be recovered; unresolved commits keep their staging files.</summary>
+public interface IOutputWorkDirectoryCleaner
+{
+    void DeleteWorkDirectory(ReservedOutput reserved);
+}
+
+public interface IOutputPathService : IOutputReservationReleaser, IOutputWorkDirectoryCleaner
 {
     /// <summary>Preflights output permissions/space and reserves a non-existing final path
     /// plus an attempt work directory on the same volume.</summary>
     Task<Result<ReservedOutput>> ReserveAsync(OutputReservationRequest request, CancellationToken ct);
+    /// <summary>Legacy combined cleanup: releases the reservation and deletes the work directory.
+    /// Do not use after a failed or unresolved commit; use the narrow interfaces instead.</summary>
     void Release(ReservedOutput reserved);
 }
 

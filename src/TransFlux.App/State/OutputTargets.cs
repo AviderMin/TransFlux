@@ -11,9 +11,18 @@ public static class OutputTargets
     public static ConversionOptions WithMedia(ConversionOptions o, bool audio)
     {
         if (IsAudio(o) == audio) return o;
+        var next = o with { Mode = audio ? ConversionMode.AudioExtract : ConversionMode.VideoTranscode };
+        if (audio)
+        {
+            // Audio extraction is single-track: a multi-track video selection must not carry
+            // over into a request that could silently drop tracks.
+            var legacyCount = next.SelectedStreams.Count;
+            var explicitCount = next.AudioMode == AudioSelectionMode.Explicit ? next.AudioStreamIndices.Count : 0;
+            if (next.AudioMode == AudioSelectionMode.None || Math.Max(legacyCount, explicitCount) > 1)
+                next = next with { AudioMode = AudioSelectionMode.Auto, AudioStreamIndices = Array.Empty<int>(), SelectedStreams = Array.Empty<int>() };
+        }
         // Source track indices, trim range and unrelated settings stay valid across media forms.
-        return WithContainer(o with { Mode = audio ? ConversionMode.AudioExtract : ConversionMode.VideoTranscode },
-            audio ? ContainerFormat.M4a : ContainerFormat.Mp4);
+        return WithContainer(next, audio ? ContainerFormat.M4a : ContainerFormat.Mp4);
     }
     public static ConversionOptions WithContainer(ConversionOptions o, ContainerFormat container)
     {
@@ -44,4 +53,37 @@ public static class OutputTargets
         return WithContainer(o with { Mode = ConversionMode.VideoTranscode, VideoCodec = codec,
             Hardware = HardwareBackend.Auto, CrfOverride = null }, o.Container);
     }
+
+    public static ConversionOptions WithAudioMode(ConversionOptions o, AudioSelectionMode mode)
+        => o with
+        {
+            AudioMode = mode,
+            AudioStreamIndices = mode == AudioSelectionMode.Explicit ? o.AudioStreamIndices : Array.Empty<int>(),
+            SelectedStreams = mode == AudioSelectionMode.Explicit ? o.AudioStreamIndices : Array.Empty<int>(),
+        };
+
+    public static ConversionOptions WithAudioAuto(ConversionOptions o) => WithAudioMode(o, AudioSelectionMode.Auto);
+
+    public static ConversionOptions WithAudioTrack(ConversionOptions o, int sourceStreamIndex)
+        => WithAudioTrackSelection(o, new[] { sourceStreamIndex });
+
+    public static ConversionOptions WithAudioTrackSelection(ConversionOptions o, IReadOnlyList<int> sourceStreamIndices)
+    {
+        var indices = sourceStreamIndices.Distinct().OrderBy(i => i).ToArray();
+        return o with { AudioMode = AudioSelectionMode.Explicit, AudioStreamIndices = indices, SelectedStreams = indices };
+    }
+
+    public static ConversionOptions WithSubtitleMode(ConversionOptions o, SubtitleSelectionMode mode)
+        => o with
+        {
+            SubtitleMode = mode,
+            SubtitleStreamIndices = mode == SubtitleSelectionMode.Explicit ? o.SubtitleStreamIndices : Array.Empty<int>(),
+        };
+
+    public static ConversionOptions WithSubtitleTracks(ConversionOptions o, IReadOnlyList<int> sourceStreamIndices)
+        => o with
+        {
+            SubtitleMode = SubtitleSelectionMode.Explicit,
+            SubtitleStreamIndices = sourceStreamIndices.Distinct().OrderBy(i => i).ToArray(),
+        };
 }

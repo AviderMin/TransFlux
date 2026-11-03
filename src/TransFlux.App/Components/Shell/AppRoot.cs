@@ -207,7 +207,19 @@ public sealed class AppRoot : Component<AppServices>
         {
             if (selected.Count == 0 || selected.Any(i => !i.CanEdit)) return;
             await store.EditAsync(selectedIds, mutate);
-            var nextDefaults = mutate(selected[0].Draft.Options) with { OutputFileName = null, TrimStart = null, TrimEnd = null, SelectedStreams = [] };
+            // Remember reusable parameters only: source-specific stream selections must never
+            // leak into the next import (v2 audio/subtitle fields included).
+            var nextDefaults = mutate(selected[0].Draft.Options) with
+            {
+                OutputFileName = null,
+                TrimStart = null,
+                TrimEnd = null,
+                SelectedStreams = [],
+                AudioMode = AudioSelectionMode.Auto,
+                AudioStreamIndices = [],
+                SubtitleMode = SubtitleSelectionMode.AutoPreserve,
+                SubtitleStreamIndices = [],
+            };
             setDefaults(nextDefaults);
             var target = TargetFormats.Find(nextDefaults);
             var remembered = settings with { LastTargetFormatKey = target?.Key, LastQuality = nextDefaults.Quality.ToString() };
@@ -395,7 +407,7 @@ public sealed class AppRoot : Component<AppServices>
         {
             var row = entry.Execution;
             var attempt = row?.Attempt;
-            var candidate = attempt?.PlanSnapshot.CandidatePaths.FirstOrDefault();
+            var candidate = DiagnosticReport.ResolveExecutedCandidate(attempt);
             var expected = attempt?.PlanSnapshot.ExpectedOutput;
             var failure = row?.Failure ?? entry.Draft.Failure;
             var details = new List<Element> { TextBlock(entry.Draft.FileName).SemiBold() };
@@ -404,7 +416,8 @@ public sealed class AppRoot : Component<AppServices>
                 if (!string.IsNullOrWhiteSpace(value)) details.Add(Ui.KeyValue(label, value));
             }
             Detail("执行状态", row is null ? "尚未生成执行计划" : Fmt.JobStateText(row.State));
-            Detail("编码器", candidate is null ? null : $"{candidate.EncoderName} · {candidate.Backend}");
+            Detail("执行候选", attempt?.ExecutedCandidateId);
+            Detail("编码器", candidate is null ? (attempt is null ? null : "未知") : $"{candidate.EncoderName} · {candidate.Backend}");
             Detail("设备", candidate?.DeviceId ?? attempt?.DeviceIdentity);
             Detail("回退", attempt?.FallbackReason ?? "无");
             Detail("流映射", expected is null ? null : $"{expected.VideoStreamCount} 视频 / {expected.AudioStreamCount} 音频 / {expected.StreamCount} 总流");

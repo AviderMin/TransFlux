@@ -113,3 +113,21 @@ SelectedStreamIndices 同时代表视频、音频、字幕。默认空集合保�
 4. 按 14 的 G0–G7 开放高级功能；每一步先小矩阵真样片，不一次宣称“全面 Dolby”。
 
 本报告不声称穷尽全部缺陷，也不把未复现的攻击/断电场景写成已发生。下一位 AI 应先将高优先级复现转成失败测试，再修实现，并把本页 ID 与 PR/证据逐项关联。
+
+## G0 修复状态（2026-11-01 本轮）
+
+本轮按 docs/15 先执行 T01/T02，证据见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md)。
+
+| ID | 状态 | 本轮结果 |
+|---|---|---|
+| R01 | ✅ 已修复 | Published/Prepared journal 统一走身份 reconciler；Published+缺失 final、同长度替换、legacy 无哈希均转 NeedsAttention；Committing+OutputRecord 也核验文件后才 Succeeded。 |
+| R02 | ✅ 已修复 | 提交失败（rename 前后、DB 写入失败、取消/异常）保留 reservation/work directory/temp/journal；不再删除唯一临时成果。 |
+| R03 | ✅ 已修复 | RequestVersion=2 显式视频/音频/字幕选择；v1 旧请求保持旧语义；选音轨不再影响字幕；音频提取 v2 多选阻断。 |
+| R05 | ✅ 已修复 | WorkbenchRules/Planner 警告按解析后的字幕选择逐轨说明，去除无条件“字幕丢失”警告。 |
+| R07 | ✅ 已修复 | 音频提取明确单轨输出（UI 单选 + Domain 阻断多选）。 |
+| R09 | ✅ 已修复 | ProcessCapture 区分 Canceled/TimedOut；Probe/Verifier/能力试跑取消不再记为失败，不写失败缓存。 |
+| R10 | ✅ 已修复 | Attempt.ExecutedCandidateId 持久化；诊断报告/技术详情按实际执行候选显示，GPU→CPU 回退不再误报 GPU。 |
+| R11 | ✅ 已修复 | 暂停状态下入队/重试也先落盘卡片→job 绑定，再决定是否恢复队列；测试覆盖暂停→恢复→崩溃场景。 |
+| R04/R06/R08/R12、A01–A09 | ⏳ 未处理 | 仍按原优先级留给 T03/T04 及后续阶段；本轮没有高级 Dolby/HDR/烧录能力。 |
+
+验证：Release 构建 0 warnings / 0 errors，测试 438/438 通过，真实 E2E PASS（CPU H.264/AAC，源文件 hash 不变）。

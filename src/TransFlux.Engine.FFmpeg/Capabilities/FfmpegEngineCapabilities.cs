@@ -149,6 +149,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         {
             var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
             stopwatch.Stop();
+            ThrowIfCanceled(result, ct);
             if (result.TimedOut)
                 return new HardwareValidationResult { Success = false, FailureReason = $"Trial encode timed out after {timeout.TotalSeconds:0}s.", Elapsed = stopwatch.Elapsed };
             if (result.ExitCode != 0)
@@ -167,18 +168,20 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         }
     }
 
-    private async Task<IReadOnlyList<string>> RunListAsync(string[] commandArgs, TimeSpan timeout, CancellationToken ct)
+    internal async Task<IReadOnlyList<string>> RunListAsync(string[] commandArgs, TimeSpan timeout, CancellationToken ct)
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin" };
         arguments.AddRange(commandArgs);
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 4 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        ThrowIfCanceled(result, ct);
         return ParseNames(result.Stdout, skipFirstToken: true);
     }
 
-    private async Task<IReadOnlyList<FfmpegCodecInfo>> RunCodecsAsync(IReadOnlyList<string> encoders, TimeSpan timeout, CancellationToken ct)
+    internal async Task<IReadOnlyList<FfmpegCodecInfo>> RunCodecsAsync(IReadOnlyList<string> encoders, TimeSpan timeout, CancellationToken ct)
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-codecs" };
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 8 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        ThrowIfCanceled(result, ct);
         return ParseCodecs(result.Stdout, encoders);
     }
 
@@ -231,10 +234,11 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         "nvenc", "qsv", "amf", "vaapi", "videotoolbox", "v4l2m2m", "d3d12va", "mf", "vulkan",
     };
 
-    private async Task<IReadOnlyList<string>> RunHwaccelsAsync(TimeSpan timeout, CancellationToken ct)
+    internal async Task<IReadOnlyList<string>> RunHwaccelsAsync(TimeSpan timeout, CancellationToken ct)
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-hwaccels" };
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
+        ThrowIfCanceled(result, ct);
         var names = new List<string>();
         foreach (var raw in result.Stdout.Split('\n'))
         {
@@ -245,6 +249,13 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
             if (!names.Contains(token)) names.Add(token);
         }
         return names;
+    }
+
+    /// <summary>Cancellation must surface as OCE so callers (e.g. CapabilityService) never cache a canceled trial as a failure.</summary>
+    private static void ThrowIfCanceled(CaptureResult result, CancellationToken ct)
+    {
+        if (result.Canceled)
+            throw new OperationCanceledException("ffmpeg capability process was canceled.", ct);
     }
 
     private static IReadOnlyList<string> ParseNames(string output, bool skipFirstToken)

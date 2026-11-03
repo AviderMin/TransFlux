@@ -5,21 +5,22 @@ Output targets now separate media form, container and codec; see [output format 
 See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
 Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
 
-Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.8 built and verified, signed MSIX pending. This is a real build, not a design document.
+Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented + G0 reliability gate passed**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; review R01/R02/R03/R05/R07/R09/R10/R11 fixed with failure-first tests; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.8 built and verified, signed MSIX pending. This is a real build, not a design document. G0 evidence: [G0-RELIABILITY.md](G0-RELIABILITY.md).
 
 ## What works (executed)
 
 | Area | Status | Evidence |
 |---|---|---|
 | Solution builds (Domain, Application, Engine.FFmpeg, Hardware.Windows, Infrastructure, App, 4 test projects) | ✅ 0 warnings / 0 errors | `dotnet build TransFlux.slnx -c Debug` |
-| Unit + integration tests | ✅ **366 passed / 0 failed** | Domain 120, Application 96, Infrastructure 32, Engine 118 (build 0 warnings / 0 errors) |
+| Unit + integration tests | ✅ **438 passed / 0 failed** | Domain 130, Application 119, Infrastructure 51, Engine 138 (build 0 warnings / 0 errors) |
 | Real Reactor native window renders | ✅ | `docs/evidence/M4-ui-runtime.md`, `ui-tree.txt`, `screenshots/convert.png` |
 | Real end-to-end conversion (probe→plan→encode→verify→commit) | ✅ PASS, source unchanged | `docs/evidence/M1-E2E-runtime.md` |
 | Pinned GPL FFmpeg core (libx264/NVENC/QSV/AMF/AAC/FLAC) | ✅ hash-pinned | `tools/ffmpeg/core-manifest.json` |
 | CPU H.264/AAC MP4+MKV, audio extract (M4A/FLAC/WAV), remux whitelist | ✅ Engine tests | Engine integration tests |
 | Queue, state machine, cancel-at-commit-boundary, retry, one auto-fallback | ✅ Application tests | Application tests |
 | Layered output targets: 4 video containers + 7 audio containers, 49 video + 10 audio combinations | ✅ real encode/decode of all 59 combinations | `docs/evidence/OUTPUT-FORMATS.md` |
-| SQLite persistence, migrations, commit journal, crash reconciliation | ✅ Infrastructure tests | Infrastructure tests |
+| SQLite persistence, migrations, commit journal, crash reconciliation | ✅ Infrastructure tests | Infrastructure tests; G0: real SQLite + temp-dir recovery tests in [G0-RELIABILITY.md](G0-RELIABILITY.md) |
+| G0 reliability: no false success, commit-failure staging preserved, stream selection/audio-subtitle split, cancellation, executed candidate, workbench binding persistence | ✅ failure-first tests + full suite | [G0-RELIABILITY.md](G0-RELIABILITY.md) |
 | DXGI adapter enumeration + capability trials + cache | ✅ real DXGI | `docs/evidence/M3-hardware.md` |
 | Reactor UI: file-first task-card workbench, right-side output inspector, top-bar settings/about/history, execution bar | ✅ compiles + real-window checked | `docs/evidence/UX-workbench-redesign.md`, `docs/evidence/OUTPUT-FORMATS.md` |
 
@@ -74,3 +75,9 @@ Completed 2026-11-01: Inno Setup **1.0.0.8** built from the current review-remed
 The follow-up review fixes are implemented: NeedsAttention manual-review boundary, queue reordering, manual-GPU fallback policy, remux stream selection, post-verification source recheck, dispatch-loop recovery, attempt/job recovery consistency, content-identity commit reconciliation, disk precheck and reservation cleanup, unknown-duration progress, settings-load gating, restored-card state, cancelable batched folder import, virtualized task list, multi-track selection, parameter reset, copy-path, redacted diagnostic export, and a grouped codec catalog with hardware-encoder badges.
 
 Verification: Debug build **0 warnings / 0 errors**, **366 tests passed**, and real E2E **PASS** with unchanged source. Accessibility (Narrator/DPI/high-contrast), signed MSIX, and Intel/AMD hardware validation remain release acceptance items, not claims made by this record.
+
+## G0 reliability gate · 2026-11-01 (this round)
+
+docs/15 T01/T02 are implemented with failure-first tests; see [G0-RELIABILITY.md](G0-RELIABILITY.md) for commands, the failing-before/passing-after evidence, and preserved risks. Summary: Published/Prepared recovery now goes through identity reconciliation; commit failures preserve staging/journal and never delete the only output; stream selection is versioned (v1 legacy preserved, v2 separates video/audio/subtitle); audio extraction is explicitly single-track; cancellation is distinct from timeout/failure across probe/verify/trial; attempts record the actually executed candidate; workbench card→job bindings persist even while the queue is paused.
+
+Release verification for this round: Release build **0 warnings / 0 errors**, **438 tests passed** (Domain 130 / Application 119 / Infrastructure 51 / Engine 138), real E2E **PASS** with source unchanged and `executed=cpu-libx264`. HDR/Dolby/burn-in remain unimplemented; no new installer was produced.
