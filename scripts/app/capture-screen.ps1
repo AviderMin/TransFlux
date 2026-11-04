@@ -1,5 +1,5 @@
 # Captures the primary screen to a PNG for visual evidence.
-param([string]$Out = 'docs/evidence/screenshots/desktop.png')
+param([string]$Out = 'artifacts/evidence/screenshots/desktop.png')
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $path = Join-Path $root $Out

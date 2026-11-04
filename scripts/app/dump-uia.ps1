@@ -1,6 +1,6 @@
 param(
   [string]$ProcessName = 'TransFlux',
-  [string]$Out = 'docs/evidence/ui-tree.txt',
+  [string]$Out = 'artifacts/evidence/ui-tree.txt',
   [int]$MaxDepth = 9
 )
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
