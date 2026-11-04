@@ -7,17 +7,19 @@ namespace TransFlux.Engine.FFmpeg.Core;
 
 /// <summary>
 /// Resolves the trusted ffmpeg.exe / ffprobe.exe pair. Search order:
-/// 1) explicitDirectory; 2) TRANSFLUX_FFMPEG_DIR; 3) walk up from AppContext.BaseDirectory
-/// and Environment.CurrentDirectory for tools/ffmpeg/core-manifest.json or a folder that
-/// contains ffmpeg.exe + ffprobe.exe; 4) a "ffmpeg" folder beside the executable.
-/// When core-manifest.json is present its SHA-256 values are verified; a mismatch throws
-/// <see cref="CoreIntegrityException"/>. PATH is never consulted.
+/// 1) explicitDirectory (authoritative when supplied); 2) TRANSFLUX_FFMPEG_DIR (authoritative
+/// when set); 3) walk up from AppContext.BaseDirectory for tools/ffmpeg/core-manifest.json or a
+/// "ffmpeg" folder beside the executable. PATH and Environment.CurrentDirectory are never consulted.
+/// A core is accepted only when core-manifest.json is present and every hash in it matches;
+/// missing, malformed or hash-less manifests fail closed with <see cref="CoreIntegrityException"/>.
+/// The explicit <paramref name="allowUnverified"/> switch exists only for isolated development
+/// tooling; production callers must never set it.
 /// </summary>
 public static class FfmpegCoreLocator
 {
     private static readonly ConcurrentDictionary<string, FfmpegCorePaths> Cache = new(StringComparer.OrdinalIgnoreCase);
 
-    public static FfmpegCorePaths Locate(string? explicitDirectory = null)
+    public static FfmpegCorePaths Locate(string? explicitDirectory = null, bool allowUnverified = false)
     {
         var searched = new List<string>();
         foreach (var dir in EnumerateSearchRoots(explicitDirectory))
@@ -25,7 +27,7 @@ public static class FfmpegCoreLocator
             if (string.IsNullOrWhiteSpace(dir)) continue;
             if (searched.Contains(dir, StringComparer.OrdinalIgnoreCase)) continue;
             searched.Add(dir);
-            var found = TryLocateIn(dir);
+            var found = TryLocateIn(dir, allowUnverified);
             if (found is not null) return found;
         }
 
@@ -46,14 +48,22 @@ public static class FfmpegCoreLocator
 
     private static IEnumerable<string> EnumerateSearchRoots(string? explicitDirectory)
     {
+        // An explicit directory or environment override is authoritative: never silently fall
+        // back to a different core when the caller asked for a specific one.
         if (!string.IsNullOrWhiteSpace(explicitDirectory))
+        {
             yield return explicitDirectory!;
+            yield break;
+        }
 
         var env = Environment.GetEnvironmentVariable("TRANSFLUX_FFMPEG_DIR");
         if (!string.IsNullOrWhiteSpace(env))
+        {
             yield return env!;
+            yield break;
+        }
 
-        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+        foreach (var start in new[] { AppContext.BaseDirectory })
         {
             string full;
             try { full = Path.GetFullPath(start); }
@@ -73,7 +83,7 @@ public static class FfmpegCoreLocator
         }
     }
 
-    private static FfmpegCorePaths? TryLocateIn(string directory)
+    private static FfmpegCorePaths? TryLocateIn(string directory, bool allowUnverified)
     {
         try
         {
@@ -81,6 +91,10 @@ public static class FfmpegCoreLocator
 
             var manifest = Path.Combine(directory, "core-manifest.json");
             if (File.Exists(manifest)) return LoadFromManifest(manifest);
+
+            // Fail closed: a directory without a pinned manifest is not a trusted core.
+            // The only exception is the explicit, isolated development escape hatch.
+            if (!allowUnverified) return null;
 
             if (TryExes(directory, out var ff, out var fp, out var coreHash, out var version))
                 return Cache.GetOrAdd(KeyFor(ff, fp), _ => new FfmpegCorePaths(ff, fp, coreHash, version));
@@ -96,8 +110,13 @@ public static class FfmpegCoreLocator
             throw; // Integrity failures must not be swallowed by search.
         }
         catch (CoreNotFoundException) { throw; }
-        catch
+        catch (Exception ex)
         {
+            // A manifest that exists but cannot be parsed is an integrity failure, not a
+            // reason to quietly search for a different (possibly malicious) core elsewhere.
+            var manifest = Path.Combine(directory, "core-manifest.json");
+            if (File.Exists(manifest))
+                throw new CoreIntegrityException(manifest, "<malformed core-manifest.json>", ex.GetType().Name + ": " + ex.Message);
             return null;
         }
     }
@@ -182,8 +201,9 @@ public static class FfmpegCoreLocator
 
     private static void VerifySha(string path, string expectedHex)
     {
-        if (string.IsNullOrWhiteSpace(expectedHex)) return; // manifests without a hash still locate+hash.
         var actual = ComputeSha256Hex(path);
+        if (string.IsNullOrWhiteSpace(expectedHex))
+            throw new CoreIntegrityException(path, "<missing sha256 in core-manifest.json>", actual);
         if (!string.Equals(actual, expectedHex, StringComparison.OrdinalIgnoreCase))
             throw new CoreIntegrityException(path, expectedHex.ToUpperInvariant(), actual);
     }

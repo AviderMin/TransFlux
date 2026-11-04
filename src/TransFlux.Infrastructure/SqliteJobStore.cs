@@ -69,6 +69,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
     public async Task InitializeAsync(CancellationToken ct)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
+        SqliteConnection? conn = null;
         try
         {
             if (_initialized) return;
@@ -84,7 +85,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
                 Mode = SqliteOpenMode.ReadWriteCreate,
                 Pooling = false,
             };
-            var conn = new SqliteConnection(builder.ToString());
+            conn = new SqliteConnection(builder.ToString());
             await conn.OpenAsync(ct).ConfigureAwait(false);
 
             await SetPragmaAsync(conn, "journal_mode", "WAL", ct).ConfigureAwait(false);
@@ -96,15 +97,30 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
                 "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL, checksum TEXT NOT NULL);",
                 ct).ConfigureAwait(false);
 
-            var applied = new HashSet<int>();
+            var applied = new Dictionary<int, string>();
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT version FROM schema_migrations;";
+                cmd.CommandText = "SELECT version, checksum FROM schema_migrations;";
                 using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                while (await reader.ReadAsync(ct).ConfigureAwait(false)) applied.Add(reader.GetInt32(0));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    applied[reader.GetInt32(0)] = reader.GetString(1);
             }
 
-            var pending = Migrations.Where(m => !applied.Contains(m.Version)).OrderBy(m => m.Version).ToList();
+            var knownVersions = Migrations.Select(m => m.Version).ToHashSet();
+            var latestKnown = knownVersions.Count == 0 ? 0 : knownVersions.Max();
+            var latestApplied = applied.Count == 0 ? 0 : applied.Keys.Max();
+            if (latestApplied > latestKnown)
+                throw new InvalidOperationException(
+                    $"Database schema version {latestApplied} is newer than this build supports ({latestKnown}). " +
+                    "Refusing to open it to avoid destructive downgrade; install a newer TransFlux build or restore a backup.");
+            foreach (var migration in Migrations.Where(m => applied.ContainsKey(m.Version)))
+            {
+                if (!string.Equals(applied[migration.Version], migration.Checksum, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"Schema migration {migration.Version} checksum does not match this build; the database may be corrupt or from an incompatible build.");
+            }
+
+            var pending = Migrations.Where(m => !applied.ContainsKey(m.Version)).OrderBy(m => m.Version).ToList();
             if (pending.Count > 0 && existed)
                 BackupDatabase(conn);
 
@@ -135,11 +151,50 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
         }
         catch
         {
+            // A failed open must release its SQLite handle, otherwise recovery cannot move the
+            // unusable database file aside.
+            if (conn is not null) await conn.DisposeAsync().ConfigureAwait(false);
             throw;
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Opens the store, recovering from an unreadable database instead of taking the whole app
+    /// down: the unusable file (and its -wal/-shm siblings) is moved aside, a .bak backup is
+    /// restored when available, and initialization is retried. Returns the path of the file that
+    /// was moved aside, or null when the first open succeeded.
+    /// </summary>
+    public async Task<string?> InitializeWithRecoveryAsync(CancellationToken ct)
+    {
+        try
+        {
+            await InitializeAsync(ct).ConfigureAwait(false);
+            return null;
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is 11 or 26) // SQLITE_CORRUPT / SQLITE_NOTADB
+        {
+            var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6];
+            var movedAside = _databasePath + ".corrupt-" + stamp;
+            var backup = _databasePath + ".bak";
+            try
+            {
+                if (File.Exists(_databasePath)) File.Move(_databasePath, movedAside);
+                foreach (var suffix in new[] { "-wal", "-shm" })
+                    if (File.Exists(_databasePath + suffix)) File.Move(_databasePath + suffix, movedAside + suffix);
+                if (File.Exists(backup)) File.Copy(backup, _databasePath, overwrite: false);
+                await InitializeAsync(ct).ConfigureAwait(false);
+                return movedAside;
+            }
+            catch (Exception recoveryEx)
+            {
+                throw new InvalidOperationException(
+                    $"Database '{_databasePath}' could not be opened or recovered. Open error: {ex.Message}. Recovery error: {recoveryEx.Message}",
+                    ex);
+            }
         }
     }
 
@@ -657,9 +712,12 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
         => InGateAsync(async conn =>
         {
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT " + JournalColumns + " FROM commit_journal WHERE phase IN ($p0, $p1) ORDER BY updated_utc;";
+            // Failed rows are included so a crash between marking a move as failed and deleting
+            // the row cannot leave journals accumulating forever; ReconcileAsync closes them.
+            cmd.CommandText = "SELECT " + JournalColumns + " FROM commit_journal WHERE phase IN ($p0, $p1, $p2) ORDER BY updated_utc;";
             cmd.Parameters.AddWithValue("$p0", (int)CommitPhase.Prepared);
             cmd.Parameters.AddWithValue("$p1", (int)CommitPhase.Published);
+            cmd.Parameters.AddWithValue("$p2", (int)CommitPhase.Failed);
             var list = new List<CommitJournalEntry>();
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false)) list.Add(ReadJournal(reader));
@@ -796,13 +854,18 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
             using var tx = conn.BeginTransaction();
             foreach (var job in active)
             {
+                // A user-requested cancel that was interrupted by a crash is still a cancel, not
+                // an unexpected interruption; every other in-flight state becomes Interrupted.
+                var canceledDuringRecovery = job.State == JobState.CancelRequested;
+                var finalState = canceledDuringRecovery ? JobState.Canceled : JobState.Interrupted;
+                var finalAttemptState = canceledDuringRecovery ? AttemptState.Canceled : AttemptState.Interrupted;
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.Transaction = tx;
                     cmd.CommandText =
                         "UPDATE attempts SET state=$state, ended_utc=$ended " +
                         "WHERE job_id=$job AND state IN (" + attemptStateList + ");";
-                    cmd.Parameters.AddWithValue("$state", (int)AttemptState.Interrupted);
+                    cmd.Parameters.AddWithValue("$state", (int)finalAttemptState);
                     cmd.Parameters.AddWithValue("$ended", Fmt(now));
                     cmd.Parameters.AddWithValue("$job", job.JobId.ToString());
                     await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -814,7 +877,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
                     cmd.CommandText =
                         "UPDATE jobs SET state=$state, revision=revision+1, updated_utc=$updated, active_attempt_id=NULL " +
                         "WHERE id=$id AND state=$oldState;";
-                    cmd.Parameters.AddWithValue("$state", (int)JobState.Interrupted);
+                    cmd.Parameters.AddWithValue("$state", (int)finalState);
                     cmd.Parameters.AddWithValue("$updated", Fmt(now));
                     cmd.Parameters.AddWithValue("$id", job.JobId.ToString());
                     cmd.Parameters.AddWithValue("$oldState", (int)job.State);
@@ -822,7 +885,7 @@ public sealed class SqliteJobStore : IJobStore, IAsyncDisposable, ICommitJournal
                 }
                 updated.Add(job with
                 {
-                    State = JobState.Interrupted,
+                    State = finalState,
                     Revision = job.Revision + 1,
                     UpdatedUtc = now,
                     ActiveAttemptId = null,

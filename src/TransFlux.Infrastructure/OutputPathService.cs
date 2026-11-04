@@ -1,4 +1,5 @@
 using TransFlux.Application.Contracts;
+using TransFlux.Application.Services;
 using TransFlux.Domain.Jobs;
 using TransFlux.Domain.Plans;
 using TransFlux.Domain.Rules;
@@ -9,7 +10,7 @@ namespace TransFlux.Infrastructure;
 internal static class OutputReservation
 {
     public const string LockSuffix = ".transflux-reserve";
-    public const string WorkFolderName = ".transflux-work";
+    public const string WorkFolderName = OutputStagingLayout.WorkFolderName;
 
     public static string LockPath(string finalPath) => finalPath + LockSuffix;
 }
@@ -19,6 +20,10 @@ internal static class OutputReservation
 public sealed class OutputPathService : IOutputPathService
 {
     private readonly IFileSystemService _fs;
+
+    /// <summary>Whether a directory is a per-attempt .transflux-work staging directory. Exposed
+    /// so maintenance/cleanup code can validate before recursively deleting anything.</summary>
+    public static bool IsWorkDirectory(string? directory) => OutputStagingLayout.IsWorkDirectory(directory);
 
     public OutputPathService(IFileSystemService fs, IClock clock)
     {
@@ -52,6 +57,15 @@ public sealed class OutputPathService : IOutputPathService
             if (string.IsNullOrWhiteSpace(stem)) stem = "output";
 
             reservedFinalPath = AllocateAndLock(directory, stem, extension);
+            // Never allow the source itself (including hard links, 8.3 aliases and case variants)
+            // to be selected as the destination.
+            if (_fs.PathsReferToSameFile(request.SourcePath, reservedFinalPath))
+            {
+                CleanupFailedReservation(reservedFinalPath);
+                return Task.FromResult(Result<ReservedOutput>.Operational(
+                    FailureInfo.Of(FailureCode.OutputConflict, "OUTPUT_SAME_AS_SOURCE",
+                        "The output path resolves to the source file; choose another name or folder.")));
+            }
             var commitToken = Guid.NewGuid().ToString("N");
             var workDirectory = Path.Combine(directory, OutputReservation.WorkFolderName, commitToken);
             _fs.CreateDirectory(workDirectory);
@@ -95,6 +109,9 @@ public sealed class OutputPathService : IOutputPathService
     public void DeleteWorkDirectory(ReservedOutput reserved)
     {
         if (reserved is null) return;
+        // Defense in depth: recursive deletion is only ever allowed for the documented staging
+        // layout, never for a caller-constructed directory.
+        if (!OutputStagingLayout.IsWorkDirectory(reserved.WorkDirectory)) return;
         try
         {
             if (Directory.Exists(reserved.WorkDirectory)) Directory.Delete(reserved.WorkDirectory, recursive: true);

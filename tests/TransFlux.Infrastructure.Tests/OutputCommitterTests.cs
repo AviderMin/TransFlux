@@ -39,6 +39,7 @@ public sealed class OutputCommitterTests
             TempPath = temp,
             FinalPath = final,
             ExpectedSize = 10,
+            VerificationSummary = "Verified MP4: 1 video / 1 audio",
         }, default);
 
         Assert.True(result.Success, result.Failure?.TechnicalDetail);
@@ -50,6 +51,7 @@ public sealed class OutputCommitterTests
         Assert.Equal(final, outputs[0].FinalPath);
         Assert.Equal(10, outputs[0].Size);
         Assert.Equal(result.CommitToken, outputs[0].CommitToken);
+        Assert.Equal("Verified MP4: 1 video / 1 audio", outputs[0].VerificationSummary);
         Assert.Empty(await store.GetOpenJournalsAsync(default));
     }
 
@@ -76,7 +78,9 @@ public sealed class OutputCommitterTests
         Assert.Equal(FailureCode.OutputConflict, result.Failure!.Code);
         Assert.True(File.Exists(temp));                        // temp is left intact for cleanup
         Assert.Equal("already-here", File.ReadAllText(final)); // never overwritten
-        Assert.Empty(await store.GetOpenJournalsAsync(default)); // failure journal closed (Failed)
+        // The Failed row is retained for crash-window recovery; startup reconciliation closes it.
+        var failed = Assert.Single(await store.GetOpenJournalsAsync(default));
+        Assert.Equal(CommitPhase.Failed, failed.Phase);
         Assert.Empty(await store.GetOutputsForJobAsync(h.Job.JobId, default));
     }
 

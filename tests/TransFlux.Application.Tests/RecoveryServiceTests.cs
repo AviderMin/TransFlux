@@ -70,6 +70,48 @@ public class RecoveryServiceTests
     }
 
     [Fact]
+    public async Task PublishedJournal_ReconcileSuccess_MarksAttemptAndJobSucceeded_WithoutRecordVerifier()
+    {
+        var store = new InMemoryJobStore();
+        var job = MakeJob(JobState.Committing);
+        await store.CreateJobAsync(job, CancellationToken.None);
+        var attempt = MakeAttempt(job.JobId);
+        await store.CreateAttemptAsync(attempt, CancellationToken.None);
+        var journal = MakeJournal(job.JobId, attempt.AttemptId, CommitPhase.Published);
+        await store.UpsertJournalAsync(journal, CancellationToken.None);
+        // Reconciler only: it cannot verify a recorded output through IOutputRecordVerifier, so a
+        // successful journal reconciliation must itself complete the attempt and job.
+        var committer = new ReconcilerOnlyCommitter();
+
+        await RecoveryService.RunAsync(store, committer, CancellationToken.None);
+
+        Assert.Equal(1, committer.ReconcileCalls);
+        Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
+        Assert.Single(await store.GetOutputsForJobAsync(job.JobId, CancellationToken.None));
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
+        Assert.Equal(AttemptState.Succeeded, (await store.GetAttemptAsync(attempt.AttemptId, default))!.State);
+    }
+
+    [Fact]
+    public async Task JournalForNonCommittingActiveJob_DoesNotMarkAttemptSucceeded()
+    {
+        var store = new InMemoryJobStore();
+        var job = MakeJob(JobState.Running);
+        await store.CreateJobAsync(job, CancellationToken.None);
+        var attempt = MakeAttempt(job.JobId) with { State = AttemptState.Running };
+        await store.CreateAttemptAsync(attempt, CancellationToken.None);
+        var journal = MakeJournal(job.JobId, attempt.AttemptId, CommitPhase.Published);
+        await store.UpsertJournalAsync(journal, CancellationToken.None);
+
+        await RecoveryService.RunAsync(store, new FakeCommitter(), CancellationToken.None);
+
+        // The journal reconciles, but the job cannot legally become Succeeded from Running. The
+        // attempt must stay untouched so it is not paired with a job that recovery later interrupts.
+        Assert.Equal(JobState.Interrupted, (await store.GetJobAsync(job.JobId, default))!.State);
+        Assert.Equal(AttemptState.Running, (await store.GetAttemptAsync(attempt.AttemptId, default))!.State);
+    }
+
+    [Fact]
     public async Task PublishedJournal_ReconcileFailure_KeepsJournalAndMovesJobToNeedsAttention()
     {
         var store = new InMemoryJobStore();
@@ -161,6 +203,87 @@ public class RecoveryServiceTests
         Assert.Equal(1, committer.ReconcileCalls);
         Assert.Null(await store.GetJournalAsync(journal.CommitToken, CancellationToken.None));
         Assert.Equal(0, committer.CommitCalls);
+        // A terminal job must not be re-opened by the recovery success transition.
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(job.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task OneBrokenJournal_DoesNotAbortRecoveryOfOthers()
+    {
+        var store = new InMemoryJobStore();
+        var jobA = MakeJob(JobState.Committing);
+        var jobB = MakeJob(JobState.Committing);
+        var running = MakeJob(JobState.Running);
+        await store.CreateJobAsync(jobA, CancellationToken.None);
+        await store.CreateJobAsync(jobB, CancellationToken.None);
+        await store.CreateJobAsync(running, CancellationToken.None);
+
+        var journalA = MakeJournal(jobA.JobId, Guid.NewGuid(), CommitPhase.Published);
+        var journalB = MakeJournal(jobB.JobId, Guid.NewGuid(), CommitPhase.Published);
+        await store.UpsertJournalAsync(journalA, CancellationToken.None);
+        await store.UpsertJournalAsync(journalB, CancellationToken.None);
+        store.BeforeDeleteJournal = token => token == journalA.CommitToken
+            ? Task.FromException(new IOException("simulated db busy"))
+            : Task.CompletedTask;
+
+        await RecoveryService.RunAsync(store, new FakeCommitter(), CancellationToken.None);
+
+        // The broken journal stays open and its job needs manual review...
+        Assert.NotNull(await store.GetJournalAsync(journalA.CommitToken, CancellationToken.None));
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(jobA.JobId, default))!.State);
+        // ...but the other journal still reconciles and the active job still becomes Interrupted.
+        Assert.Null(await store.GetJournalAsync(journalB.CommitToken, CancellationToken.None));
+        Assert.Equal(JobState.Succeeded, (await store.GetJobAsync(jobB.JobId, default))!.State);
+        Assert.Equal(JobState.Interrupted, (await store.GetJobAsync(running.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task CommittingJob_ReadFailure_DoesNotAbortOtherRecoveryWork()
+    {
+        var store = new InMemoryJobStore();
+        var committing = MakeJob(JobState.Committing);
+        var running = MakeJob(JobState.Running);
+        await store.CreateJobAsync(committing, CancellationToken.None);
+        await store.CreateJobAsync(running, CancellationToken.None);
+        var attempt = MakeAttempt(committing.JobId);
+        await store.CreateAttemptAsync(attempt, CancellationToken.None);
+        await store.SaveOutputAsync(new OutputRecord
+        {
+            JobId = committing.JobId,
+            AttemptId = attempt.AttemptId,
+            FinalPath = @"C:outinal.mp4",
+            Size = 1234,
+            CommitToken = "t",
+            CommittedUtc = DateTimeOffset.UnixEpoch,
+        }, CancellationToken.None);
+        store.BeforeGetOutputsForJob = jobId => jobId == committing.JobId
+            ? Task.FromException(new IOException("simulated output-read failure"))
+            : Task.CompletedTask;
+
+        await RecoveryService.RunAsync(store, new FakeCommitter(), CancellationToken.None);
+
+        // The broken row is isolated and flagged, and the remaining active job is still handled.
+        Assert.Equal(JobState.NeedsAttention, (await store.GetJobAsync(committing.JobId, default))!.State);
+        Assert.Equal(JobState.Interrupted, (await store.GetJobAsync(running.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task MarkActiveJobsInterrupted_RunsWhenCommittingSweepListingFails()
+    {
+        var store = new InMemoryJobStore();
+        var committing = MakeJob(JobState.Committing);
+        var running = MakeJob(JobState.Running);
+        await store.CreateJobAsync(committing, CancellationToken.None);
+        await store.CreateJobAsync(running, CancellationToken.None);
+        store.BeforeGetJobs = states => states is not null && states.Contains(JobState.Committing)
+            ? Task.FromException(new IOException("simulated job-list failure"))
+            : Task.CompletedTask;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            RecoveryService.RunAsync(store, new FakeCommitter(), CancellationToken.None));
+
+        // The finally block must still clear active jobs even when the previous phase failed.
+        Assert.Equal(JobState.Interrupted, (await store.GetJobAsync(running.JobId, default))!.State);
     }
 
     [Fact]
@@ -262,6 +385,25 @@ public class RecoveryServiceTests
         {
             CommitCalls++;
             return Task.FromResult(new CommitResult { Success = true, CommitToken = "t", FinalPath = request.FinalPath });
+        }
+    }
+
+    private sealed class ReconcilerOnlyCommitter : IOutputCommitter, ICommitReconciler
+    {
+        public int ReconcileCalls { get; private set; }
+
+        public Task<CommitResult> CommitAsync(CommitRequest request, CancellationToken ct)
+            => throw new InvalidOperationException("CommitAsync must not be used when a reconciler is available.");
+
+        public Task<CommitResult> ReconcileAsync(CommitJournalEntry entry, CancellationToken ct)
+        {
+            ReconcileCalls++;
+            return Task.FromResult(new CommitResult
+            {
+                Success = true,
+                CommitToken = entry.CommitToken,
+                FinalPath = entry.FinalPath,
+            });
         }
     }
 }

@@ -51,6 +51,24 @@ public class PipelineRegressionTests
         return (await ProbeAsync(path), path);
     }
 
+    private static async Task<(SourceSnapshot Source, string Path)> GenerateAccessibilityAudioMkvAsync(string name)
+    {
+        var path = TestSupport.PathFor(name);
+        if (!File.Exists(path))
+        {
+            await RunFfmpegAsync(
+                "-hide_banner", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=160x96:rate=10:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-metadata:s:a:0", "language=eng",
+                "-disposition:a:0", "hearing_impaired+comment+visual_impaired",
+                path);
+        }
+        return (await ProbeAsync(path), path);
+    }
+
     private static async Task<(ValidatedPlan Plan, SourceSnapshot Source, ConversionRequest Request)> PlanAsync(
         SourceSnapshot source, ConversionRequest request)
     {
@@ -111,6 +129,123 @@ public class PipelineRegressionTests
         Assert.True(audio[1].IsForced, "forced marker must survive the transcode");
     }
 
+    [Fact]
+    public async Task Transcode_Mkv_PreservesNonDefaultDispositionFlags()
+    {
+        var (source, _) = await GenerateAccessibilityAudioMkvAsync("accessibility-src.mkv");
+        var sourceAudio = source.AudioStreams.Single();
+        Assert.True(sourceAudio.IsHearingImpaired);
+        Assert.True(sourceAudio.IsComment);
+        Assert.True(sourceAudio.IsVisualImpaired);
+
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv);
+        var (plan, src, req) = await PlanAsync(source, request);
+        var args = plan.CandidatePaths[0].Arguments.ToList();
+        var at = args.IndexOf("-disposition:a:0");
+        Assert.True(at >= 0);
+        Assert.Contains("hearing_impaired", args[at + 1]);
+        Assert.Contains("comment", args[at + 1]);
+        Assert.Contains("visual_impaired", args[at + 1]);
+
+        var outPath = await RunAndVerifyAsync(plan, src, req);
+        var output = await ProbeAsync(outPath);
+        var outputAudio = output.AudioStreams.Single();
+        Assert.True(outputAudio.IsHearingImpaired, "hearing_impaired marker must survive the transcode");
+        Assert.True(outputAudio.IsComment, "comment marker must survive the transcode");
+        Assert.True(outputAudio.IsVisualImpaired, "visual_impaired marker must survive the transcode");
+    }
+
+    [Fact]
+    public async Task Transcode_AudioCopy_Mkv_KeepsAc3CodecAndChannels()
+    {
+        var path = TestSupport.PathFor("audio-copy-src.mkv");
+        if (!File.Exists(path))
+        {
+            await RunFfmpegAsync(
+                "-hide_banner", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=160x96:rate=10:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:a", "ac3", "-ac", "6",
+                path);
+        }
+        var source = await ProbeAsync(path);
+        var sourceAudio = source.AudioStreams.Single();
+        Assert.Equal("ac3", sourceAudio.Codec);
+        Assert.Equal(6, sourceAudio.Channels);
+
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv) with
+        {
+            Audio = new AudioSpec { Codec = AudioCodec.Copy },
+        };
+        var (plan, src, req) = await PlanAsync(source, request);
+        var args = plan.CandidatePaths[0].Arguments.ToList();
+        var codecAt = args.IndexOf("-c:a");
+        Assert.True(codecAt >= 0);
+        Assert.Equal("copy", args[codecAt + 1]);
+        Assert.DoesNotContain("-b:a", args);
+        Assert.Equal(AudioCodec.Copy, plan.ExpectedOutput.AudioCodec);
+        var signature = plan.ExpectedOutput.TrackSignatures.Last();
+        Assert.Equal("ac3", signature.Codec);
+        Assert.Equal(6, signature.Channels);
+
+        var outPath = await RunAndVerifyAsync(plan, src, req);
+        var output = await ProbeAsync(outPath);
+        var outputAudio = output.AudioStreams.Single();
+        Assert.Equal("ac3", outputAudio.Codec);
+        Assert.Equal(sourceAudio.Channels, outputAudio.Channels);
+
+        // TrackSignatures must catch a copied track whose actual codec differs from the
+        // source codec even though ExpectedOutput.AudioCodec == Copy skips the aggregate check.
+        var tampered = plan with
+        {
+            ExpectedOutput = plan.ExpectedOutput with
+            {
+                TrackSignatures = plan.ExpectedOutput.TrackSignatures
+                    .Select((s, i) => i == 1 ? s with { Codec = "aac" } : s)
+                    .ToList(),
+            },
+        };
+        var rejected = await new FfmpegVerifier(TestSupport.Core).VerifyAsync(new VerificationRequest
+        {
+            Plan = tampered,
+            OutputPath = outPath,
+            Source = src,
+        }, CancellationToken.None);
+        Assert.False(rejected.Passed);
+        Assert.Contains("codec", rejected.Summary);
+    }
+
+    [Fact]
+    public async Task Verifier_RejectsWrongPerTrackAudioChannelExpectation()
+    {
+        var (source, _) = await GenerateTwoAudioMkvAsync("multi-audio-verify-src.mkv");
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv);
+        var (plan, src, req) = await PlanAsync(source, request);
+        var attempt = TestSupport.BuildAttempt(plan, src, req);
+        var run = await new FfmpegRunner(TestSupport.Core).RunAsync(attempt, new CollectingProgress(), CancellationToken.None);
+        Assert.True(run.Succeeded, run.Failure?.TechnicalDetail ?? run.StderrTail);
+
+        var tampered = plan with
+        {
+            ExpectedOutput = plan.ExpectedOutput with
+            {
+                TrackSignatures = plan.ExpectedOutput.TrackSignatures
+                    .Select((s, i) => i == 1 ? s with { Channels = 8 } : s)
+                    .ToList(),
+            },
+        };
+        var verification = await new FfmpegVerifier(TestSupport.Core).VerifyAsync(new VerificationRequest
+        {
+            Plan = tampered,
+            OutputPath = attempt.TempPath,
+            Source = src,
+        }, CancellationToken.None);
+        Assert.False(verification.Passed);
+        Assert.Contains("channels", verification.Summary);
+    }
+
     // ---------------- Major 3: subtitle chain ----------------
 
     [Fact]
@@ -161,6 +296,33 @@ public class PipelineRegressionTests
         Assert.Contains(source.Streams, s => s.Kind == MediaKind.Attachment);
 
         var request = new ConversionRequest { SourceSnapshotId = source.MediaId, Mode = ConversionMode.Remux, Container = ContainerFormat.Mkv };
+        var (plan, src, req) = await PlanAsync(source, request);
+        Assert.Equal(1, plan.ExpectedOutput.AttachmentStreamCount);
+        Assert.Equal(3, plan.ExpectedOutput.StreamCount);
+
+        var outPath = await RunAndVerifyAsync(plan, src, req);
+        var output = await ProbeAsync(outPath);
+        Assert.Contains(output.Streams, s => s.Kind == MediaKind.Attachment);
+    }
+
+    [Fact]
+    public async Task Transcode_Mkv_KeepsFontAttachments()
+    {
+        var baseVideo = await TestSupport.GenerateVideoAsync("attach-transcode-base.mp4");
+        var font = TestSupport.PathFor("transcode-font.ttf");
+        if (!File.Exists(font)) await File.WriteAllBytesAsync(font, new byte[] { 0x00, 0x01, 0x00, 0x00 });
+        var path = TestSupport.PathFor("attach-transcode-src.mkv");
+        if (!File.Exists(path))
+        {
+            await RunFfmpegAsync(
+                "-hide_banner", "-y", "-i", baseVideo,
+                "-attach", font, "-metadata:s:t:0", "mimetype=application/x-truetype-font",
+                "-c", "copy", path);
+        }
+        var source = await ProbeAsync(path);
+        Assert.Contains(source.Streams, s => s.Kind == MediaKind.Attachment);
+
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv);
         var (plan, src, req) = await PlanAsync(source, request);
         Assert.Equal(1, plan.ExpectedOutput.AttachmentStreamCount);
         Assert.Equal(3, plan.ExpectedOutput.StreamCount);
@@ -327,6 +489,28 @@ public class PipelineRegressionTests
         Assert.Contains("0:3", args);
     }
 
+    [Fact]
+    public async Task Planner_RejectsRealPlaylistInput()
+    {
+        var playlist = Path.Combine(TestSupport.NewWorkDir("hls-input"), "playlist.m3u8");
+        await RunFfmpegAsync(
+            "-hide_banner", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-f", "hls", "-hls_time", "1", "-hls_list_size", "0", playlist);
+
+        var source = await ProbeAsync(playlist);
+        Assert.Contains("hls", source.Format.FormatName, StringComparison.OrdinalIgnoreCase);
+
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mp4);
+        var planned = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+
+        Assert.False(planned.IsSuccess);
+        Assert.Equal(ResultKind.ValidationFailure, planned.Kind);
+        Assert.Contains("INPUT_FORMAT", planned.Failure!.TechnicalDetail);
+    }
+
     // ---------------- Classification / parser regressions ----------------
 
     [Fact]
@@ -361,6 +545,45 @@ public class PipelineRegressionTests
     }
 
     [Fact]
+    public void Parser_ReadsFullDispositionMask()
+    {
+        const string json = """
+        {
+          "streams": [
+            { "index": 0, "codec_name": "h264", "codec_type": "video", "width": 64, "height": 64,
+              "pix_fmt": "yuv420p", "disposition": { "default": 1 } },
+            { "index": 1, "codec_name": "aac", "codec_type": "audio", "channels": 2, "sample_rate": "48000",
+              "disposition": { "default": 0, "dub": 1, "original": 1, "comment": 1, "lyrics": 1, "karaoke": 1,
+                "forced": 0, "hearing_impaired": 1, "visual_impaired": 1, "clean_effects": 1,
+                "timed_thumbnails": 1, "non_diegetic": 1, "captions": 1, "descriptions": 1,
+                "metadata": 1, "dependent": 1, "still_image": 1, "multilayer": 1 } }
+          ],
+          "format": { "format_name": "matroska", "duration": "1.000000" }
+        }
+        """;
+        var snapshot = FfprobeJsonParser.Parse(json, "C:\\x\\disp.mkv", 1, DateTimeOffset.UtcNow, Guid.NewGuid());
+        var audio = Assert.Single(snapshot.AudioStreams);
+        Assert.False(audio.IsDefault);
+        Assert.False(audio.IsForced);
+        Assert.True(audio.IsDub);
+        Assert.True(audio.IsOriginal);
+        Assert.True(audio.IsComment);
+        Assert.True(audio.IsLyrics);
+        Assert.True(audio.IsKaraoke);
+        Assert.True(audio.IsHearingImpaired);
+        Assert.True(audio.IsVisualImpaired);
+        Assert.True(audio.IsCleanEffects);
+        Assert.True(audio.IsTimedThumbnails);
+        Assert.True(audio.IsNonDiegetic);
+        Assert.True(audio.IsCaptions);
+        Assert.True(audio.IsDescriptions);
+        Assert.True(audio.IsMetadata);
+        Assert.True(audio.IsDependent);
+        Assert.True(audio.IsStillImage);
+        Assert.True(audio.IsMultilayer);
+    }
+
+    [Fact]
     public void Parser_DoviConfigurationRecord_ExtractsProfile()
     {
         const string json = """
@@ -381,6 +604,9 @@ public class PipelineRegressionTests
         var video = snapshot.PrimaryVideo!;
         Assert.Equal(8, video.DvProfile);
         Assert.Equal(1, video.DvBlSignalCompatibilityId);
+        Assert.True(video.DvRpuPresent);
+        Assert.False(video.DvElPresent);
+        Assert.True(video.DvBlPresent);
         Assert.Equal(ColorClassification.DolbyVision, snapshot.ColorClassification);
     }
 

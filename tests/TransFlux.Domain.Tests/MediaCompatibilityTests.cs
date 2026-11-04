@@ -12,6 +12,13 @@ public class MediaCompatibilityTests
     private static SourceSnapshot BasicSdrSource() =>
         TestData.Source(new[] { TestData.Video(), TestData.Audio() });
 
+    [Fact]
+    public void NewRequest_DefaultsToVersionTwo()
+    {
+        var request = new ConversionRequest { SourceSnapshotId = Guid.NewGuid() };
+        Assert.Equal(2, request.RequestVersion);
+    }
+
     // ---------------- Video transcode ----------------
 
     [Fact]
@@ -78,6 +85,154 @@ public class MediaCompatibilityTests
             var src = TestData.Source(new[] { TestData.Video(pixelFormat: pix), TestData.Audio() });
             Assert.Empty(MediaCompatibility.Validate(TestData.Request(), src));
         }
+    }
+
+    [Fact]
+    public void Transcode_V2ExplicitEmptyAudio_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, audioTracks: new AudioSelection { Mode = AudioSelectionMode.Explicit }),
+            src);
+        Assert.True(Has(issues, "AUDIO_SELECTION"));
+    }
+
+    [Fact]
+    public void Transcode_V2ExplicitAudioTrack_IsAllowed()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, audioTracks: AudioSelection.Tracks(1)),
+            src);
+        Assert.Empty(issues);
+    }
+
+    [Fact]
+    public void Transcode_V2ExplicitAudioAllInvalidIndices_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, audioTracks: AudioSelection.Tracks(99)),
+            src);
+
+        Assert.True(Has(issues, "AUDIO_SELECTION"));
+        Assert.Contains(issues, i => i.Code == "AUDIO_SELECTION" && i.Blocking);
+    }
+
+    [Fact]
+    public void Transcode_V2ExplicitAudioMixedValidAndInvalid_IsAllowed()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, audioTracks: AudioSelection.Tracks(99, 1)),
+            src);
+        Assert.DoesNotContain(issues, i => i.Code == "AUDIO_SELECTION");
+    }
+
+    // ---------------- G2: audio copy during video transcode ----------------
+
+    [Fact]
+    public void AudioCopyCapability_IsMkvOnlyAndNotInEncodeList()
+    {
+        Assert.True(OutputFormatCatalog.SupportsAudioCopy(ContainerFormat.Mkv));
+        Assert.False(OutputFormatCatalog.SupportsAudioCopy(ContainerFormat.Mp4));
+        Assert.False(OutputFormatCatalog.SupportsAudioCopy(ContainerFormat.Mov));
+        Assert.False(OutputFormatCatalog.SupportsAudioCopy(ContainerFormat.Webm));
+        Assert.DoesNotContain(AudioCodec.Copy, OutputFormatCatalog.AudioCodecs(ContainerFormat.Mkv));
+    }
+
+    [Theory]
+    [InlineData("ac3")]
+    [InlineData("eac3")]
+    [InlineData("truehd")]
+    public void Transcode_AudioCopy_Mkv_SupportedSourceCodec_IsAllowed(string sourceCodec)
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio(codec: sourceCodec) });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mkv, audioCodec: AudioCodec.Copy), src);
+
+        Assert.Empty(issues);
+    }
+
+    [Fact]
+    public void Transcode_AudioCopy_Mp4_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio(codec: "ac3") });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mp4, audioCodec: AudioCodec.Copy), src);
+
+        Assert.True(Has(issues, "AUDIO_COPY_UNSUPPORTED"));
+        Assert.Contains(issues, i => i.Code == "AUDIO_COPY_UNSUPPORTED" && i.Blocking);
+    }
+
+    [Fact]
+    public void Transcode_AudioCopy_UnsupportedSourceCodec_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio(codec: "pcm_f32le") });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mkv, audioCodec: AudioCodec.Copy), src);
+
+        Assert.True(Has(issues, "AUDIO_COPY_UNSUPPORTED"));
+    }
+
+    [Fact]
+    public void Transcode_AudioCopy_OneUnsupportedOfMultipleTracks_IsBlocked()
+    {
+        var src = TestData.Source(new[]
+        {
+            TestData.Video(),
+            TestData.Audio(index: 1, codec: "ac3"),
+            TestData.Audio(index: 2, codec: "pcm_f32le"),
+        });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mkv, audioCodec: AudioCodec.Copy), src);
+
+        Assert.True(Has(issues, "AUDIO_COPY_UNSUPPORTED"));
+    }
+
+    [Fact]
+    public void Transcode_AudioCopy_NoAudio_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mkv, audioCodec: AudioCodec.Copy), src);
+
+        Assert.True(Has(issues, "AUDIO_COPY_UNSUPPORTED"));
+    }
+
+    [Fact]
+    public void Transcode_AudioCopy_AudioNone_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio(codec: "ac3") });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(container: ContainerFormat.Mkv, audioCodec: AudioCodec.Copy,
+                requestVersion: 2, audioTracks: AudioSelection.None), src);
+
+        Assert.True(Has(issues, "AUDIO_COPY_UNSUPPORTED"));
+    }
+
+    [Fact]
+    public void Transcode_V2SelectsNonPrimaryHdrVideo_IsBlocked()
+    {
+        var sdr = TestData.Video(index: 0, color: ColorClassification.SdrBt709);
+        var hdr = TestData.Video(index: 1, bitDepth: 10, pixelFormat: "yuv420p10le",
+            colorTransfer: "smpte2084", colorPrimaries: "bt2020", color: ColorClassification.Hdr10);
+        var src = TestData.Source(new[] { sdr, hdr });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, video: VideoSelection.Stream(1)), src);
+        Assert.True(Has(issues, "NON_SDR"));
+    }
+
+    [Fact]
+    public void Transcode_V2SelectsSdrTrackFromMixedSource_IsAllowed()
+    {
+        var hdr = TestData.Video(index: 0, bitDepth: 10, pixelFormat: "yuv420p10le",
+            colorTransfer: "smpte2084", colorPrimaries: "bt2020", color: ColorClassification.Hdr10);
+        var sdr = TestData.Video(index: 1, color: ColorClassification.SdrBt709);
+        var src = TestData.Source(new[] { hdr, sdr }, ColorClassification.Hdr10);
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(requestVersion: 2, video: VideoSelection.Stream(1)), src);
+        Assert.False(Has(issues, "NON_SDR"));
     }
 
     [Fact]
@@ -187,6 +342,30 @@ public class MediaCompatibilityTests
         var issues = MediaCompatibility.Validate(
             TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
         Assert.True(Has(issues, "EMPTY"));
+    }
+
+    [Fact]
+    public void Remux_V2ExplicitAudioAllInvalidIndices_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv,
+                requestVersion: 2, audioTracks: AudioSelection.Tracks(99)),
+            src);
+
+        Assert.True(Has(issues, "AUDIO_SELECTION"));
+        Assert.Contains(issues, i => i.Code == "AUDIO_SELECTION" && i.Blocking);
+    }
+
+    [Fact]
+    public void Remux_V2ExplicitAudioMixedValidAndInvalid_IsAllowed()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv,
+                requestVersion: 2, audioTracks: AudioSelection.Tracks(99, 1)),
+            src);
+        Assert.DoesNotContain(issues, i => i.Code == "AUDIO_SELECTION");
     }
 
     [Fact]
@@ -329,5 +508,40 @@ public class MediaCompatibilityTests
     {
         Assert.True(CompatibilityIssue.Block("x", "blocked").Blocking);
         Assert.False(CompatibilityIssue.Warn("y", "warning").Blocking);
+    }
+
+    // ---------------- N07: playlist/concat/image-sequence input formats ----------------
+
+    [Theory]
+    [InlineData("concat")]
+    [InlineData("ffconcat")]
+    [InlineData("hls")]
+    [InlineData("applehttp")]
+    [InlineData("dash")]
+    [InlineData("image2")]
+    [InlineData("image2pipe")]
+    public void PlaylistConcatAndImageSequenceInputs_AreBlocked(string formatName)
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() }, formatName: formatName);
+        var issues = MediaCompatibility.Validate(TestData.Request(), src);
+
+        Assert.True(Has(issues, "INPUT_FORMAT"));
+        Assert.Contains(issues, i => i.Code == "INPUT_FORMAT" && i.Blocking);
+    }
+
+    [Theory]
+    [InlineData("mov,mp4,m4a,3gp,3g2,mj2")]
+    [InlineData("matroska,webm")]
+    [InlineData("ogg")]
+    [InlineData("flac")]
+    [InlineData("wav")]
+    [InlineData("mp3")]
+    [InlineData("aac")]
+    public void NormalSingleFileInputFormats_AreNotRejected(string formatName)
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() }, formatName: formatName);
+        var issues = MediaCompatibility.Validate(TestData.Request(), src);
+
+        Assert.DoesNotContain(issues, i => i.Code == "INPUT_FORMAT");
     }
 }

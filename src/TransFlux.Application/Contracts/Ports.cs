@@ -52,6 +52,9 @@ public interface IJobStore
     Task<IReadOnlyList<OutputRecord>> GetOutputsForJobAsync(Guid jobId, CancellationToken ct);
     Task UpsertJournalAsync(CommitJournalEntry entry, CancellationToken ct);
     Task<CommitJournalEntry?> GetJournalAsync(string token, CancellationToken ct);
+    /// <summary>Journals recovery must reconcile: Prepared, Published and Failed rows. Failed
+    /// rows are closed by the reconciler so a crash between marking a failure and deleting the
+    /// journal cannot leak rows forever.</summary>
     Task<IReadOnlyList<CommitJournalEntry>> GetOpenJournalsAsync(CancellationToken ct);
     Task DeleteJournalAsync(string token, CancellationToken ct);
     Task<IReadOnlyList<Preset>> GetPresetsAsync(CancellationToken ct);
@@ -111,6 +114,8 @@ public sealed record CommitRequest
     public required string TempPath { get; init; }
     public required string FinalPath { get; init; }
     public long ExpectedSize { get; init; }
+    /// <summary>Human-readable verification result persisted with the output record.</summary>
+    public string VerificationSummary { get; init; } = string.Empty;
 }
 
 public sealed record CommitResult

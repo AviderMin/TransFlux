@@ -425,6 +425,97 @@ public class JobSchedulerTests
     }
 
     [Fact]
+    public async Task AbandonNeedsAttention_CleansStagingJournalAndReservation_WithoutDeletingFinalOutput()
+    {
+        await using var h = new SchedulerHarness();
+        h.Runner.Handler = (attempt, _, _) =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(attempt.TempPath)!);
+            File.WriteAllText(attempt.TempPath, "verified-output");
+            return Task.FromResult(RunResult.Ok(0, TimeSpan.FromSeconds(1), 15, null));
+        };
+        h.Committer.OnCommit = (_, _) => Task.FromResult(new CommitResult
+        {
+            Success = false,
+            Failure = FailureInfo.Of(FailureCode.CommitFailed, "error.commitFailed", "injected commit failure"),
+        });
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        await h.WaitForStateAsync(id, JobState.NeedsAttention);
+        var attempt = Assert.Single(h.Store.AllAttempts);
+        var workDirectory = Path.GetDirectoryName(attempt.TempPath)!;
+        var finalPath = attempt.ReservedFinalPath;
+
+        // A user file already at the reserved final name must never be deleted by abandonment.
+        File.WriteAllText(finalPath, "user-final-output");
+        var journal = new CommitJournalEntry
+        {
+            CommitToken = Guid.NewGuid().ToString("N"),
+            AttemptId = attempt.AttemptId,
+            JobId = id,
+            Phase = CommitPhase.Prepared,
+            TempPath = attempt.TempPath,
+            FinalPath = finalPath,
+            SizeBytes = 15,
+            UpdatedUtc = DateTimeOffset.UtcNow,
+        };
+        await h.Store.UpsertJournalAsync(journal, default);
+
+        Assert.True(await h.Scheduler.AbandonAsync(id, CancellationToken.None));
+
+        Assert.Equal(JobState.Canceled, (await h.Store.GetJobAsync(id, default))!.State);
+        Assert.Null(await h.Store.GetJournalAsync(journal.CommitToken, default));
+        Assert.True(File.Exists(finalPath), "abandon must never delete the user's final output file");
+        Assert.False(Directory.Exists(workDirectory));
+        Assert.Contains(h.OutputPaths.ReservationReleased, r => r.FinalPath == finalPath);
+        Assert.Contains(h.OutputPaths.WorkDirectoriesDeleted, r => r.WorkDirectory == workDirectory);
+    }
+
+    [Fact]
+    public async Task Abandon_RefusesJobsThatAreNotNeedsAttention()
+    {
+        await using var h = new SchedulerHarness();
+        var id = await h.EnqueueAsync();
+
+        Assert.False(await h.Scheduler.AbandonAsync(id, CancellationToken.None));
+        Assert.Equal(JobState.Queued, (await h.Store.GetJobAsync(id, default))!.State);
+
+        h.Scheduler.Start();
+        await h.WaitForStateAsync(id, JobState.Succeeded);
+
+        Assert.False(await h.Scheduler.AbandonAsync(id, CancellationToken.None));
+        Assert.Equal(JobState.Succeeded, (await h.Store.GetJobAsync(id, default))!.State);
+    }
+
+    [Fact]
+    public async Task CancellationDuringCommit_DoesNotBecomeNeedsAttention()
+    {
+        await using var h = new SchedulerHarness();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.Committer.OnCommit = async (_, ct) =>
+        {
+            entered.TrySetResult();
+            await Task.Delay(Timeout.Infinite, ct);
+            return new CommitResult { Success = true };
+        };
+
+        h.Scheduler.Start();
+        var id = await h.EnqueueAsync();
+        await entered.Task;
+        await h.WaitForStateAsync(id, JobState.Committing);
+
+        // Shutdown cancels the job's token while CommitAsync is awaiting it.
+        await h.Scheduler.DisposeAsync();
+
+        var job = await h.Store.GetJobAsync(id, default);
+        Assert.NotNull(job);
+        Assert.NotEqual(JobState.NeedsAttention, job!.State);
+        var attempt = Assert.Single(h.Store.AllAttempts);
+        Assert.Equal(AttemptState.Canceled, attempt.State);
+    }
+
+    [Fact]
     public async Task CommitSuccess_ReleasesReservationAndDeletesWorkDirectory()
     {
         await using var h = new SchedulerHarness();

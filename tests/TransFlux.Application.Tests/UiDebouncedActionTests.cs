@@ -23,6 +23,26 @@ public sealed class UiDebouncedActionTests
     }
 
     [Fact]
+    public async Task LatestActionWins_WhenPreviousActionIsStillRunning()
+    {
+        using var debounced = new DebouncedAction(TimeSpan.FromMilliseconds(10));
+        var values = new List<int>();
+        var firstStarted = new TaskCompletionSource();
+        debounced.Schedule(async () =>
+        {
+            firstStarted.SetResult();
+            await Task.Delay(200);
+            values.Add(1);
+        });
+        await firstStarted.Task;
+        debounced.Schedule(() => { values.Add(2); return Task.CompletedTask; });
+
+        await debounced.FlushAsync();
+
+        Assert.Equal(new[] { 1, 2 }, values);
+    }
+
+    [Fact]
     public async Task FlushAwaitsPendingRun()
     {
         using var debounced = new DebouncedAction(TimeSpan.FromMilliseconds(250));

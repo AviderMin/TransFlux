@@ -43,6 +43,19 @@ public sealed class OutputPathServiceTests
     }
 
     [Fact]
+    public void IsWorkDirectory_ValidatesOnlyTransfluxStagingLayout()
+    {
+        using var dir = new TempDir();
+        var staging = Path.Combine(dir.Path, ".transflux-work", "token");
+        Assert.True(OutputPathService.IsWorkDirectory(staging));
+        Assert.True(OutputPathService.IsWorkDirectory(staging + Path.DirectorySeparatorChar));
+        Assert.False(OutputPathService.IsWorkDirectory(dir.Path));
+        Assert.False(OutputPathService.IsWorkDirectory(Path.Combine(dir.Path, "other", "token")));
+        Assert.False(OutputPathService.IsWorkDirectory(string.Empty));
+        Assert.False(OutputPathService.IsWorkDirectory(null));
+    }
+
+    [Fact]
     public async Task Reserve_HonorsPreferredDirectory_And_SanitizesName()
     {
         using var dir = new TempDir();
@@ -112,6 +125,27 @@ public sealed class OutputPathServiceTests
         Assert.True(File.Exists(reserved.FinalPath + ".transflux-reserve"));
         Assert.False(Directory.Exists(reserved.WorkDirectory));
         Assert.False(File.Exists(staged));
+    }
+
+    [Fact]
+    public void DeleteWorkDirectory_RefusesDirectoryOutsideStagingLayout()
+    {
+        using var dir = new TempDir();
+        var service = new OutputPathService(new WindowsFileSystemService(), new SystemClock());
+        var arbitrary = Path.Combine(dir.Path, "keep-me");
+        Directory.CreateDirectory(arbitrary);
+        File.WriteAllText(Path.Combine(arbitrary, "user-file.txt"), "keep");
+
+        service.DeleteWorkDirectory(new ReservedOutput
+        {
+            FinalPath = Path.Combine(dir.Path, "out.mp4"),
+            WorkDirectory = arbitrary,
+            CommitToken = "token",
+            Extension = ".mp4",
+        });
+
+        Assert.True(Directory.Exists(arbitrary));
+        Assert.True(File.Exists(Path.Combine(arbitrary, "user-file.txt")));
     }
 
     [Fact]

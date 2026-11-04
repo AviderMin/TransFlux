@@ -55,7 +55,10 @@ public static class ProcessCapture
             canceled = ct.IsCancellationRequested;
             timedOut = !canceled;
             managed.KillTree();
-            try { await proc.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+            // Bounded wait: a process stuck in an unkillable kernel I/O state must not hold a
+            // scheduler slot forever. Abandoning the wait is safe because the job handle still
+            // owns the tree and disposal terminates survivors.
+            try { await proc.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); } catch { }
         }
 
         try

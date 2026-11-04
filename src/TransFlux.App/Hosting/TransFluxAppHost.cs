@@ -30,7 +30,32 @@ public static class TransFluxAppHost
 
         var dbPath = AppDataPaths.GetDatabasePath();
         var store = new SqliteJobStore(dbPath);
-        store.InitializeAsync(CancellationToken.None).GetAwaiter().GetResult();
+        try
+        {
+            // A corrupt or locked state.db must never prevent the window from opening: move the
+            // unusable file aside, restore the .bak backup when present, and continue.
+            store.InitializeWithRecoveryAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            // Last-resort fallback: a fresh, uniquely named temp database keeps the workbench usable
+            // even if a previous fallback file is itself corrupt or locked. If that also fails we
+            // fail with one clear exception instead of an unhandled secondary crash.
+            System.Diagnostics.Debug.WriteLine("TransFlux database recovery failed: " + ex);
+            try
+            {
+                var fallbackDirectory = Path.Combine(Path.GetTempPath(), "TransFlux");
+                Directory.CreateDirectory(fallbackDirectory);
+                store = new SqliteJobStore(Path.Combine(fallbackDirectory, $"state-{Guid.NewGuid():N}.db"));
+                store.InitializeWithRecoveryAsync(CancellationToken.None).GetAwaiter().GetResult();
+            }
+            catch (Exception fallbackEx)
+            {
+                throw new InvalidOperationException(
+                    "TransFlux could not initialize its state database or a temporary fallback database.",
+                    new AggregateException(ex, fallbackEx));
+            }
+        }
 
         var clock = new SystemClock();
         var fs = new WindowsFileSystemService();
@@ -86,6 +111,17 @@ public static class TransFluxAppHost
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine("TransFlux recovery failed: " + ex);
+        }
+
+        // Terminal-only staging sweep after recovery has closed/reconciled journals. It is
+        // best-effort by design and must never prevent startup; NeedsAttention staging is kept.
+        try
+        {
+            OrphanCleanupService.RunAsync(store, outputPaths, clock, CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("TransFlux orphan cleanup failed: " + ex);
         }
 
         // Recovered work is visible before the user explicitly continues the queue.

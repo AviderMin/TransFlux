@@ -203,6 +203,9 @@ public sealed class AppRoot : Component<AppServices>
         }
         var selected = snapshot.Selection;
         var selectedIds = selected.Select(i => i.Id).ToArray();
+        // NeedsAttention cards are explicitly abandoned from their own action button; bulk remove
+        // must never destroy preserved staging without that dedicated action.
+        var removableSelected = selected.Where(i => i.CanRemove).Select(i => i.Id).ToArray();
         async Task ApplyAsync(Func<ConversionOptions, ConversionOptions> mutate)
         {
             if (selected.Count == 0 || selected.Any(i => !i.CanEdit)) return;
@@ -324,7 +327,8 @@ public sealed class AppRoot : Component<AppServices>
                 return TaskRow.Render(item, snapshot.Selected.Contains(id), snapshot.Paused,
                     new TaskRowActions(
                         () => store.Select(id), () => store.Select(id, true),
-                        () => Run(() => store.RemoveAsync([id])), () => setCancelId(id),
+                        () => Run(() => store.RemoveAsync([id])), () => Run(() => store.AbandonAsync(id)),
+                        () => setCancelId(id),
                         () => Run(async () => { await store.CopyAsync(id); setFilter(0); }),
                         () => Run(() => store.MoveQueuedAsync(id, -1)), () => Run(() => store.MoveQueuedAsync(id, 1)),
                         () => Run(() => store.RetryAsync(id)), () => Run(() => store.EditQueuedAsync(id)),
@@ -355,8 +359,10 @@ public sealed class AppRoot : Component<AppServices>
             .Width(140).AutomationName("筛选任务");
         var selectionBar = Grid(columns: [GridSize.Star(), GridSize.Auto, GridSize.Auto], rows: [GridSize.Auto],
             Ui.DimCaption($"{snapshot.Items.Count} 个项目 · 已选 {selected.Count} 项").VAlign(VerticalAlignment.Center).Grid(column: 0),
-            Button("移除已选", () => Run(() => store.RemoveAsync(selectedIds))).SubtleButton()
-                .IsEnabled(selected.Any(i => i.CanRemove)).ToolTip("仅移除待开始或已经结束的项目；运行中的任务请取消。").Grid(column: 1),
+            Button("移除已选", () => Run(() => store.RemoveAsync(removableSelected))).SubtleButton()
+                .IsEnabled(removableSelected.Length > 0)
+                .ToolTip("仅移除待开始或已经结束的项目；需放弃暂存证据的任务请使用卡片上的“放弃并清理暂存”。")
+                .Grid(column: 1),
             filters.Grid(column: 2));
         var taskSurface = Grid(columns: [GridSize.Star()], rows: [GridSize.Auto, GridSize.Auto, GridSize.Star()],
             toolbar.Grid(row: 0).Margin(0, 0, 0, Space.Md),

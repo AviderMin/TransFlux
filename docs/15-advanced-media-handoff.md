@@ -13,7 +13,7 @@
 ## 开始时应确认的事实
 
 - 审查基线 commit 为 `bf04a00efb37a0616ce10f38480ff09b9624314b`，另有用户的 UI/滚动和文档工作区修改；应以接手时真实 diff 为准，不以本页覆盖新改动。
-- 当前版本 1.0.0.8；旧安装包不能代表后来源码。继承对称 12 DIP 滚动内容留白、工作台 3:2、右侧设置分组、文件优先和即时生效语义。
+- 当时版本 1.0.0.8（当前源码版本与最新复核见 [16 项目复核](16-project-review-20261103.md)）；旧安装包不能代表后来源码。继承对称 12 DIP 滚动内容留白、工作台 3:2、右侧设置分组、文件优先和即时生效语义。
 - 核心 Gyan FFmpeg 8.0.1 shared，manifest 固定 exe/DLL/归档身份；已有 NVIDIA 591.86 兼容证据。试跑 H.264 不等于 Main10/HDR/Vulkan 可用。
 - 本轮 Release 测试 366 项通过；13 的 Published 假成功、音轨选择移除字幕等边界仍已复现，不能用全绿测试否定报告。
 - 当前已有 HEVC/AV1/VP9 软件编码和软字幕转换；不要按旧“首发只 H.264、字幕全部丢弃”的设计倒退实现。
@@ -122,4 +122,4 @@ dotnet run --project tools/TransFlux.E2E -- --fallback-smoke
 - **T01 已完成**：Published/Prepared 恢复统一身份核验；提交失败保留 staging/journal；真实 SQLite + 临时目录故障测试通过。
 - **T02 已完成**：请求 v2 选流（v1 旧快照语义不变）、音频/字幕解耦、音频提取单轨、取消语义、ExecutedCandidateId、暂停工作台持久化；失败测试先行有记录。
 - 验证：Release 构建 0 warnings / 0 errors，438/438 测试通过，真实 CPU E2E PASS。详见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md)。
-- **T03 及以后未开始**；Dolby/HDR/字幕烧录仍未实现，不能以本轮 G0 结果宣称高级能力已支持。
+- **T03/T04 及以后未开始**；2026-11-04 补充：T05 的 G2 音频复制切片（视频转码 + MKV 原样复制音频）部分完成，见 [G2 证据](evidence/G2-AUDIO-COPY.md)；Dolby/HDR/字幕烧录仍未实现，不能据此宣称高级能力已全面支持。

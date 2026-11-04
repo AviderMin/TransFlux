@@ -540,6 +540,90 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
         return true;
     }
 
+    /// <summary>
+    /// Abandons a NeedsAttention job: deletes the commit journal left by an unresolved/failed
+    /// commit, releases the output naming reservation, removes the attempt work directory, and
+    /// marks the job Canceled so the visible card can be dropped without orphaning disk state.
+    /// Only NeedsAttention is eligible; active jobs and terminal successes are refused, and the
+    /// user's final output file is never deleted.
+    /// </summary>
+    public async Task<bool> AbandonAsync(Guid id, CancellationToken ct)
+    {
+        var job = await _store.GetJobAsync(id, ct).ConfigureAwait(false);
+        if (job is null || job.State != JobState.NeedsAttention)
+        {
+            return false;
+        }
+
+        var journals = (await _store.GetOpenJournalsAsync(ct).ConfigureAwait(false))
+            .Where(j => j.JobId == id)
+            .OrderByDescending(j => j.UpdatedUtc)
+            .ToList();
+        var attempts = await _store.GetAttemptsForJobAsync(id, ct).ConfigureAwait(false);
+
+        // Claim the job with the terminal CAS first. If another actor changed its state we do not
+        // destroy any staging evidence; cleanup below only runs for the state we actually own.
+        if (!await TryTransitionAsync(id, JobState.Canceled, ct).ConfigureAwait(false))
+        {
+            return false;
+        }
+        Publish(new JobEvent { Kind = JobEventKind.Removed, JobId = id });
+
+        CleanupAbandonedAttempt(journals.Count > 0 ? journals[0] : null, attempts);
+
+        // A Failed/Published row left behind by a delete failure is harmless: recovery closes it
+        // on the next start (the job is terminal, so it will not be re-opened as Succeeded).
+        foreach (var journal in journals)
+        {
+            try { await _store.DeleteJournalAsync(journal.CommitToken, ct).ConfigureAwait(false); }
+            catch { /* best effort; the journal is idempotently cleaned by recovery */ }
+        }
+
+        return true;
+    }
+
+    /// <summary>Releases the reservation lock and deletes the attempt work directory reconstructed
+    /// from the journal or the latest attempt. The work directory must look like the scheduler's
+    /// .transflux-work staging area; otherwise deletion is skipped to protect arbitrary folders.</summary>
+    private void CleanupAbandonedAttempt(CommitJournalEntry? journal, IReadOnlyList<Attempt> attempts)
+    {
+        string? tempPath = journal?.TempPath;
+        string? finalPath = journal?.FinalPath;
+        var commitToken = journal?.CommitToken;
+        if (string.IsNullOrWhiteSpace(tempPath) || string.IsNullOrWhiteSpace(finalPath))
+        {
+            var attempt = attempts.OrderByDescending(a => a.Ordinal)
+                .FirstOrDefault(a => !string.IsNullOrWhiteSpace(a.TempPath));
+            if (attempt is null)
+            {
+                return;
+            }
+            tempPath = attempt.TempPath;
+            finalPath = attempt.ReservedFinalPath;
+            try { commitToken ??= Path.GetFileName(Path.GetDirectoryName(attempt.TempPath)); } catch { }
+        }
+        if (string.IsNullOrWhiteSpace(finalPath))
+        {
+            return;
+        }
+
+        var workDirectory = OutputStagingLayout.GetWorkDirectory(tempPath);
+
+        var reservation = new ReservedOutput
+        {
+            FinalPath = finalPath!,
+            WorkDirectory = workDirectory ?? string.Empty,
+            CommitToken = commitToken ?? string.Empty,
+            Extension = Path.GetExtension(tempPath) ?? string.Empty,
+        };
+
+        try { _outputPaths.ReleaseReservation(reservation); } catch { }
+        if (workDirectory is not null)
+        {
+            try { _outputPaths.DeleteWorkDirectory(reservation); } catch { }
+        }
+    }
+
     // =====================================================================================
     // Per-job execution
     // =====================================================================================
@@ -912,7 +996,14 @@ public sealed class JobScheduler : IJobService, IAsyncDisposable
                         TempPath = tempPath,
                         FinalPath = reserved.FinalPath,
                         ExpectedSize = runResult.OutputBytes ?? 0,
+                        VerificationSummary = verification.Summary,
                     }, cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                {
+                    // Cancellation at the commit boundary is not a failed commit: rethrow so the
+                    // outer canceled path records Canceled semantics instead of NeedsAttention.
+                    throw;
                 }
                 catch (Exception ex)
                 {

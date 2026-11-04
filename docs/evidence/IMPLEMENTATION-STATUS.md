@@ -5,14 +5,14 @@ Output targets now separate media form, container and codec; see [output format 
 See [UX redesign evidence](UX-workbench-redesign.md) and [current UX specification](../03-ui-ux.md).
 Counts below are current for this build; linked screenshot records may show earlier UI where explicitly noted.
 
-Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented + G0 reliability gate passed**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; review R01/R02/R03/R05/R07/R09/R10/R11 fixed with failure-first tests; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.8 built and verified, signed MSIX pending. This is a real build, not a design document. G0 evidence: [G0-RELIABILITY.md](G0-RELIABILITY.md).
+Date: 2026-11-01（2026-11-03 复核后源码版本 1.0.0.9；本文件记录的最后一次安装包验证仍为 1.0.0.8） · Branch: master · Status: **P0 vertical slice implemented + G0 reliability gate passed**: M0/M1 complete, M2/M4 implemented and tested, file-first workbench and layered output targets; review R01/R02/R03/R05/R07/R09/R10/R11 fixed with failure-first tests; M3 hardware only H.264 partially verified; unsigned Inno Setup 1.0.0.8 built and verified, signed MSIX pending. This is a real build, not a design document. G0 evidence: [G0-RELIABILITY.md](G0-RELIABILITY.md).
 
 ## What works (executed)
 
 | Area | Status | Evidence |
 |---|---|---|
 | Solution builds (Domain, Application, Engine.FFmpeg, Hardware.Windows, Infrastructure, App, 4 test projects) | ✅ 0 warnings / 0 errors | `dotnet build TransFlux.slnx -c Debug` |
-| Unit + integration tests | ✅ **438 passed / 0 failed** | Domain 130, Application 119, Infrastructure 51, Engine 138 (build 0 warnings / 0 errors) |
+| Unit + integration tests | ✅ **542 passed / 0 failed** | Domain 170, Application 137, Infrastructure 65, Engine 170 (build 0 warnings / 0 errors) |
 | Real Reactor native window renders | ✅ | `docs/evidence/M4-ui-runtime.md`, `ui-tree.txt`, `screenshots/convert.png` |
 | Real end-to-end conversion (probe→plan→encode→verify→commit) | ✅ PASS, source unchanged | `docs/evidence/M1-E2E-runtime.md` |
 | Pinned GPL FFmpeg core (libx264/NVENC/QSV/AMF/AAC/FLAC) | ✅ hash-pinned | `tools/ffmpeg/core-manifest.json` |
@@ -21,6 +21,7 @@ Date: 2026-11-01 · Branch: master · Status: **P0 vertical slice implemented + 
 | Layered output targets: 4 video containers + 7 audio containers, 49 video + 10 audio combinations | ✅ real encode/decode of all 59 combinations | `docs/evidence/OUTPUT-FORMATS.md` |
 | SQLite persistence, migrations, commit journal, crash reconciliation | ✅ Infrastructure tests | Infrastructure tests; G0: real SQLite + temp-dir recovery tests in [G0-RELIABILITY.md](G0-RELIABILITY.md) |
 | G0 reliability: no false success, commit-failure staging preserved, stream selection/audio-subtitle split, cancellation, executed candidate, workbench binding persistence | ✅ failure-first tests + full suite | [G0-RELIABILITY.md](G0-RELIABILITY.md) |
+| G2 audio-copy slice: video transcode + MKV source-audio stream copy (AC3/EAC3/TrueHD rule gate; real AC3 6ch) | ✅ Domain/Engine/UI tests + full suite | [G2-AUDIO-COPY.md](G2-AUDIO-COPY.md) |
 | DXGI adapter enumeration + capability trials + cache | ✅ real DXGI | `docs/evidence/M3-hardware.md` |
 | Reactor UI: file-first task-card workbench, right-side output inspector, top-bar settings/about/history, execution bar | ✅ compiles + real-window checked | `docs/evidence/UX-workbench-redesign.md`, `docs/evidence/OUTPUT-FORMATS.md` |
 

@@ -45,7 +45,7 @@ flowchart TD
 TransFlux.sln
 global.json                       # M0 写入已验证 SDK
 Directory.Build.props             # nullable、告警、语言版本
-Directory.Packages.props          # 精确包版本
+（各 .csproj 内联精确包版本；ManagePackageVersionsCentrally=false）
 src/
   TransFlux.App/                   # 启动、Reactor 组件、主题、资源
     Components/{Shell,Convert,Queue,Presets,Settings,Shared}/

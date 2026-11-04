@@ -18,6 +18,13 @@ public static class OutputFormatCatalog
         ContainerFormat.Webm => [VideoCodec.Vp9, VideoCodec.Av1],
         _ => [],
     };
+    /// <summary>
+    /// Containers that can receive stream-copied audio during a video transcode. MKV is the
+    /// first G2 slice; Copy is deliberately NOT part of <see cref="AudioCodecs"/> so it never
+    /// appears in the normal re-encode matrix.
+    /// </summary>
+    public static bool SupportsAudioCopy(ContainerFormat container) => container == ContainerFormat.Mkv;
+
     public static IReadOnlyList<AudioCodec> AudioCodecs(ContainerFormat container) => container switch
     {
         ContainerFormat.Mp4 => [AudioCodec.Aac, AudioCodec.Mp3, AudioCodec.Alac],

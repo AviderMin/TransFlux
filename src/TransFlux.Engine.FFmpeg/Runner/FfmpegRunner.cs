@@ -11,19 +11,35 @@ namespace TransFlux.Engine.FFmpeg.Runner;
 
 /// <summary>
 /// Executes one attempt's compiled argument list inside a Job Object, parses structured
-/// <c>-progress pipe:1</c> output and maps it to <see cref="EngineProgress"/>. Cancellation
-/// terminates the whole process tree. Never reports success without a non-empty output file.
+/// <c>-progress pipe:1</c> output and maps it to <see cref="EngineProgress"/>. A watchdog
+/// enforces a hard total-runtime cap and a no-progress stall timeout; both kill the process
+/// tree and return a distinct failure instead of a cancellation. Cancellation still terminates
+/// the whole process tree and returns <see cref="RunResult.CanceledResult"/>. Never reports
+/// success without a non-empty output file.
 /// </summary>
 public sealed class FfmpegRunner : IMediaRunner
 {
     public const int MaxStderrTailChars = 64 * 1024;
     private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan KillWaitTimeout = TimeSpan.FromSeconds(10);
 
     private readonly FfmpegCorePaths _core;
+    private readonly RunnerLimits _limits;
 
-    public FfmpegRunner(FfmpegCorePaths core)
+    public FfmpegRunner(FfmpegCorePaths core) : this(core, RunnerLimits.Default)
+    {
+    }
+
+    public FfmpegRunner(FfmpegCorePaths core, RunnerLimits limits)
     {
         _core = core ?? throw new ArgumentNullException(nameof(core));
+        _limits = limits ?? throw new ArgumentNullException(nameof(limits));
+        if (_limits.MaxRuntime <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(limits), "RunnerLimits.MaxRuntime must be positive.");
+        if (_limits.StallTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(limits), "RunnerLimits.StallTimeout must be positive.");
+        if (_limits.PollInterval <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(limits), "RunnerLimits.PollInterval must be positive.");
     }
 
     public async Task<RunResult> RunAsync(AttemptContext attempt, IProgress<EngineProgress> progress, CancellationToken ct)
@@ -47,30 +63,67 @@ public sealed class FfmpegRunner : IMediaRunner
         {
             using var managed = ManagedProcess.Start(executable, arguments);
             var process = managed.Process;
+            var heartbeat = new ProgressHeartbeat();
+            using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
-            Task stdoutPump = PumpStdoutAsync(process.StandardOutput, progress, durationUs, ct);
-            Task stderrPump = PumpStderrAsync(process.StandardError, stderrTail, ct);
+            Task stdoutPump = PumpStdoutAsync(process.StandardOutput, progress, durationUs, heartbeat, pumpCts.Token);
+            Task stderrPump = PumpStderrAsync(process.StandardError, stderrTail, pumpCts.Token);
+
+            using var watchdogStop = new CancellationTokenSource();
+            var watchdogState = new WatchdogState();
+            Task watchdog = WatchdogAsync(managed, heartbeat, watchdogState, watchdogStop.Token);
 
             var canceled = false;
             try
             {
-                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+                var exitTask = process.WaitForExitAsync(ct);
+                var first = await Task.WhenAny(exitTask, watchdog).ConfigureAwait(false);
+                if (first == watchdog)
+                {
+                    // The watchdog killed the tree; wait briefly so output drains cannot race a
+                    // still-live process. A stuck kernel handle must not hold the caller forever.
+                    try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(KillWaitTimeout).ConfigureAwait(false); } catch { }
+                }
+                else
+                {
+                    await exitTask.ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
                 canceled = true;
                 managed.KillTree();
-                try { await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(KillWaitTimeout).ConfigureAwait(false); } catch { }
+            }
+            finally
+            {
+                watchdogStop.Cancel();
+                try { await watchdog.ConfigureAwait(false); } catch { }
             }
 
-            await SafeAsync(stdoutPump).ConfigureAwait(false);
-            await SafeAsync(stderrPump).ConfigureAwait(false);
+            // A killed child can leave an inherited stdout/stderr handle open; never let the
+            // drain loops hold the scheduler slot after the process tree is gone. Both waits
+            // are bounded and the readers are abandoned (cancelled) on timeout.
+            await Task.WhenAll(
+                AwaitBoundAsync(stdoutPump, KillWaitTimeout),
+                AwaitBoundAsync(stderrPump, KillWaitTimeout)).ConfigureAwait(false);
+            pumpCts.Cancel();
             stopwatch.Stop();
 
             if (canceled || ct.IsCancellationRequested)
             {
                 TryDelete(attempt.TempPath);
                 return RunResult.CanceledResult(stopwatch.Elapsed);
+            }
+
+            // Read the trip from the shared state: the watchdog writes it before killing the
+            // process, so a process-exit race can never downgrade a timeout to an ordinary error.
+            if (watchdogState.Trip is { } watchdogTrip)
+            {
+                TryDelete(attempt.TempPath);
+                return RunResult.Fail(null, stopwatch.Elapsed,
+                    FailureInfo.Of(FailureCode.ProcessFailed, watchdogTrip.MessageKey, watchdogTrip.Detail, retryable: true),
+                    Tail(stderrTail));
             }
 
             int exitCode;
@@ -120,7 +173,8 @@ public sealed class FfmpegRunner : IMediaRunner
         return list;
     }
 
-    private static async Task PumpStdoutAsync(StreamReader reader, IProgress<EngineProgress> progress, long? durationUs, CancellationToken ct)
+    private static async Task PumpStdoutAsync(StreamReader reader, IProgress<EngineProgress> progress, long? durationUs,
+        ProgressHeartbeat heartbeat, CancellationToken ct)
     {
         var block = new Dictionary<string, string>(StringComparer.Ordinal);
         var lastEmit = Stopwatch.StartNew();
@@ -140,6 +194,9 @@ public sealed class FfmpegRunner : IMediaRunner
                     continue;
                 }
 
+                // Any complete -progress block proves the encoder is still making progress;
+                // even a block without usable out_time/size fields refreshes the watchdog.
+                heartbeat.Beat();
                 var isEnd = string.Equals(value, "end", StringComparison.OrdinalIgnoreCase);
                 if (lastEmit.Elapsed >= ProgressThrottle || isEnd)
                 {
@@ -217,6 +274,71 @@ public sealed class FfmpegRunner : IMediaRunner
         catch (IOException) { }
     }
 
+    /// <summary>
+    /// Watches the total-runtime and progress-heartbeat clocks. On expiry it records the trip
+    /// reason <em>before</em> terminating the whole job tree, then exits; the caller maps the
+    /// recorded reason to a non-canceled failure even if the process-exit wait wins the race.
+    /// </summary>
+    private async Task WatchdogAsync(ManagedProcess managed, ProgressHeartbeat heartbeat, WatchdogState state, CancellationToken stop)
+    {
+        var started = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                await Task.Delay(_limits.PollInterval, stop).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            bool exited;
+            try { exited = managed.Process.HasExited; } catch { return; }
+            if (exited) return;
+
+            if (started.Elapsed >= _limits.MaxRuntime)
+            {
+                state.TripWith(new RunnerWatchdogTrip("run.timeout",
+                    $"ffmpeg exceeded the maximum runtime of {FormatDuration(_limits.MaxRuntime)} and was terminated."));
+                managed.KillTree();
+                return;
+            }
+
+            if (heartbeat.SinceProgress >= _limits.StallTimeout)
+            {
+                state.TripWith(new RunnerWatchdogTrip("run.stalled",
+                    $"ffmpeg produced no -progress heartbeat for {FormatDuration(_limits.StallTimeout)} and was terminated as stalled."));
+                managed.KillTree();
+                return;
+            }
+        }
+    }
+
+    private static string FormatDuration(TimeSpan value) => value.ToString("c", CultureInfo.InvariantCulture);
+
+    private sealed record RunnerWatchdogTrip(string MessageKey, string Detail);
+
+    /// <summary>Thread-safe holder for the watchdog trip; written before the kill, read after exit.</summary>
+    private sealed class WatchdogState
+    {
+        private RunnerWatchdogTrip? _trip;
+
+        public RunnerWatchdogTrip? Trip => Volatile.Read(ref _trip);
+
+        public void TripWith(RunnerWatchdogTrip trip) => Volatile.Write(ref _trip, trip);
+    }
+
+    /// <summary>Monotonic timestamp of the last parsed <c>-progress</c> block.</summary>
+    private sealed class ProgressHeartbeat
+    {
+        private long _lastTimestamp = Stopwatch.GetTimestamp();
+
+        public void Beat() => Interlocked.Exchange(ref _lastTimestamp, Stopwatch.GetTimestamp());
+
+        public TimeSpan SinceProgress => Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastTimestamp));
+    }
+
     private static FailureInfo ClassifyFailure(int exitCode, string stderr, long? bytes, bool hardware)
     {
         var lower = stderr.ToLowerInvariant();
@@ -278,9 +400,10 @@ public sealed class FfmpegRunner : IMediaRunner
         catch { /* tracing must never mask the original result */ }
     }
 
-    private static async Task SafeAsync(Task task)
+    /// <summary>Bounded wait used for output-drain pumps; a hung reader is abandoned, never awaited forever.</summary>
+    internal static async Task AwaitBoundAsync(Task task, TimeSpan timeout)
     {
-        try { await task.ConfigureAwait(false); } catch { }
+        try { await task.WaitAsync(timeout).ConfigureAwait(false); } catch { }
     }
 
     private sealed class BoundedTail

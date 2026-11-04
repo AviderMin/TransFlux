@@ -128,4 +128,30 @@ public sealed class CapabilityServiceTests
             Assert.False(string.IsNullOrWhiteSpace(nvenc.UnavailableReason));
         }
     }
+
+    [Fact]
+    public async Task AdapterEnumerationFailure_IsNotCachedAsNoGpu()
+    {
+        using var dir = new TempDir();
+        var store = new SqliteJobStore(Path.Combine(dir.Path, "state.db"));
+        await store.InitializeAsync(default);
+        await using var guard = store;
+        var engine = new FakeEngine();
+        var failEnumeration = true;
+        var service = new CapabilityService(engine, store, new SystemClock(), () =>
+        {
+            if (failEnumeration) throw new InvalidOperationException("DXGI transient failure");
+            return new[]
+            {
+                new AdapterInfo { AdapterId = "LUID-one", Name = "NVIDIA one", VendorId = 0x10DE, DxgiIndex = 0 },
+            };
+        });
+
+        var failed = await service.GetAsync(new CapabilityQuery { IncludeTrialRun = true }, default);
+        Assert.False(failed.HasAvailableGpuEncoder);
+
+        failEnumeration = false;
+        var recovered = await service.GetAsync(new CapabilityQuery { IncludeTrialRun = true }, default);
+        Assert.True(recovered.HasAvailableGpuEncoder);
+    }
 }

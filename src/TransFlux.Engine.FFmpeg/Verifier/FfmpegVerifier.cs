@@ -12,8 +12,10 @@ namespace TransFlux.Engine.FFmpeg.Verifier;
 
 /// <summary>
 /// Verifies a produced file against the plan's declared expectations: stream/codec/count,
-/// dimensions, pixel format, duration tolerance, MP4 faststart ordering and a sampled decode
-/// of first/middle/last (full decode when requested). A passing exit code alone is never enough.
+/// per-track video/audio signatures (codec, channel count, default/forced disposition),
+/// Dolby Vision DOVI configuration retention, dimensions, pixel format, duration tolerance,
+/// MP4 faststart ordering and a sampled decode of first/middle/last (full decode when
+/// requested). A passing exit code alone is never enough.
 /// </summary>
 public sealed class FfmpegVerifier : IOutputVerifier
 {
@@ -55,7 +57,7 @@ public sealed class FfmpegVerifier : IOutputVerifier
 
         if (problems.Count == 0)
         {
-            var decode = await SampleDecodeAsync(outputPath, actual.DurationUs, request.FullDecode, ct).ConfigureAwait(false);
+            var decode = await SampleDecodeAsync(outputPath, actual, request.FullDecode, ct).ConfigureAwait(false);
             if (decode.Canceled) ThrowCanceled(ct);
             if (!decode.Ok) problems.Add(decode.Error ?? "sampled decode failed");
         }
@@ -102,13 +104,17 @@ public sealed class FfmpegVerifier : IOutputVerifier
 
         CheckLanguages(problems, "audio", expected.AudioLanguages, actual.AudioStreams.ToList());
         CheckLanguages(problems, "subtitle", expected.SubtitleLanguages, actual.SubtitleStreams.ToList());
+        CheckTrackSignatures(problems, expected.TrackSignatures, actual);
+        CheckDolbyVision(problems, expected.DolbyVision, actual);
 
         if (expected.VideoCodec is { } videoCodec && videoCodec != VideoCodec.Copy)
         {
             var want = videoCodec.ProbeName();
-            if (video is null) problems.Add($"expected {want} video stream but none present");
-            else if (!string.Equals(video.Codec, want, StringComparison.OrdinalIgnoreCase))
-                problems.Add($"video codec '{video.Codec}' != expected '{want}'");
+            var videos = actual.VideoStreams.ToList();
+            if (videos.Count == 0) problems.Add($"expected {want} video stream but none present");
+            else foreach (var track in videos)
+                if (!string.Equals(track.Codec, want, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"video codec '{track.Codec}' != expected '{want}'");
         }
 
         if (expected.AudioCodec is { } audioCodec)
@@ -201,6 +207,78 @@ public sealed class FfmpegVerifier : IOutputVerifier
         }
     }
 
+    /// <summary>
+    /// Verifies the concrete video/audio track sequence written by the -map order: kind,
+    /// codec, audio channel count and default/forced dispositions. Stream counts alone cannot
+    /// detect a swapped track order, a same-count wrong codec or a default/forced reversal.
+    /// </summary>
+    private static void CheckTrackSignatures(List<string> problems, IReadOnlyList<ExpectedStreamSignature> expected, SourceSnapshot actual)
+    {
+        if (expected.Count == 0) return;
+        var tracks = actual.Streams
+            .Where(s => s.Kind is MediaKind.Video or MediaKind.Audio && !s.IsAttachedPicture)
+            .ToList();
+        if (tracks.Count != expected.Count)
+        {
+            problems.Add($"track signature count {tracks.Count} != expected {expected.Count}");
+            return;
+        }
+        for (var i = 0; i < expected.Count; i++)
+        {
+            var want = expected[i];
+            var got = tracks[i];
+            if (want.Kind != got.Kind)
+            {
+                problems.Add($"track {i} kind {got.Kind} != expected {want.Kind}");
+                continue;
+            }
+            var label = $"{want.Kind.ToString().ToLowerInvariant()} track {i}";
+            if (want.Codec is not null && !string.Equals(got.Codec, want.Codec, StringComparison.OrdinalIgnoreCase))
+                problems.Add($"{label} codec '{got.Codec}' != expected '{want.Codec}'");
+            if (want.Channels is int channels && got.Channels != channels)
+                problems.Add($"{label} channels {got.Channels?.ToString() ?? "?"} != expected {channels}");
+            if (want.IsDefault is bool isDefault && got.IsDefault != isDefault)
+                problems.Add($"{label} default disposition {got.IsDefault} != expected {isDefault}");
+            if (want.IsForced is bool isForced && got.IsForced != isForced)
+                problems.Add($"{label} forced disposition {got.IsForced} != expected {isForced}");
+        }
+    }
+
+    /// <summary>
+    /// Dolby Vision remux must retain the DOVI configuration record parsed from the output
+    /// stream side_data. Exit code 0 and an unchanged stream count do not prove the RPU
+    /// survived, so a missing/mismatched record is a hard verification failure.
+    /// </summary>
+    private static void CheckDolbyVision(List<string> problems, DolbyVisionExpectation? expected, SourceSnapshot actual)
+    {
+        if (expected is null) return;
+        var videos = actual.VideoStreams.ToList();
+        if (videos.Count == 0)
+        {
+            problems.Add("expected Dolby Vision video stream but none present");
+            return;
+        }
+        // Accept any video track carrying the expected DOVI record; a profile mismatch on the
+        // only DV-capable track is still reported rather than silently skipped.
+        var video = videos.FirstOrDefault(v => v.DvProfile == expected.Profile)
+            ?? videos.FirstOrDefault(v => v.DvProfile is not null);
+        if (video is null)
+        {
+            problems.Add("Dolby Vision DOVI configuration record missing from output (RPU/config lost)");
+            return;
+        }
+        if (video.DvProfile != expected.Profile)
+            problems.Add($"Dolby Vision profile {video.DvProfile?.ToString() ?? "?"} != expected {expected.Profile}");
+        if (expected.BlSignalCompatibilityId is int compat && video.DvBlSignalCompatibilityId != compat)
+            problems.Add($"Dolby Vision BL signal compatibility id {video.DvBlSignalCompatibilityId?.ToString() ?? "?"} != expected {compat}");
+        if (expected.RpuRequired && video.DvRpuPresent != true)
+            problems.Add("Dolby Vision RPU present flag missing from output");
+        if (expected.ElRequired && video.DvElPresent != true)
+            problems.Add("Dolby Vision enhancement layer present flag missing from output");
+        if (expected.BlRequired && video.DvBlPresent != true)
+            problems.Add("Dolby Vision base layer present flag missing from output");
+    }
+
     private static bool RequiresKnownDuration(ContainerFormat container) =>
         container is not (ContainerFormat.Aac or ContainerFormat.Mp3);
 
@@ -260,11 +338,24 @@ public sealed class FfmpegVerifier : IOutputVerifier
         }
     }
 
-    internal async Task<(bool Ok, bool Canceled, string? Error)> SampleDecodeAsync(string path, long? durationUs, bool full, CancellationToken ct)
+    internal async Task<(bool Ok, bool Canceled, string? Error)> SampleDecodeAsync(string path, SourceSnapshot actual, bool full, CancellationToken ct)
     {
+        // Cancellation must be reported even when there is nothing to decode.
+        if (ct.IsCancellationRequested) return (false, true, null);
+
+        // A subtitle-only/attachment-only remux has no audio or video stream to decode. FFmpeg
+        // rejects an empty map with "Output file does not contain any stream" (exit -22), which
+        // would fail a structurally valid output; structural checks in Compare already cover it.
+        if (!actual.VideoStreams.Any() && !actual.AudioStreams.Any())
+            return (true, false, null);
+
+        var durationUs = actual.DurationUs;
         if (full)
         {
-            var fullArgs = new List<string> { "-hide_banner", "-nostdin", "-v", "error", "-i", path, "-f", "null", "-" };
+            var fullArgs = new List<string> { "-hide_banner", "-nostdin", "-v", "error", "-xerror" };
+            fullArgs.Add("-i"); fullArgs.Add(path);
+            AddDecodeMaps(fullArgs, actual);
+            fullArgs.Add("-f"); fullArgs.Add("null"); fullArgs.Add("-");
             var fullResult = await ProcessCapture.RunAsync(_core.FfmpegPath, fullArgs, TimeSpan.FromMinutes(10), 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
             if (fullResult.Canceled) return (false, true, null);
             return fullResult.TimedOut
@@ -283,13 +374,14 @@ public sealed class FfmpegVerifier : IOutputVerifier
 
         foreach (var point in points)
         {
-            var args = new List<string> { "-hide_banner", "-nostdin", "-v", "error" };
+            var args = new List<string> { "-hide_banner", "-nostdin", "-v", "error", "-xerror" };
             if (point > TimeSpan.Zero)
             {
                 args.Add("-ss");
                 args.Add(point.TotalSeconds.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture));
             }
             args.Add("-i"); args.Add(path);
+            AddDecodeMaps(args, actual);
             args.Add("-t"); args.Add("0.5");
             args.Add("-f"); args.Add("null"); args.Add("-");
 
@@ -299,6 +391,24 @@ public sealed class FfmpegVerifier : IOutputVerifier
             if (result.ExitCode != 0) return (false, false, $"sampled decode at {point.TotalSeconds:0.###}s failed: {Trim(result.Stderr)}");
         }
         return (true, false, null);
+    }
+
+    /// <summary>
+    /// Maps every video and audio stream explicitly. Without this, FFmpeg's default stream
+    /// selection decodes only one "best" video + one audio track, so damage in a second track
+    /// would pass verification unnoticed. Subtitles are validated structurally by Compare;
+    /// decoding them through the null muxer is not portable across bitmap subtitle codecs.
+    /// </summary>
+    internal static void AddDecodeMaps(List<string> args, SourceSnapshot actual)
+    {
+        // Use each stream's global ffprobe index instead of v:N/a:N ordinals: the type ordinals
+        // count attached pictures as video, while VideoStreams deliberately excludes them.
+        foreach (var stream in actual.Streams.Where(s =>
+                     s.Kind is MediaKind.Video or MediaKind.Audio && !s.IsAttachedPicture))
+        {
+            args.Add("-map");
+            args.Add("0:" + stream.SourceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
     }
 
     /// <summary>

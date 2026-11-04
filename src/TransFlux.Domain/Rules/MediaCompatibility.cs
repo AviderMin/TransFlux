@@ -12,6 +12,15 @@ public sealed record CompatibilityIssue(string Code, string Message, bool Blocki
 /// <summary>Output compatibility plus source colour/stream constraints (docs/05).</summary>
 public static class MediaCompatibility
 {
+    /// <summary>
+    /// Input container/demuxer names that are playlists, concatenation scripts or image
+    /// sequences rather than a single media timeline. They are never valid TransFlux inputs.
+    /// </summary>
+    private static readonly string[] UnsupportedInputFormats =
+    [
+        "concat", "ffconcat", "hls", "applehttp", "dash", "image2", "image2pipe",
+    ];
+
     public static IReadOnlyList<CompatibilityIssue> Validate(ConversionRequest request, SourceSnapshot source)
     {
         var issues = new List<CompatibilityIssue>();
@@ -21,6 +30,7 @@ public static class MediaCompatibility
                 $"不支持的请求版本 {request.RequestVersion}；当前支持版本 1 和 2。"));
             return issues;
         }
+        ValidateInputFormat(source, issues);
         switch (request.Mode)
         {
             case ConversionMode.VideoTranscode:
@@ -51,6 +61,18 @@ public static class MediaCompatibility
         return issues;
     }
 
+    private static void ValidateInputFormat(SourceSnapshot source, List<CompatibilityIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(source.Format.FormatName)) return;
+        foreach (var token in source.Format.FormatName.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!UnsupportedInputFormats.Contains(token, StringComparer.OrdinalIgnoreCase)) continue;
+            issues.Add(CompatibilityIssue.Block("INPUT_FORMAT",
+                $"输入格式 '{token}' 属于播放列表/拼接/图片序列，不是单一媒体文件，无法作为转码输入。"));
+            return;
+        }
+    }
+
     private static void ValidateVideoTranscode(ConversionRequest r, SourceSnapshot s, List<CompatibilityIssue> issues)
     {
         if (!s.HasVideo)
@@ -58,14 +80,21 @@ public static class MediaCompatibility
         if (!OutputFormatCatalog.VideoContainers.Contains(r.Container))
             issues.Add(CompatibilityIssue.Block("BAD_CONTAINER", "Choose a video container."));
         else if (!OutputFormatCatalog.VideoCodecs(r.Container).Contains(r.VideoCodec)
-            || !OutputFormatCatalog.AudioCodecs(r.Container).Contains(r.Audio.Codec))
+            || (r.Audio.Codec != AudioCodec.Copy && !OutputFormatCatalog.AudioCodecs(r.Container).Contains(r.Audio.Codec)))
             issues.Add(CompatibilityIssue.Block("CODEC_CONTAINER", "Selected codecs do not match the video container."));
-        if (s.ColorClassification is not ColorClassification.SdrBt709)
+        if (r.Audio.Codec == AudioCodec.Copy)
+            ValidateAudioCopy(r, s, issues);
+        var v = SelectPrimaryVideo(r, s);
+        var classification = v?.ColorClassification ?? s.ColorClassification;
+        if (classification is not ColorClassification.SdrBt709)
             issues.Add(CompatibilityIssue.Block("NON_SDR",
                 "Only verified SDR BT.709 video may be transcoded. Use Remux for compatible HDR sources."));
-        if (r.RequestVersion >= 2 && SelectPrimaryVideo(r, s) is null)
+        if (r.RequestVersion >= 2 && v is null)
             issues.Add(CompatibilityIssue.Block("VIDEO_SELECTION", "所选视频轨不存在或不是视频轨，请重新选择。"));
-        var v = SelectPrimaryVideo(r, s);
+        if (r.RequestVersion >= 2 && r.AudioTracks.Mode == AudioSelectionMode.Explicit
+            && StreamSelectionResolver.Resolve(r, s).Audio.Count == 0)
+            issues.Add(CompatibilityIssue.Block("AUDIO_SELECTION",
+                "已选择“指定音轨”但没有有效音轨（未勾选或所选音轨不存在）；请至少选择一条有效音轨或改用自动。"));
         if (v is { BitDepth: > 8 })
             issues.Add(CompatibilityIssue.Block("HIGH_BIT_DEPTH", "First release transcodes only 8-bit video."));
         if (v is { PixelFormat: not null } pf && !IsYuv420p8(pf.PixelFormat!))
@@ -75,6 +104,37 @@ public static class MediaCompatibility
             var duration = TimeSpan.FromMicroseconds(durUs);
             if (trim.End > duration || trim.Start < TimeSpan.Zero)
                 issues.Add(CompatibilityIssue.Block("TRIM_RANGE", "Trim range is outside the source duration."));
+        }
+    }
+
+    /// <summary>
+    /// G2 audio-copy slice: stream-copy audio is supported only for video transcode to MKV.
+    /// The planner maps the resolved tracks unchanged, so every selected source codec must be
+    /// on the Matroska remux whitelist and at least one track must actually be selected.
+    /// </summary>
+    private static void ValidateAudioCopy(ConversionRequest r, SourceSnapshot s, List<CompatibilityIssue> issues)
+    {
+        if (!OutputFormatCatalog.SupportsAudioCopy(r.Container))
+        {
+            issues.Add(CompatibilityIssue.Block("AUDIO_COPY_UNSUPPORTED",
+                $"音轨复制目前仅支持 MKV 输出，{r.Container.DisplayName()} 不支持。"));
+            return;
+        }
+
+        var selection = StreamSelectionResolver.Resolve(r, s);
+        if (r.AudioTracks.Mode == AudioSelectionMode.None || selection.Audio.Count == 0)
+        {
+            issues.Add(CompatibilityIssue.Block("AUDIO_COPY_UNSUPPORTED",
+                "音频选择为“复制”但没有可输出的源音轨，请选择音轨或改用音频编码。"));
+            return;
+        }
+
+        var copyable = OutputFormatCatalog.RemuxAudioCodecs(ContainerFormat.Mkv);
+        foreach (var audio in selection.Audio)
+        {
+            if (copyable.Contains(audio.Codec, StringComparer.OrdinalIgnoreCase)) continue;
+            issues.Add(CompatibilityIssue.Block("AUDIO_COPY_UNSUPPORTED",
+                $"源音轨 #{audio.SourceIndex}（{audio.Codec}）无法直接复制到 MKV，请改用音频编码。"));
         }
     }
 
@@ -126,6 +186,16 @@ public static class MediaCompatibility
         var selected = SelectRemuxStreams(r, s);
         if (selected.Count == 0)
             issues.Add(CompatibilityIssue.Block("EMPTY", "Source has no selected audio or video to copy."));
+        if (r.RequestVersion >= 2)
+        {
+            var selection = StreamSelectionResolver.Resolve(r, s);
+            if (selection.Video is null && (s.HasVideo || r.VideoSelect.Mode == VideoSelectionMode.Explicit))
+                issues.Add(CompatibilityIssue.Block("VIDEO_SELECTION",
+                    "所选视频轨不存在或不是视频轨，请重新选择。"));
+            if (r.AudioTracks.Mode == AudioSelectionMode.Explicit && selection.Audio.Count == 0)
+                issues.Add(CompatibilityIssue.Block("AUDIO_SELECTION",
+                    "已选择“指定音轨”但没有有效音轨（未勾选或所选音轨不存在）；请至少选择一条有效音轨或改用自动。"));
+        }
 
         foreach (var v in selected.Where(st => st.Kind == MediaKind.Video))
         {
@@ -158,15 +228,40 @@ public static class MediaCompatibility
                     $"Subtitle codec {sub.Codec} cannot be copied to {r.Container.DisplayName()}."));
             }
         }
-        if (s.ColorClassification is ColorClassification.DolbyVision && !CanRemuxDolbyVision(s.PrimaryVideo, r.Container, out var dvReason))
-            issues.Add(CompatibilityIssue.Block("REMUX_DV", dvReason!));
+        // Legacy remux can map several video tracks; a secondary Dolby Vision track must not
+        // bypass the MKV/profile gate just because the primary happens to be non-DV. Evaluate
+        // every mapped video track and fail-closed on any DV-classified track.
+        var primaryVideo = SelectPrimaryVideo(r, s);
+        foreach (var video in selected.Where(st => st.Kind == MediaKind.Video))
+        {
+            var classification = EffectiveClassification(video, s, primaryVideo);
+            if (classification is not ColorClassification.DolbyVision) continue;
+            if (!CanRemuxDolbyVision(video, r.Container, out var dvReason))
+                issues.Add(CompatibilityIssue.Block("REMUX_DV", dvReason!));
+        }
     }
 
     /// <summary>
-    /// Graded Dolby Vision rule: stream-copy remux to MKV is allowed when the DOVI
-    /// configuration record shows a backward-compatible base layer (profile 8 / BL
-    /// compatibility id &gt; 0) so the RPU survives via copy. Profile 5/7 (no compatible
-    /// base layer) and unknown profiles are refused with a specific reason.
+    /// Per-track colour class with a conservative fallback: an explicit per-stream class wins,
+    /// a DOVI record implies Dolby Vision, and the legacy snapshot-level class only applies to
+    /// the primary video track (the historical scope of that field).
+    /// </summary>
+    private static ColorClassification EffectiveClassification(StreamDescriptor video, SourceSnapshot source,
+        StreamDescriptor? primaryVideo)
+    {
+        if (video.ColorClassification is { } classification) return classification;
+        if (video.DvProfile is not null) return ColorClassification.DolbyVision;
+        return primaryVideo is { } primary && primary.SourceIndex == video.SourceIndex
+            ? source.ColorClassification
+            : ColorClassification.Unknown;
+    }
+
+    /// <summary>
+    /// Graded Dolby Vision rule: stream-copy remux to MKV is allowed only when the DOVI
+    /// configuration record identifies Profile 8 with a backward-compatible base layer
+    /// (BL compatibility id &gt; 0). A non-zero compatibility id alone is not sufficient:
+    /// inconsistent combinations such as Profile 7 + compatibility id 1 stay blocked.
+    /// All other profiles (5/6/7 and unknown) are refused with a specific reason.
     /// </summary>
     public static bool CanRemuxDolbyVision(StreamDescriptor? video, ContainerFormat container, out string? reason)
     {
@@ -180,13 +275,13 @@ public static class MediaCompatibility
             reason = "无法识别 Dolby Vision 配置（缺少 DOVI configuration record），已阻止转封装。";
             return false;
         }
-        if (video.DvProfile == 8 || video.DvBlSignalCompatibilityId is > 0)
+        if (video.DvProfile == 8 && video.DvBlSignalCompatibilityId is > 0)
         {
             reason = null;
             return true;
         }
-        reason = video.DvProfile is 5 or 7
-            ? $"Dolby Vision Profile {video.DvProfile} 无兼容基底（BL compatibility id=0），暂不支持转封装，请使用专业工具处理。"
+        reason = video.DvProfile is { } profile
+            ? $"Dolby Vision Profile {profile} 暂不支持转封装（仅 Profile 8 且 BL compatibility id > 0 可保留 RPU）。"
             : "无法识别 Dolby Vision profile（缺少 DOVI configuration record），已阻止转封装。";
         return false;
     }

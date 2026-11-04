@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using TransFlux.App.State;
 using TransFlux.Application.Contracts;
 using TransFlux.Domain.Jobs;
@@ -12,10 +13,87 @@ public sealed class WorkbenchTests
     {
         public IReadOnlyList<WorkspaceEntry>? Entries { get; set; }
         public Func<IReadOnlyList<WorkspaceEntry>, Task>? Saving { get; set; }
-        public Task<IReadOnlyList<WorkspaceEntry>?> LoadAsync(CancellationToken ct) => Task.FromResult(Entries);
+        public bool FailLoad { get; set; }
+        public Task<IReadOnlyList<WorkspaceEntry>?> LoadAsync(CancellationToken ct)
+            => FailLoad
+                ? Task.FromException<IReadOnlyList<WorkspaceEntry>?>(new IOException("simulated load failure"))
+                : Task.FromResult(Entries);
         public async Task SaveAsync(IReadOnlyList<WorkspaceEntry> entries, CancellationToken ct)
         { if (Saving is not null) await Saving(entries); Entries = entries.ToArray(); }
     }
+    private sealed class FlakyWatchService : IJobService
+    {
+        private int _watchAttempts;
+        public int WatchAttempts => Volatile.Read(ref _watchAttempts);
+
+        public async IAsyncEnumerable<JobEvent> WatchAsync(JobWatchQuery query,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            var attempt = Interlocked.Increment(ref _watchAttempts);
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            if (attempt <= 2) throw new IOException("simulated watch failure");
+            yield return new JobEvent { Kind = JobEventKind.SnapshotCompleted };
+            await Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task<Guid> EnqueueAsync(EnqueueRequest request, CancellationToken ct) => throw new NotSupportedException();
+        public Task<CancelResult> CancelAsync(Guid id, CancellationToken ct) => throw new NotSupportedException();
+        public Task<Guid> RetryAsync(Guid id, CancellationToken ct) => throw new NotSupportedException();
+        public Task<bool> MoveQueuedAsync(Guid id, int direction, CancellationToken ct) => Task.FromResult(false);
+        public Task PauseQueueAsync(CancellationToken ct) => Task.CompletedTask;
+        public Task ResumeQueueAsync(CancellationToken ct) => Task.CompletedTask;
+        public QueueControlSnapshot GetControl() => new();
+        public Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct) => Task.FromResult(false);
+        public Task<bool> AbandonAsync(Guid id, CancellationToken ct) => Task.FromResult(false);
+        public void ConfigureExecution(int maxConcurrentTranscodes, bool allowAutomaticFallback, bool fullVerification) { }
+    }
+
+    private sealed class ScriptedJobService : IJobService
+    {
+        public List<Job> Jobs { get; init; } = [];
+        public Func<Guid, Task<bool>>? RemoveQueuedHandler { get; set; }
+        public Func<Guid, Task<bool>>? AbandonHandler { get; set; }
+        public Channel<JobEvent>? Events { get; set; }
+        public TaskCompletionSource? RemovedEventProcessed { get; set; }
+        public int AbandonCalls { get; private set; }
+
+        public async IAsyncEnumerable<JobEvent> WatchAsync(JobWatchQuery query,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            foreach (var job in Jobs)
+                yield return new JobEvent { Kind = JobEventKind.Snapshot, JobId = job.JobId, Job = job };
+            yield return new JobEvent { Kind = JobEventKind.SnapshotCompleted };
+
+            if (Events is not null)
+            {
+                await foreach (var ev in Events.Reader.ReadAllAsync(ct))
+                {
+                    yield return ev;
+                    if (ev.Kind == JobEventKind.Removed) RemovedEventProcessed?.TrySetResult();
+                }
+            }
+        }
+
+        public Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct)
+            => RemoveQueuedHandler?.Invoke(id) ?? Task.FromResult(false);
+
+        public async Task<bool> AbandonAsync(Guid id, CancellationToken ct)
+        {
+            AbandonCalls++;
+            return AbandonHandler is not null && await AbandonHandler(id);
+        }
+
+        public Task<Guid> EnqueueAsync(EnqueueRequest request, CancellationToken ct) => throw new NotSupportedException();
+        public Task<CancelResult> CancelAsync(Guid id, CancellationToken ct) => throw new NotSupportedException();
+        public Task<Guid> RetryAsync(Guid id, CancellationToken ct) => throw new NotSupportedException();
+        public Task<bool> MoveQueuedAsync(Guid id, int direction, CancellationToken ct) => Task.FromResult(false);
+        public Task PauseQueueAsync(CancellationToken ct) => Task.CompletedTask;
+        public Task ResumeQueueAsync(CancellationToken ct) => Task.CompletedTask;
+        public QueueControlSnapshot GetControl() => new();
+        public void ConfigureExecution(int maxConcurrentTranscodes, bool allowAutomaticFallback, bool fullVerification) { }
+    }
+
     private sealed class Files : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "tf-workbench-" + Guid.NewGuid().ToString("N"));
@@ -36,6 +114,21 @@ public sealed class WorkbenchTests
     }
     private static async Task Loaded(WorkbenchStore store)
     { store.Start(); await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Loaded); }
+    private static Job MakeExecutionJob(JobState state)
+    {
+        var source = TestData.MakeSource();
+        return new Job
+        {
+            JobId = Guid.NewGuid(),
+            RequestSnapshot = TestData.MakeRequest(source.MediaId),
+            SourceFingerprint = source.Fingerprint,
+            EnqueueOrder = 1,
+            State = state,
+            Revision = 1,
+            CreatedUtc = DateTimeOffset.UnixEpoch,
+            UpdatedUtc = DateTimeOffset.UnixEpoch,
+        };
+    }
     private static Task Ready(WorkbenchStore store, int count)
         => SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items.Count(i => i.Draft.IsReady) == count);
 
@@ -224,23 +317,126 @@ public sealed class WorkbenchTests
     }
 
     [Fact]
-    public async Task NeedsAttentionCardRequiresReviewBeforeAnyRetryAndCanBeRemoved()
+    public void NeedsAttentionCard_IsExplicitlyAbandonable_ButNotNormallyRemovable()
+    {
+        var job = MakeExecutionJob(JobState.NeedsAttention);
+        var item = new WorkbenchItem(
+            new MediaDraft { MediaId = job.JobId, Path = @"C:mediaa.mp4", Status = DraftStatus.Ready, JobId = job.JobId },
+            new QueueRow(job, null, null, null, null));
+        Assert.True(item.CanAbandon);
+        Assert.False(item.CanRemove);
+
+        var terminal = item with { Execution = new QueueRow(job with { State = JobState.Succeeded }, null, null, null, null) };
+        Assert.True(terminal.CanRemove);
+        Assert.False(terminal.CanAbandon);
+    }
+
+    [Fact]
+    public async Task NeedsAttentionCard_RequiresReviewAndExplicitAbandon()
     {
         await using var h = new SchedulerHarness(); var saved = new MemoryWorkspace();
         var id = await h.EnqueueAsync(); var job = (await h.Store.GetJobAsync(id, default))!;
         await h.Store.UpdateJobAsync(job with { State = JobState.NeedsAttention, Revision = job.Revision + 1 }, job.Revision, default);
         using var store = Store(h, saved); await Loaded(store);
         var card = Assert.Single(store.GetSnapshot().Items);
-        Assert.True(card.CanRemove);
+        Assert.False(card.CanRemove);
+        Assert.True(card.CanAbandon);
         Assert.False(card.Execution!.CanRetry);
-        await store.RemoveAsync([card.Id]);
+        await store.AbandonAsync(card.Id);
         Assert.Empty(store.GetSnapshot().Items);
-        await store.UndoAsync();
-        await SchedulerHarness.WaitUntilAsync(() => store.GetSnapshot().Items.Count == 1);
-        await store.RetryAsync(card.Id);
-        var unchanged = Assert.Single(store.GetSnapshot().Items);
-        Assert.Equal(JobState.NeedsAttention, unchanged.Execution!.State);
-        Assert.Equal(card.Id, unchanged.Id);
+        // Abandoning the card cleans its staging and records the job terminal.
+        Assert.Equal(JobState.Canceled, (await h.Store.GetJobAsync(id, default))!.State);
+        // Abandonment deletes the preserved staging area, so it is deliberately not undoable.
+        Assert.False(store.GetSnapshot().CanUndo);
+    }
+
+    [Fact]
+    public async Task EditQueuedAsync_RemovedEventBeforeReturn_KeepsEditableCard()
+    {
+        var job = MakeExecutionJob(JobState.Queued);
+        var service = new ScriptedJobService
+        {
+            Jobs = [job],
+            Events = Channel.CreateUnbounded<JobEvent>(),
+            RemovedEventProcessed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        service.RemoveQueuedHandler = async id =>
+        {
+            await service.Events!.Writer.WriteAsync(new JobEvent
+            {
+                Kind = JobEventKind.StateChanged,
+                JobId = id,
+                Job = job with { State = JobState.Canceled, Revision = job.Revision + 1 },
+            });
+            await service.Events.Writer.WriteAsync(new JobEvent { Kind = JobEventKind.Removed, JobId = id });
+            // Do not return from RemoveQueuedAsync until the watch loop has consumed Removed.
+            await service.RemovedEventProcessed!.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            return true;
+        };
+        using var store = new WorkbenchStore(service, new FakeProbe(), new MemoryWorkspace(), a => a());
+        await Loaded(store);
+        var id = Assert.Single(store.GetSnapshot().Items).Id;
+
+        await store.EditQueuedAsync(id);
+
+        var item = Assert.Single(store.GetSnapshot().Items);
+        Assert.Equal(id, item.Id);
+        Assert.Null(item.Draft.JobId);
+        Assert.True(item.CanEdit);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_PartialAbandonFailure_KeepsFailedCardAndPersists()
+    {
+        var first = MakeExecutionJob(JobState.NeedsAttention);
+        var second = MakeExecutionJob(JobState.NeedsAttention);
+        var saved = new MemoryWorkspace();
+        var service = new ScriptedJobService
+        {
+            Jobs = [first, second],
+            AbandonHandler = id => Task.FromResult(id == first.JobId),
+        };
+        using var store = new WorkbenchStore(service, new FakeProbe(), saved, a => a());
+        await Loaded(store);
+        var ids = store.GetSnapshot().Items.Select(i => i.Id).ToArray();
+        Assert.Equal(new[] { first.JobId, second.JobId }, ids);
+
+        await store.RemoveAsync(ids);
+
+        Assert.Equal(second.JobId, Assert.Single(store.GetSnapshot().Items).Id);
+        Assert.NotNull(store.GetSnapshot().Notice);
+        Assert.NotNull(saved.Entries);
+        Assert.Contains(saved.Entries!, e => e.JobId == second.JobId);
+        Assert.DoesNotContain(saved.Entries!, e => e.JobId == first.JobId);
+    }
+
+    [Fact]
+    public async Task WatchFailure_RetriesWithBackoff_AndDoesNotRepeatNotice()
+    {
+        var service = new FlakyWatchService();
+        var posts = 0;
+        using var store = new WorkbenchStore(service, new FakeProbe(), new MemoryWorkspace(),
+            _ => Interlocked.Increment(ref posts));
+        store.Start();
+        await SchedulerHarness.WaitUntilAsync(
+            () => store.GetSnapshot().Loaded && Volatile.Read(ref posts) >= 2, TimeSpan.FromSeconds(10));
+
+        Assert.True(service.WatchAttempts >= 3, "the watch subscription must be retried after failures");
+        Assert.Equal(NoticeLevel.Error, store.GetSnapshot().Notice?.Level);
+        // One notice for the outage and one emit for the recovered snapshot; not one per retry.
+        Assert.Equal(2, Volatile.Read(ref posts));
+    }
+
+    [Fact]
+    public async Task RestoreFailure_DoesNotSuppressLaterWorkspacePersistence()
+    {
+        await using var h = new SchedulerHarness();
+        var saved = new MemoryWorkspace { FailLoad = true };
+        using var store = Store(h, saved);
+        await Loaded(store);
+        // The watch snapshot must still be persisted even though restore failed, otherwise a
+        // transient load problem would silently disable workspace saves for the whole session.
+        await SchedulerHarness.WaitUntilAsync(() => saved.Entries is not null);
     }
 
     [Fact]

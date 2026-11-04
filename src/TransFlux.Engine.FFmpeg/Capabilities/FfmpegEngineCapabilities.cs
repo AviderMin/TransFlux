@@ -32,25 +32,19 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         var buildConfiguration = string.Empty;
         try
         {
-            var psi = new ProcessStartInfo
+            // Use the shared hardened launcher (ArgumentList + Job Object + bounded output and a
+            // real timeout); a bare Process.Start plus synchronous ReadToEnd could block forever
+            // and left the -version process outside job control.
+            var result = ProcessCapture.RunAsync(
+                _core.FfmpegPath,
+                new[] { "-hide_banner", "-version" },
+                TimeSpan.FromSeconds(5),
+                256 * 1024,
+                64 * 1024,
+                CancellationToken.None).GetAwaiter().GetResult();
+            if (result.ExitCode == 0)
             {
-                FileName = _core.FfmpegPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            psi.ArgumentList.Add("-hide_banner");
-            psi.ArgumentList.Add("-version");
-            using var process = Process.Start(psi);
-            if (process is not null)
-            {
-                var output = process.StandardOutput.ReadToEnd();
-                if (!process.WaitForExit(5000))
-                {
-                    try { process.Kill(entireProcessTree: true); } catch { }
-                }
-                foreach (var line in output.Split('\n'))
+                foreach (var line in result.Stdout.Split('\n'))
                 {
                     var trimmed = line.Trim();
                     if (string.IsNullOrEmpty(version) && trimmed.StartsWith("ffmpeg version ", StringComparison.Ordinal))
@@ -173,7 +167,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
         var arguments = new List<string> { "-hide_banner", "-nostdin" };
         arguments.AddRange(commandArgs);
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 4 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
-        ThrowIfCanceled(result, ct);
+        EnsureSucceeded(result, "ffmpeg " + string.Join(' ', commandArgs), ct);
         return ParseNames(result.Stdout, skipFirstToken: true);
     }
 
@@ -181,7 +175,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-codecs" };
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 8 * 1024 * 1024, 64 * 1024, ct).ConfigureAwait(false);
-        ThrowIfCanceled(result, ct);
+        EnsureSucceeded(result, "ffmpeg -codecs", ct);
         return ParseCodecs(result.Stdout, encoders);
     }
 
@@ -238,7 +232,7 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
     {
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-hwaccels" };
         var result = await ProcessCapture.RunAsync(_core.FfmpegPath, arguments, timeout, 256 * 1024, 64 * 1024, ct).ConfigureAwait(false);
-        ThrowIfCanceled(result, ct);
+        EnsureSucceeded(result, "ffmpeg -hwaccels", ct);
         var names = new List<string>();
         foreach (var raw in result.Stdout.Split('\n'))
         {
@@ -256,6 +250,17 @@ public sealed class FfmpegEngineCapabilities : IEngineCapabilities
     {
         if (result.Canceled)
             throw new OperationCanceledException("ffmpeg capability process was canceled.", ct);
+    }
+
+    /// <summary>A failed capability enumeration must throw instead of being parsed into an empty
+    /// set and cached for the lifetime of the process.</summary>
+    private static void EnsureSucceeded(CaptureResult result, string operation, CancellationToken ct)
+    {
+        ThrowIfCanceled(result, ct);
+        if (result.TimedOut)
+            throw new TimeoutException($"{operation} timed out.");
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"{operation} failed with exit code {result.ExitCode}.");
     }
 
     private static IReadOnlyList<string> ParseNames(string output, bool skipFirstToken)

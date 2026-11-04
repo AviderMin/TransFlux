@@ -8,7 +8,12 @@ public sealed record WorkbenchItem(MediaDraft Draft, QueueRow? Execution)
 {
     public Guid Id => Draft.MediaId;
     public bool CanEdit => Draft.CanEdit;
-    public bool CanRemove => !Draft.Submitting && (CanEdit || Execution is { IsTerminal: true } || Execution?.State == JobState.NeedsAttention);
+    /// <summary>Normal removal only hides non-destructive cards (editable drafts and terminal
+    /// jobs). NeedsAttention preserves staging evidence and must use the explicit abandon action.</summary>
+    public bool CanRemove => !Draft.Submitting && (CanEdit || Execution is { IsTerminal: true });
+    /// <summary>Explicit destructive action: abandon a NeedsAttention job and clean its preserved
+    /// staging area. Never offered as the ordinary remove action.</summary>
+    public bool CanAbandon => !Draft.Submitting && Draft.JobId is not null && Execution?.State == JobState.NeedsAttention;
     public bool CanStart => CanEdit && Draft.IsReady && !Issues.Any(i => i.Blocking);
     public IReadOnlyList<CompatibilityIssue> Issues => WorkbenchRules.Validate(Draft);
 }

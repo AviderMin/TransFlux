@@ -72,7 +72,7 @@ tools/ffmpeg/**
 .ref/
 .tmp/
 
-# ---- Installer build artifacts (large; regenerate with scripts/build-installer.ps1) ----
+# ---- Installer build artifacts (large; regenerate with tools/package-exe.ps1) ----
 installer/stage/
 installer/dist/
 

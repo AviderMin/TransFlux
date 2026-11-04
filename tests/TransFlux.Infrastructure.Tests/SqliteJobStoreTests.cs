@@ -57,6 +57,128 @@ public sealed class SqliteJobStoreTests
     }
 
     [Fact]
+    public async Task MarkActiveJobsInterrupted_CancelRequestedBecomesCanceled()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        await using var store = new SqliteJobStore(db);
+        await store.InitializeAsync(default);
+        var canceled = TestData.NewJob(state: JobState.CancelRequested);
+        var preflighting = TestData.NewJob(state: JobState.Preflighting);
+        await store.CreateJobAsync(canceled, default);
+        await store.CreateJobAsync(preflighting, default);
+
+        await store.MarkActiveJobsInterruptedAsync(default);
+
+        Assert.Equal(JobState.Canceled, (await store.GetJobAsync(canceled.JobId, default))!.State);
+        Assert.Equal(JobState.Interrupted, (await store.GetJobAsync(preflighting.JobId, default))!.State);
+    }
+
+    [Fact]
+    public async Task Initialize_RejectsNewerSchemaVersion()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        await using (var store = new SqliteJobStore(db))
+        {
+            await store.InitializeAsync(default);
+        }
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO schema_migrations(version, applied_utc, checksum) VALUES(99, '2026-01-01T00:00:00Z', 'unknown');";
+            cmd.ExecuteNonQuery();
+        }
+
+        await using (var store = new SqliteJobStore(db))
+        {
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => store.InitializeAsync(default));
+            Assert.Contains("newer", ex.Message);
+        }
+    }
+
+    [Fact]
+    public async Task Initialize_RejectsAppliedMigrationChecksumDrift()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        await using (var store = new SqliteJobStore(db))
+        {
+            await store.InitializeAsync(default);
+        }
+        using (var conn = new SqliteConnection($"Data Source={db}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE schema_migrations SET checksum='deadbeef' WHERE version=1;";
+            cmd.ExecuteNonQuery();
+        }
+
+        await using (var store = new SqliteJobStore(db))
+        {
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => store.InitializeAsync(default));
+            Assert.Contains("checksum", ex.Message);
+        }
+    }
+
+    [Fact]
+    public async Task InitializeWithRecovery_MovesCorruptDatabaseAside_AndStartsFresh()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        File.WriteAllText(db, "this is not a sqlite database");
+
+        await using var store = new SqliteJobStore(db);
+        var moved = await store.InitializeWithRecoveryAsync(default);
+
+        Assert.NotNull(moved);
+        Assert.True(File.Exists(moved));
+        var job = TestData.NewJob();
+        await store.CreateJobAsync(job, default);
+        Assert.NotNull(await store.GetJobAsync(job.JobId, default));
+    }
+
+    [Fact]
+    public async Task InitializeWithRecovery_DoesNotMoveLockedDatabase()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        await File.WriteAllTextAsync(db, "locked but not proven corrupt");
+        using var hold = new FileStream(db, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        await using var store = new SqliteJobStore(db);
+        await Assert.ThrowsAnyAsync<Exception>(() => store.InitializeWithRecoveryAsync(default));
+
+        // A sharing/busy failure is not corruption: the live file must stay in place, not be
+        // renamed to *.corrupt-* (which would split or lose the user's data).
+        Assert.True(File.Exists(db));
+        Assert.Empty(Directory.GetFiles(dir.Path, "*.corrupt-*"));
+    }
+
+    [Fact]
+    public async Task InitializeWithRecovery_RestoresBackupWhenAvailable()
+    {
+        using var dir = new TempDir();
+        var db = DbPath(dir);
+        var job = TestData.NewJob();
+        await using (var store = new SqliteJobStore(db))
+        {
+            await store.InitializeAsync(default);
+            await store.CreateJobAsync(job, default);
+        }
+        File.Copy(db, db + ".bak", overwrite: true);
+        File.WriteAllText(db, "corrupt-database-bytes");
+
+        await using (var store = new SqliteJobStore(db))
+        {
+            var moved = await store.InitializeWithRecoveryAsync(default);
+            Assert.NotNull(moved);
+            Assert.NotNull(await store.GetJobAsync(job.JobId, default));
+        }
+    }
+
+    [Fact]
     public async Task Job_RoundTrips_And_PersistsAcrossReopen()
     {
         using var dir = new TempDir();
@@ -216,8 +338,10 @@ public sealed class SqliteJobStoreTests
         await store.UpsertJournalAsync(prepared with { CommitToken = "t-fail", Phase = CommitPhase.Failed }, default);
 
         var open = await store.GetOpenJournalsAsync(default);
-        Assert.Equal(2, open.Count);
-        Assert.DoesNotContain(open, j => j.CommitToken == "t-fail");
+        // Failed journals are deliberately returned: recovery must be able to close a row left
+        // behind when the process died between marking a commit failure and deleting it.
+        Assert.Equal(3, open.Count);
+        Assert.Contains(open, j => j.CommitToken == "t-fail" && j.Phase == CommitPhase.Failed);
 
         var one = await store.GetJournalAsync("t-pub", default);
         Assert.NotNull(one);
@@ -225,8 +349,9 @@ public sealed class SqliteJobStoreTests
 
         await store.DeleteJournalAsync("t-prep", default);
         open = await store.GetOpenJournalsAsync(default);
-        Assert.Single(open);
-        Assert.Equal("t-pub", open[0].CommitToken);
+        Assert.Equal(2, open.Count);
+        Assert.DoesNotContain(open, j => j.CommitToken == "t-prep");
+        Assert.Contains(open, j => j.CommitToken == "t-pub");
     }
 
     [Fact]

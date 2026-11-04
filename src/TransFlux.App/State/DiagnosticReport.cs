@@ -23,7 +23,7 @@ public static partial class DiagnosticReport
         sb.AppendLine("TransFlux 诊断报告");
         sb.AppendLine("生成时间: " + (generatedUtc ?? DateTimeOffset.Now).ToString("yyyy-MM-dd HH:mm:ss zzz"));
         sb.AppendLine("任务 ID: " + (job?.Job.JobId.ToString("D") ?? d.MediaId.ToString("D")));
-        sb.AppendLine("状态: " + (job is null ? Fmt.JobStateText(JobState.Queued) : Fmt.JobStateText(job.State)));
+        sb.AppendLine("状态: " + (job is null ? DraftStateText(d.Status) : Fmt.JobStateText(job.State)));
         sb.AppendLine("源文件: " + Redact(d.Path));
         sb.AppendLine("输出文件: " + Redact(job?.Output?.FinalPath ?? "尚未生成"));
         sb.AppendLine();
@@ -68,6 +68,13 @@ public static partial class DiagnosticReport
             return plan.CandidatePaths.FirstOrDefault(c => c.CandidateId == attempt.ExecutedCandidateId);
         return plan.CandidatePaths.Count == 1 ? plan.CandidatePaths[0] : null;
     }
+
+    private static string DraftStateText(DraftStatus status) => status switch
+    {
+        DraftStatus.Probing => "正在读取媒体信息",
+        DraftStatus.Invalid => "媒体不可用",
+        _ => "未开始",
+    };
 
     /// <summary>Default privacy: absolute Windows/UNC paths and the current user profile are removed.</summary>
     public static string Redact(string value)

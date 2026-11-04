@@ -71,58 +71,90 @@ public sealed class WorkbenchStore : IDisposable
                     _drafts.Add(new MediaDraft { MediaId = e.MediaId, Path = e.SourcePath, JobId = e.JobId,
                         Options = ConversionOptions.FromRequest(e.Request), Status = e.JobId is null ? DraftStatus.Probing : DraftStatus.Ready });
             foreach (var draft in saved.Where(e => e.JobId is null)) Probe(draft.MediaId);
-            await foreach (var ev in _jobs.WatchAsync(new JobWatchQuery(), _lifetime.Token).ConfigureAwait(false))
+
+            var watchFaulted = false;
+            while (!_lifetime.IsCancellationRequested)
             {
-                lock (_gate)
+                try
                 {
-                    if (ev.Kind == JobEventKind.SnapshotCompleted)
+                    await foreach (var ev in _jobs.WatchAsync(new JobWatchQuery(), _lifetime.Token).ConfigureAwait(false))
                     {
-                        // A cleared history record must not silently become a new conversion.
-                        _drafts.RemoveAll(d => d.JobId is Guid id && !_rows.ContainsKey(id));
-                        _loaded = true;
-                    }
-                    if (ev.Job is { } job)
-                    {
-                        _rows.TryGetValue(job.JobId, out var old);
-                        // Snapshot hydration can race newer events. Never roll a card back a revision.
-                        if (old is null || job.Revision >= old.Job.Revision)
+                        watchFaulted = false;
+                        lock (_gate)
                         {
-                            _rows[job.JobId] = new QueueRow(job, old?.Progress, ev.Output ?? old?.Output,
-                                ev.Failure ?? old?.Failure, ev.Attempt ?? old?.Attempt);
-                            var index = _drafts.FindIndex(d => d.JobId == job.JobId);
-                            if (index >= 0) _drafts[index] = _drafts[index] with { Options = ConversionOptions.FromRequest(job.RequestSnapshot) };
-                            if (index < 0)
+                            if (ev.Kind == JobEventKind.SnapshotCompleted)
                             {
-                                index = job.State == JobState.Queued && ev.Kind is JobEventKind.Enqueued or JobEventKind.Snapshot
-                                    ? _drafts.FindIndex(d => d.JobId is null && (d.Submitting || ev.Kind == JobEventKind.Snapshot)
-                                        && d.MediaId == job.RequestSnapshot.SourceSnapshotId) : -1;
-                                if (index >= 0) _drafts[index] = _drafts[index] with { JobId = job.JobId, Submitting = false };
-                                else if (ev.Kind == JobEventKind.Enqueued || ev.Kind == JobEventKind.Snapshot
-                                    && (job.State == JobState.Queued || restored is null && (!JobStateMachine.IsTerminal(job.State) || job.State == JobState.Interrupted)))
-                                    _drafts.Add(new MediaDraft { MediaId = job.JobId, Path = job.SourcePath ?? job.SourceFingerprint.NormalizedPath,
-                                        JobId = job.JobId, Options = ConversionOptions.FromRequest(job.RequestSnapshot), Status = DraftStatus.Ready });
+                                // A cleared history record must not silently become a new conversion.
+                                _drafts.RemoveAll(d => d.JobId is Guid id && !_rows.ContainsKey(id));
+                                _loaded = true;
                             }
+                            if (ev.Job is { } job)
+                            {
+                                _rows.TryGetValue(job.JobId, out var old);
+                                // Snapshot hydration can race newer events. Never roll a card back a revision.
+                                if (old is null || job.Revision >= old.Job.Revision)
+                                {
+                                    _rows[job.JobId] = new QueueRow(job, old?.Progress, ev.Output ?? old?.Output,
+                                        ev.Failure ?? old?.Failure, ev.Attempt ?? old?.Attempt);
+                                    var index = _drafts.FindIndex(d => d.JobId == job.JobId);
+                                    if (index >= 0) _drafts[index] = _drafts[index] with { Options = ConversionOptions.FromRequest(job.RequestSnapshot) };
+                                    if (index < 0)
+                                    {
+                                        index = job.State == JobState.Queued && ev.Kind is JobEventKind.Enqueued or JobEventKind.Snapshot
+                                            ? _drafts.FindIndex(d => d.JobId is null && (d.Submitting || ev.Kind == JobEventKind.Snapshot)
+                                                && d.MediaId == job.RequestSnapshot.SourceSnapshotId) : -1;
+                                        if (index >= 0) _drafts[index] = _drafts[index] with { JobId = job.JobId, Submitting = false };
+                                        else if (ev.Kind == JobEventKind.Enqueued || ev.Kind == JobEventKind.Snapshot
+                                            && (job.State == JobState.Queued || restored is null && (!JobStateMachine.IsTerminal(job.State) || job.State == JobState.Interrupted)))
+                                            _drafts.Add(new MediaDraft { MediaId = job.JobId, Path = job.SourcePath ?? job.SourceFingerprint.NormalizedPath,
+                                                JobId = job.JobId, Options = ConversionOptions.FromRequest(job.RequestSnapshot), Status = DraftStatus.Ready });
+                                    }
+                                }
+                            }
+                            if (ev.JobId is Guid rowId && _rows.TryGetValue(rowId, out var row))
+                            {
+                                if (ev.Attempt is { } incoming && (row.Attempt is null || incoming.Ordinal >= row.Attempt.Ordinal)
+                                    && incoming.AttemptId != row.Attempt?.AttemptId)
+                                    row = row with { Progress = null, Attempt = incoming };
+                                var progress = ev.Progress;
+                                if (progress is not null && row.Job.ActiveAttemptId is Guid active && progress.AttemptId != active) progress = null;
+                                if (progress is not null && row.Progress is { } previous
+                                    && previous.AttemptId == progress.AttemptId && previous.Sequence > progress.Sequence) progress = null;
+                                _rows[rowId] = row with { Progress = progress ?? row.Progress, Output = ev.Output ?? row.Output,
+                                    Failure = ev.Failure ?? row.Failure,
+                                    Attempt = ev.Attempt is { } a && (row.Attempt is null || a.Ordinal >= row.Attempt.Ordinal) ? a : row.Attempt };
+                            }
+                            if (ev.Kind == JobEventKind.Removed && ev.JobId is Guid removedId)
+                            {
+                                // The scheduler has reached a terminal state (for example AbandonAsync
+                                // canceled a NeedsAttention job). Drop the stale row so a later remove
+                                // attempt does not see a phantom NeedsAttention state.
+                                _rows.Remove(removedId);
+                                _drafts.RemoveAll(d => d.JobId == removedId);
+                            }
+                            _dirty = true;
+                        }
+                        if (ev.Kind != JobEventKind.Progress) Emit();
+                        if (ev.Kind == JobEventKind.SnapshotCompleted)
+                        {
+                            await PersistAsync().ConfigureAwait(false);
                         }
                     }
-                    if (ev.JobId is Guid rowId && _rows.TryGetValue(rowId, out var row))
-                    {
-                        if (ev.Attempt is { } incoming && (row.Attempt is null || incoming.Ordinal >= row.Attempt.Ordinal)
-                            && incoming.AttemptId != row.Attempt?.AttemptId)
-                            row = row with { Progress = null, Attempt = incoming };
-                        var progress = ev.Progress;
-                        if (progress is not null && row.Job.ActiveAttemptId is Guid active && progress.AttemptId != active) progress = null;
-                        if (progress is not null && row.Progress is { } previous
-                            && previous.AttemptId == progress.AttemptId && previous.Sequence > progress.Sequence) progress = null;
-                        _rows[rowId] = row with { Progress = progress ?? row.Progress, Output = ev.Output ?? row.Output,
-                            Failure = ev.Failure ?? row.Failure,
-                            Attempt = ev.Attempt is { } a && (row.Attempt is null || a.Ordinal >= row.Attempt.Ordinal) ? a : row.Attempt };
-                    }
-                    _dirty = true;
+                    return;
                 }
-                if (ev.Kind != JobEventKind.Progress) Emit();
-                if (ev.Kind == JobEventKind.SnapshotCompleted)
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
+                catch (Exception ex)
                 {
-                    await PersistAsync().ConfigureAwait(false);
+                    // One transient store/database failure must not leave the workbench frozen:
+                    // report it once per outage and resubscribe with a short backoff. Repeating the
+                    // same notice every second would spam the banner while the database is down.
+                    if (!watchFaulted)
+                    {
+                        SetNotice(Notices.JobWatchFailed(ex.Message));
+                        watchFaulted = true;
+                    }
+                    try { await Task.Delay(TimeSpan.FromSeconds(1), _lifetime.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
                 }
             }
         }
@@ -274,10 +306,48 @@ public sealed class WorkbenchStore : IDisposable
     {
         var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);
         if (item?.Execution is not { State: JobState.Queued } row) return;
-        if (!await _jobs.RemoveQueuedAsync(row.Job.JobId, _lifetime.Token).ConfigureAwait(false))
-        { SetNotice(Notices.EditQueuedRejected()); return; }
-        lock (_gate) Replace(id, d => d with { JobId = null, Status = d.Snapshot is null ? DraftStatus.Probing : DraftStatus.Ready });
-        Emit(); ProbeIfNeeded(id); await PersistAsync().ConfigureAwait(false);
+        var jobId = row.Job.JobId;
+
+        MediaDraft original;
+        lock (_gate)
+        {
+            var index = _drafts.FindIndex(d => d.MediaId == id);
+            if (index < 0) return;
+            original = _drafts[index];
+            // Detach the card before RemoveQueuedAsync publishes its Removed event. Otherwise the
+            // watch loop sees a draft still bound to the removed job and deletes the card before
+            // this method can turn it back into an editable draft.
+            _drafts[index] = original with
+            {
+                JobId = null,
+                Status = original.Snapshot is null ? DraftStatus.Probing : DraftStatus.Ready,
+            };
+        }
+        Emit();
+
+        try
+        {
+            if (!await _jobs.RemoveQueuedAsync(jobId, _lifetime.Token).ConfigureAwait(false))
+            {
+                Restore(original); SetNotice(Notices.EditQueuedRejected()); return;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            Restore(original); return;
+        }
+        catch (Exception ex)
+        {
+            Restore(original); SetNotice(Notices.OperationFailed(ex.Message)); return;
+        }
+
+        ProbeIfNeeded(id); await PersistAsync().ConfigureAwait(false);
+
+        void Restore(MediaDraft draft)
+        {
+            lock (_gate) Replace(id, _ => draft);
+            Emit();
+        }
     }
 
     public async Task<Guid?> CopyAsync(Guid id)
@@ -334,16 +404,89 @@ public sealed class WorkbenchStore : IDisposable
 
     public async Task RemoveAsync(IReadOnlyList<Guid> ids)
     {
+        List<WorkbenchItem> candidates;
         lock (_gate)
         {
-            var removable = BuildItems().Where(i => ids.Contains(i.Id) && i.CanRemove).Select(i => i.Draft).ToList();
-            if (removable.Count == 0) return;
-            _undo = removable;
-            foreach (var d in removable)
+            // CanAbandon is included for programmatic callers; the normal UI only offers CanRemove
+            // so a NeedsAttention card can never be destroyed by the ordinary remove action.
+            candidates = BuildItems().Where(i => ids.Contains(i.Id) && (i.CanRemove || i.CanAbandon)).ToList();
+        }
+        if (candidates.Count == 0) return;
+
+        var removed = new List<MediaDraft>();
+        var abandoned = new HashSet<Guid>();
+        var failures = new List<string>();
+        foreach (var item in candidates)
+        {
+            if (item.Draft.JobId is Guid jobId && item.Execution?.State == JobState.NeedsAttention)
             {
-                if (_probes.TryGetValue(d.MediaId, out var cts)) cts.Cancel();
-                _drafts.RemoveAll(x => x.MediaId == d.MediaId); _selected.Remove(d.MediaId);
+                try
+                {
+                    if (!await _jobs.AbandonAsync(jobId, _lifetime.Token).ConfigureAwait(false))
+                    {
+                        failures.Add("任务状态已变化，未能放弃该任务。");
+                        continue;
+                    }
+                    abandoned.Add(item.Id);
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex.Message);
+                    continue;
+                }
             }
+            removed.Add(item.Draft);
+        }
+
+        lock (_gate)
+        {
+            // Abandoning destroys the preserved staging area, so those cards are not undoable.
+            _undo = removed.Where(d => !abandoned.Contains(d.MediaId)).ToList();
+            foreach (var draft in removed)
+            {
+                if (_probes.TryGetValue(draft.MediaId, out var cts)) cts.Cancel();
+                _drafts.RemoveAll(x => x.MediaId == draft.MediaId); _selected.Remove(draft.MediaId);
+            }
+        }
+        // One notice for the whole batch; failed cards stay visible and are not persisted as ghosts.
+        if (failures.Count > 0) SetNotice(Notices.OperationFailed(failures[0]));
+        Emit(); await PersistAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Explicit, destructive action for a NeedsAttention card: abandons the job through
+    /// the scheduler (cleans staging/reservation/journal) and only then removes the card. Failed
+    /// cleanup keeps the card so the user can retry; abandonment is not undoable.</summary>
+    public async Task AbandonAsync(Guid id)
+    {
+        var item = GetSnapshot().Items.FirstOrDefault(i => i.Id == id);
+        if (item?.Draft.JobId is not Guid jobId || item.Execution?.State != JobState.NeedsAttention) return;
+
+        try
+        {
+            if (!await _jobs.AbandonAsync(jobId, _lifetime.Token).ConfigureAwait(false))
+            {
+                SetNotice(Notices.OperationFailed("任务状态已变化，未能放弃该任务。"));
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            SetNotice(Notices.OperationFailed(ex.Message));
+            return;
+        }
+
+        lock (_gate)
+        {
+            _drafts.RemoveAll(d => d.MediaId == id);
+            _selected.Remove(id);
         }
         Emit(); await PersistAsync().ConfigureAwait(false);
     }

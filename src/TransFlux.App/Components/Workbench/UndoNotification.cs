@@ -16,9 +16,12 @@ public sealed class UndoNotification : Component<UndoNotificationProps>
     public override Element Render()
     {
         var p = Props;
+        // This banner only covers the non-destructive remove action (editable drafts / terminal
+        // jobs). Abandoning a NeedsAttention card cleans staged files and is not undoable, so it
+        // never reaches here; wording must not imply that all removal paths preserve staging.
         var message = p.Count == 1
-            ? "已移除 1 个项目；源文件和输出文件均未删除。"
-            : $"已移除 {p.Count} 个项目；源文件和输出文件均未删除。";
+            ? "已移除 1 个项目；仅从工作台隐藏，源文件和已发布输出文件均未删除。"
+            : $"已移除 {p.Count} 个项目；仅从工作台隐藏，源文件和已发布输出文件均未删除。";
         return InfoBar("已移除项目", message)
             .Informational()
             .IsClosable(true)

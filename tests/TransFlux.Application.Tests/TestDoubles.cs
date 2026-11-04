@@ -99,8 +99,12 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<IReadOnlyList<Job>> GetJobsAsync(IReadOnlyCollection<JobState>? states, CancellationToken ct)
+    /// <summary>Test hook invoked before a job query (used to inject read failures).</summary>
+    public Func<IReadOnlyCollection<JobState>?, Task>? BeforeGetJobs { get; set; }
+
+    public async Task<IReadOnlyList<Job>> GetJobsAsync(IReadOnlyCollection<JobState>? states, CancellationToken ct)
     {
+        if (BeforeGetJobs is { } hook) await hook(states).ConfigureAwait(false);
         lock (_gate)
         {
             if (states?.Contains(JobState.Queued) == true && QueuedReadFailuresToInject > 0)
@@ -113,7 +117,7 @@ internal sealed class InMemoryJobStore : IJobStore
                 .Where(j => states is null || states.Contains(j.State))
                 .OrderBy(j => j.EnqueueOrder)
                 .ToList();
-            return Task.FromResult<IReadOnlyList<Job>>(result);
+            return result;
         }
     }
 
@@ -169,11 +173,15 @@ internal sealed class InMemoryJobStore : IJobStore
         }
     }
 
-    public Task<IReadOnlyList<OutputRecord>> GetOutputsForJobAsync(Guid jobId, CancellationToken ct)
+    /// <summary>Test hook invoked before output lookup (used to inject read failures).</summary>
+    public Func<Guid, Task>? BeforeGetOutputsForJob { get; set; }
+
+    public async Task<IReadOnlyList<OutputRecord>> GetOutputsForJobAsync(Guid jobId, CancellationToken ct)
     {
+        if (BeforeGetOutputsForJob is { } hook) await hook(jobId).ConfigureAwait(false);
         lock (_gate)
         {
-            return Task.FromResult<IReadOnlyList<OutputRecord>>(_outputs.Where(o => o.JobId == jobId).ToList());
+            return _outputs.Where(o => o.JobId == jobId).ToList();
         }
     }
 
@@ -198,20 +206,24 @@ internal sealed class InMemoryJobStore : IJobStore
     {
         lock (_gate)
         {
+            // Mirrors SqliteJobStore: Failed rows stay queryable until recovery/abandon closes them.
             var open = _journals.Values
-                .Where(j => j.Phase is CommitPhase.Prepared or CommitPhase.Published)
+                .Where(j => j.Phase is CommitPhase.Prepared or CommitPhase.Published or CommitPhase.Failed)
                 .ToList();
             return Task.FromResult<IReadOnlyList<CommitJournalEntry>>(open);
         }
     }
 
-    public Task DeleteJournalAsync(string token, CancellationToken ct)
+    /// <summary>Test hook invoked before a journal row is deleted (used to inject DB failures).</summary>
+    public Func<string, Task>? BeforeDeleteJournal { get; set; }
+
+    public async Task DeleteJournalAsync(string token, CancellationToken ct)
     {
+        if (BeforeDeleteJournal is { } hook) await hook(token).ConfigureAwait(false);
         lock (_gate)
         {
             _journals.Remove(token);
         }
-        return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<Preset>> GetPresetsAsync(CancellationToken ct)
@@ -375,7 +387,8 @@ internal sealed class FakeOutputPathService : IOutputPathService
         }
         var token = Guid.NewGuid().ToString("N");
         var extension = request.Container.Extension();
-        var workDirectory = Path.Combine(Root, "work-" + token);
+        // Mirror the production layout so cleanup paths can recognize .transflux-work staging.
+        var workDirectory = Path.Combine(Root, ".transflux-work", token);
         Directory.CreateDirectory(workDirectory);
         var reserved = new ReservedOutput
         {

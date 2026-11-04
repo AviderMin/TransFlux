@@ -6,6 +6,8 @@
 
 **G0 可靠性闸门已完成（2026-11-01）**：R01/R02/R03/R05/R07/R09/R10/R11 修复并有失败测试→通过证据，见 [G0 证据](evidence/G0-RELIABILITY.md)；Dolby/HDR/字幕烧录仍未实现。
 
+**2026-11-03 复核并修复**：见 [16 项目复核与待办](16-project-review-20261103.md)——复核基线 438 项测试；第一轮修复 X01 启动 DB 降级、A03 核心 fail-closed、R04 DV 准入、R08 逐轨验证、R06 字体附件、X02/D1 静默丢轨、D3 恢复隔离、E1–E3 能力探测、A04 迁移 fail-closed、X08 验证摘要等；第二轮修复 Release 构建、D2 旧请求兼容、D4 恢复成功状态、X03 放弃清理、X07 workspace 备份、R08 逐轨签名、R04 DOVI 保留、E7 完整 disposition，以及审计补充的无 A/V Remux 误判、SQLITE_BUSY 误当损坏、Failed journal 过早删除等；第三轮修复 E4 Runner 总时长/停滞、A05 孤儿暂存清理、R04 DV EL/BL 保留、N07 输入格式收敛与历史文档漂移；第四轮修复“移出队列并编辑”Removed 竞态、NeedsAttention 显式放弃暂存 UX、RemoveAsync 部分失败持久化、恢复非 journal 隔离、X02 全无效音轨阻断、R04 次要 DV 轨、AppHost 兜底与提交边界取消；**G2 音频复制切片**已实现（视频转码 + MKV 原样复制音频，真实 AC3 6ch 验证，见 [G2 证据](evidence/G2-AUDIO-COPY.md)）。最终 **542 测试通过 / 0 失败**（Release 构建 0 警告/0 错误）；路线图进度见 14，复核记录见 16 第七至十节。
+
 最新硬件修复：**1.0.0.5**，见 [硬件兼容性修复与实测](evidence/HARDWARE-COMPATIBILITY.md)（设备参数、驱动 API/核心基线、缓存、GPU → CPU 回退）。
 
 版本：1.1 · 日期：2026-11-01 · 状态：已实现纵向切片，正在按实测迭代。

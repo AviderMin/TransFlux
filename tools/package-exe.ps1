@@ -66,17 +66,30 @@ $mf.ffprobe.relativePath = 'ffprobe.exe'
 foreach ($entry in $mf.runtimeFiles) { $entry.relativePath = Split-Path $entry.relativePath -Leaf }
 $mf.reproducibilityNote = 'Installed layout: ffmpeg.exe/ffprobe.exe and av*.dll sit beside this manifest under <install>\ffmpeg.'
 $mf | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $payloadFf 'core-manifest.json') -Encoding utf8
-# Licenses / notices / provenance.
+# Licenses / notices / provenance. Missing required license material must fail the build,
+# not silently produce an installer with an incomplete notice set.
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $payload 'LICENSE.txt') -Force
 $notices = Join-Path $payload 'THIRD-PARTY-NOTICES'
 $null = New-Item -ItemType Directory -Path $notices -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'tools/ffmpeg/LICENSE.txt') -Destination (Join-Path $notices 'FFmpeg-LICENSE.txt') -Force -ErrorAction SilentlyContinue
-$revision = & git -C $repoRoot rev-parse HEAD
+$ffLicense = Join-Path $repoRoot 'tools/ffmpeg/LICENSE.txt'
+if (!(Test-Path -LiteralPath $ffLicense)) { throw 'Bundled FFmpeg license is missing; refusing to package.' }
+Copy-Item -LiteralPath $ffLicense -Destination (Join-Path $notices 'FFmpeg-LICENSE.txt') -Force
+$revision = (& git -C $repoRoot rev-parse HEAD).Trim()
+$statusText = ((& git -C $repoRoot status --porcelain) -join "`n")
+$dirtyState = if ([string]::IsNullOrWhiteSpace($statusText)) { 'clean' } else {
+    'dirty: ' + [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($statusText)))
+}
+$coreManifestHash = (Get-FileHash -LiteralPath (Join-Path $repoRoot 'tools/ffmpeg/core-manifest.json') -Algorithm SHA256).Hash
+$dotnetVersion = (& dotnet --version).Trim()
 @"
 TransFlux source: local repository
 Build base revision: $revision
+Worktree state: $dirtyState
+Build time (UTC): $((Get-Date).ToUniversalTime().ToString('o'))
+Core manifest SHA-256: $coreManifestHash
+Bundled media core: $($mf.distribution) $($mf.ffmpeg.version); see THIRD-PARTY-NOTICES/FFmpeg-LICENSE.txt and ffmpeg/core-manifest.json.
+Toolchain: dotnet $dotnetVersion; Inno Setup $IsccPath
 Application license: MIT; see LICENSE.txt.
-Bundled media core: $($mf.distribution); see THIRD-PARTY-NOTICES/FFmpeg-LICENSE.txt and ffmpeg/core-manifest.json.
 "@ | Set-Content -LiteralPath (Join-Path $payload 'SOURCE.txt') -Encoding utf8
 foreach ($required in @('TransFlux.exe', 'TransFlux.dll', 'TransFlux.pri', 'Reactor.pri', 'coreclr.dll', 'Assets/AppIcon.ico', 'ffmpeg/ffmpeg.exe', 'ffmpeg/core-manifest.json')) {
     if (!(Test-Path -LiteralPath (Join-Path $payload $required))) { throw "Publish output is missing $required" }

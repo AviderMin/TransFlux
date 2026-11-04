@@ -55,6 +55,75 @@ public sealed class OutputSelectionTests
         Assert.Equal(AudioCodec.Aac, transcode.AudioCodec); Assert.Equal(ContainerFormat.Mp4, transcode.Container);
     }
     [Fact]
+    public void AudioCopyIsSelectableOnlyForSupportedVideoTranscodeContainers()
+    {
+        var mkvCopy = ConversionOptions.Default with { Container = ContainerFormat.Mkv, AudioCodec = AudioCodec.Copy };
+        Assert.True(OutputTargets.SupportsAudioCopy(mkvCopy));
+        Assert.Contains(AudioCodec.Copy, OutputTargets.AudioCodecs(mkvCopy));
+        Assert.Equal(AudioCodec.Copy, OutputTargets.WithContainer(mkvCopy, ContainerFormat.Mkv).AudioCodec);
+
+        // MKV + Copy -> MP4 must fall back to the container's first compatible encode codec.
+        var mp4 = OutputTargets.WithContainer(mkvCopy, ContainerFormat.Mp4);
+        Assert.Equal(ContainerFormat.Mp4, mp4.Container);
+        Assert.Equal(AudioCodec.Aac, mp4.AudioCodec);
+        Assert.False(OutputTargets.SupportsAudioCopy(mp4));
+        Assert.DoesNotContain(AudioCodec.Copy, OutputTargets.AudioCodecs(mp4));
+        // WebM falls back to its own first compatible encode codec (Opus), not a global default.
+        Assert.Equal(AudioCodec.Opus, OutputTargets.WithContainer(mkvCopy, ContainerFormat.Webm).AudioCodec);
+
+        // Audio extraction never exposes Copy and switching media normalizes an MKV copy.
+        var audio = ConversionOptions.Default with
+        { Mode = ConversionMode.AudioExtract, Container = ContainerFormat.M4a, AudioCodec = AudioCodec.Aac };
+        Assert.False(OutputTargets.SupportsAudioCopy(audio));
+        Assert.DoesNotContain(AudioCodec.Copy, OutputTargets.AudioCodecs(audio));
+        Assert.Equal(AudioCodec.Aac, OutputTargets.WithMedia(mkvCopy, true).AudioCodec);
+    }
+
+    [Fact]
+    public void VideoCodecCopyKeepsRemuxSemantics_AndMkvAudioCopySurvivesTranscodeSwitch()
+    {
+        var mkvCopy = ConversionOptions.Default with { Container = ContainerFormat.Mkv, AudioCodec = AudioCodec.Copy };
+        var remux = OutputTargets.WithVideoCodec(mkvCopy, VideoCodec.Copy);
+        Assert.Equal(ConversionMode.Remux, remux.Mode);
+        Assert.Equal(AudioCodec.Copy, remux.AudioCodec);
+        Assert.Equal(ContainerFormat.Mkv, remux.Container);
+
+        var transcode = OutputTargets.WithVideoCodec(remux, VideoCodec.H264);
+        Assert.Equal(ConversionMode.VideoTranscode, transcode.Mode);
+        Assert.Equal(ContainerFormat.Mkv, transcode.Container);
+        Assert.Equal(AudioCodec.Copy, transcode.AudioCodec);
+    }
+
+    [Fact]
+    public void InvalidAudioCopyFromLegacyDraftsOrPresetsIsNormalized()
+    {
+        var mp4Copy = ConversionOptions.Default with { AudioCodec = AudioCodec.Copy };
+        Assert.Equal(AudioCodec.Aac, OutputTargets.Normalize(mp4Copy).AudioCodec);
+        Assert.Equal(AudioCodec.Aac, OutputTargets.WithAudioCodec(mp4Copy, AudioCodec.Copy).AudioCodec);
+
+        var audioCopy = ConversionOptions.Default with
+        { Mode = ConversionMode.AudioExtract, Container = ContainerFormat.M4a, AudioCodec = AudioCodec.Copy };
+        Assert.Equal(AudioCodec.Aac, OutputTargets.Normalize(audioCopy).AudioCodec);
+
+        // Remux keeps its unconditional copy contract.
+        var remuxCopy = ConversionOptions.Default with { Mode = ConversionMode.Remux, Container = ContainerFormat.Mkv, AudioCodec = AudioCodec.Copy };
+        Assert.Equal(AudioCodec.Copy, OutputTargets.Normalize(remuxCopy).AudioCodec);
+
+        // A legacy preset that still says Copy+MP4 is repaired when it is loaded.
+        var legacyPreset = new PresetRequestTemplate { AudioCodec = AudioCodec.Copy };
+        Assert.Equal(AudioCodec.Aac, OutputTargets.Normalize(ConversionOptions.FromTemplate(legacyPreset)).AudioCodec);
+    }
+
+    [Fact]
+    public void AudioCopyUiTextExplainsPreservationAndAtmos()
+    {
+        Assert.Contains("复制原始音轨", OutputTargets.AudioCopyLabel);
+        Assert.Contains("不重新编码", OutputTargets.AudioCopyLabel);
+        Assert.Contains("保留", OutputTargets.AudioCopyCaption);
+        Assert.Contains("Atmos", OutputTargets.AudioCopyCaption);
+    }
+
+    [Fact]
     public void RequestAndPresetKeepExplicitVideoAndAudioEncodings()
     {
         var options = ConversionOptions.Default with { Container = ContainerFormat.Webm, VideoCodec = VideoCodec.Av1, AudioCodec = AudioCodec.Vorbis };

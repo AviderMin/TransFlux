@@ -152,7 +152,7 @@ DV 重编码首批实验只允许不裁剪、不改帧率、不改变帧数/顺�
 |---|---|---|
 | G0 可靠性闸门（✅ 2026-11-01 完成） | 先修 13 的 R01/R02/R03/R05/R07/R09/R10/R11；RecoveryService、JobScheduler、OutputPathService、WorkbenchStore、ProcessCapture | 真实文件/SQLite 故障注入通过，假成功/唯一临时成果丢失被阻止；UI 与实际选流一致；证据见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md) |
 | G1 媒体契约 | RequestTypes、StreamDescriptor、ValidatedPlan、FfprobeJsonParser、ColorClassifier、SubtitlePolicy、WorkbenchRules | v1 迁移、逐轨解析、LossReport、future-version 拒绝；全矩阵仍可回归。后续功能不直接消费原始用户请求 |
-| G2 无损保留 | OutputFormatCatalog、Planner、Verifier；音频 Copy 与安全 HDR/DV stream-copy | AC3/EAC3/TrueHD 与 HDR10/HLG 的小矩阵验证；DV 8.1 单列真实 RPU 验证。按 case 开放，不整体“Dolby=true” |
+| G2 无损保留（部分：MKV 音频复制） | OutputFormatCatalog、Planner、Verifier；音频 Copy 与安全 HDR/DV stream-copy | AC3/EAC3/TrueHD 与 HDR10/HLG 的小矩阵验证；DV 8.1 单列真实 RPU 验证。按 case 开放，不整体“Dolby=true”。**2026-11-04：视频转码 + MKV 音频原样复制切片已实现（AC3 真实样片验证；EAC3/TrueHD 仅规则验证）** |
 | G3 文本字幕烧录 SDR | FilterGraph、prepare artifacts、Runner、OutputSettingsPanel | SRT/ASS/字体/转义/裁剪/旋转/VFR 通过，画面确实含字且策略正确；CPU 路线先开放 |
 | G4 HDR 基线 | ColorPlan、CPU tone-map、x265 Main10、Verifier | HDR10/HLG→SDR、HDR10→HDR10 分别通过色彩与信令验证；SDR 烧录可组合在 tone-map 后 |
 | G5 扩展音频与位图 | 普通 AC3/EAC3 编码、downmix；PGS/DVD overlay | 编码参数和布局合法、Atmos 不误标；位图时间/坐标/alpha 真样片验收 |
@@ -161,10 +161,11 @@ DV 重编码首批实验只允许不裁剪、不改帧率、不改变帧数/顺�
 
 推荐执行顺序 G0 → G1 → G2 → G3 → G4 → G5 → G6 → G7。不估计未经测量的开发天数；每阶段以可运行纵向切片结束，禁止一次性添加全部模型、空接口和假 UI。
 
-## 进度记录（2026-11-01）
+## 进度记录（2026-11-01 起）
 
 - **G0 可靠性闸门：已完成**。R01/R02/R03/R05/R07/R09/R10/R11 已修复并有失败测试→通过证据，见 [G0-RELIABILITY.md](evidence/G0-RELIABILITY.md)。
-- **G1–G7：未开始**。Dolby 音频、Dolby Vision、HDR 转换、内封字幕烧录的支持矩阵与验证状态没有变化；本页首段的“待实现”仍然有效。
+- **G2 音频复制切片（部分，2026-11-04）**：视频转码 + MKV 原样复制音频（AC3/EAC3/TrueHD 规则准入，真实 AC3 6ch 转码验证）已实现；UI 提供“复制原始音轨（不重新编码）”并明确 Atmos 未单独验证。见 [G2-AUDIO-COPY 证据](evidence/G2-AUDIO-COPY.md)。
+- **G1、G3–G7：未开始**。Dolby Audio 识别/Atmos 证据、Dolby Vision、HDR 转换、内封字幕烧录的支持矩阵与验证状态没有变化；本页首段的“待实现”仍然有效。
 - 本轮未生成新安装包，未进行真实 HDR/DV/Atmos 样片或 GPU 实机验收。
 
 ## 验证矩阵与可交付证据

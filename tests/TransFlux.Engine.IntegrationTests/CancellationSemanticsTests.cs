@@ -73,7 +73,8 @@ public class CancellationSemanticsTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var result = await new FfmpegVerifier(TestSupport.Core).SampleDecodeAsync(path, null, full: false, cts.Token);
+        var actual = new TransFlux.Domain.Media.SourceSnapshot { MediaId = Guid.NewGuid(), AbsolutePath = path };
+        var result = await new FfmpegVerifier(TestSupport.Core).SampleDecodeAsync(path, actual, full: false, cts.Token);
 
         Assert.False(result.Ok);
         Assert.True(result.Canceled);

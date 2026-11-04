@@ -142,6 +142,157 @@ public class PlannerTests
     }
 
     [Fact]
+    public async Task BuildTranscodePlan_AudioCopy_Mkv_UsesStreamCopy()
+    {
+        var source = SyntheticWithStreams(AudioTrace(1) with { Codec = "ac3", Channels = 6, ChannelLayout = "5.1" });
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv) with
+        {
+            Audio = new AudioSpec { Codec = AudioCodec.Copy },
+        };
+
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+        var args = Arguments(plan);
+
+        var codecAt = Array.IndexOf(args, "-c:a");
+        Assert.True(codecAt >= 0);
+        Assert.Equal("copy", args[codecAt + 1]);
+        Assert.DoesNotContain("-b:a", args);
+        Assert.DoesNotContain("-ar", args);
+        Assert.DoesNotContain("-ac", args);
+        Assert.Contains("audio copy", plan.CandidatePaths[0].Rationale);
+
+        Assert.Equal(AudioCodec.Copy, plan.ExpectedOutput.AudioCodec);
+        var audioSignature = Assert.Single(plan.ExpectedOutput.TrackSignatures.Skip(1));
+        Assert.Equal(MediaKind.Audio, audioSignature.Kind);
+        Assert.Equal("ac3", audioSignature.Codec);
+        Assert.Equal(6, audioSignature.Channels);
+    }
+
+    [Fact]
+    public async Task BuildPlan_RejectsPlaylistConcatInputFormat()
+    {
+        var source = SyntheticVideo(640, 360) with
+        {
+            Format = new MediaFormat { FormatName = "concat", DurationUs = 5_000_000 },
+        };
+        var request = TestSupport.TranscodeRequest(source);
+
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ResultKind.ValidationFailure, result.Kind);
+        Assert.Contains("INPUT_FORMAT", result.Failure!.TechnicalDetail);
+    }
+
+    [Fact]
+    public async Task BuildTranscodePlan_CapturesPerTrackSignaturesInMappingOrder()
+    {
+        var stereo = AudioTrace(1, "eng") with { Channels = 2, IsDefault = true };
+        var surround = AudioTrace(3, "jpn") with { Codec = "ac3", Channels = 6, IsDefault = false, IsForced = true };
+        var source = SyntheticWithStreams(stereo, surround);
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            RequestVersion = 2,
+            Mode = ConversionMode.VideoTranscode,
+            Container = ContainerFormat.Mkv,
+            AudioTracks = AudioSelection.Tracks(1, 3),
+        };
+
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var plan = result.Value!;
+
+        var signatures = plan.ExpectedOutput.TrackSignatures;
+        Assert.Equal(3, signatures.Count);
+        Assert.Equal(MediaKind.Video, signatures[0].Kind);
+        Assert.Equal("h264", signatures[0].Codec);
+        Assert.Equal(MediaKind.Audio, signatures[1].Kind);
+        Assert.Equal("aac", signatures[1].Codec);
+        Assert.Equal(2, signatures[1].Channels);
+        Assert.True(signatures[1].IsDefault);
+        Assert.Equal(MediaKind.Audio, signatures[2].Kind);
+        Assert.Equal("aac", signatures[2].Codec);
+        Assert.Equal(6, signatures[2].Channels);
+        Assert.False(signatures[2].IsDefault);
+        Assert.True(signatures[2].IsForced);
+    }
+
+    [Fact]
+    public async Task BuildPlan_PreservesEveryStreamDispositionFlag()
+    {
+        var audio = AudioTrace(1, "eng") with
+        {
+            IsDefault = true, IsDub = true, IsOriginal = true, IsComment = true, IsLyrics = true,
+            IsKaraoke = true, IsForced = true, IsHearingImpaired = true, IsVisualImpaired = true,
+            IsCleanEffects = true, IsTimedThumbnails = true, IsNonDiegetic = true, IsCaptions = true,
+            IsDescriptions = true, IsMetadata = true, IsDependent = true, IsStillImage = true,
+            IsMultilayer = true,
+        };
+        var source = SyntheticWithStreams(audio);
+        var request = TestSupport.TranscodeRequest(source, ContainerFormat.Mkv);
+
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var args = Arguments(result.Value!);
+        var at = Array.IndexOf(args, "-disposition:a:0");
+        Assert.True(at >= 0);
+        Assert.Equal(
+            "default+dub+original+comment+lyrics+karaoke+forced+hearing_impaired+visual_impaired+clean_effects" +
+            "+timed_thumbnails+non_diegetic+captions+descriptions+metadata+dependent+still_image+multilayer",
+            args[at + 1]);
+    }
+
+    [Fact]
+    public async Task BuildRemuxPlan_CapturesDolbyVisionRetentionExpectation()
+    {
+        var video = new StreamDescriptor
+        {
+            SourceIndex = 0, Kind = MediaKind.Video, Codec = "hevc", Width = 3840, Height = 2160,
+            PixelFormat = "yuv420p10le", BitDepth = 10, IsDefault = true,
+            DvProfile = 8, DvBlSignalCompatibilityId = 1, DvRpuPresent = true,
+            DvElPresent = true, DvBlPresent = true,
+            ColorClassification = ColorClassification.DolbyVision,
+        };
+        var source = new SourceSnapshot
+        {
+            MediaId = Guid.NewGuid(),
+            AbsolutePath = "C:\\fake\\dv.mkv",
+            DurationUs = 5_000_000,
+            Streams = new[] { video, AudioTrace(1) },
+            Format = new MediaFormat { FormatName = "matroska", DurationUs = 5_000_000 },
+            ColorClassification = ColorClassification.DolbyVision,
+        };
+        var request = new ConversionRequest
+        {
+            SourceSnapshotId = source.MediaId,
+            Mode = ConversionMode.Remux,
+            Container = ContainerFormat.Mkv,
+        };
+
+        var result = await new FfmpegPlanner(TestSupport.Core)
+            .BuildAsync(request, source, TestSupport.EmptyCapabilities(), CancellationToken.None);
+        Assert.True(result.IsSuccess, result.Failure?.TechnicalDetail);
+        var expected = result.Value!.ExpectedOutput;
+
+        Assert.NotNull(expected.DolbyVision);
+        Assert.Equal(8, expected.DolbyVision!.Profile);
+        Assert.Equal(1, expected.DolbyVision.BlSignalCompatibilityId);
+        Assert.True(expected.DolbyVision.RpuRequired);
+        Assert.True(expected.DolbyVision.ElRequired);
+        Assert.True(expected.DolbyVision.BlRequired);
+        Assert.Equal(new string?[] { "hevc", "aac" }, expected.TrackSignatures.Select(s => s.Codec));
+        Assert.Equal(2, expected.TrackSignatures[1].Channels);
+        Assert.True(expected.TrackSignatures[1].IsDefault);
+    }
+
+    [Fact]
     public async Task BuildTranscodePlan_IsDeterministicHash()
     {
         var source = await ProbeSampleAsync("planner-deterministic.mp4");

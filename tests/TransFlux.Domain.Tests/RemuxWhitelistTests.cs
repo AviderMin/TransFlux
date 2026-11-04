@@ -77,6 +77,26 @@ public class RemuxWhitelistTests
         Assert.True(Has(issues, "REMUX_VIDEO"));
     }
 
+    [Fact]
+    public void Remux_V2_InvalidVideoSelection_IsBlocked()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv,
+                requestVersion: 2, video: VideoSelection.Stream(99)), src);
+        Assert.True(Has(issues, "VIDEO_SELECTION"));
+    }
+
+    [Fact]
+    public void Remux_V2_ValidExplicitVideo_IsAllowed()
+    {
+        var src = TestData.Source(new[] { TestData.Video(), TestData.Audio() });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv,
+                requestVersion: 2, video: VideoSelection.Stream(0)), src);
+        Assert.Empty(issues);
+    }
+
     // ---------------- Dolby Vision grading ----------------
 
     [Fact]
@@ -109,6 +129,82 @@ public class RemuxWhitelistTests
             ColorClassification.DolbyVision);
         var issues = MediaCompatibility.Validate(
             TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mp4), src);
+        Assert.True(Has(issues, "REMUX_DV"));
+    }
+
+    [Fact]
+    public void CanRemuxDolbyVision_Profile7WithCompatId_IsBlocked()
+    {
+        Assert.False(MediaCompatibility.CanRemuxDolbyVision(
+            TestData.Video(dvProfile: 7, dvBlCompat: 1), ContainerFormat.Mkv, out var reason));
+        Assert.Contains("Profile 7", reason);
+    }
+
+    [Fact]
+    public void CanRemuxDolbyVision_Profile8WithoutCompatId_IsBlocked()
+    {
+        Assert.False(MediaCompatibility.CanRemuxDolbyVision(
+            TestData.Video(dvProfile: 8, dvBlCompat: 0), ContainerFormat.Mkv, out var reason));
+        Assert.Contains("Profile 8", reason);
+    }
+
+    [Fact]
+    public void Remux_DolbyVision_P7Compat1_ToMkv_IsBlocked()
+    {
+        var src = TestData.Source(
+            new[] { TestData.Video(dvProfile: 7, dvBlCompat: 1), TestData.Audio() },
+            ColorClassification.DolbyVision);
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
+        Assert.True(Has(issues, "REMUX_DV"));
+    }
+
+    [Fact]
+    public void Remux_Legacy_NonDvPrimaryWithDvSecondary_IsBlocked()
+    {
+        var src = TestData.Source(new[]
+        {
+            TestData.Video(index: 0, color: ColorClassification.SdrBt709),
+            TestData.Video(index: 1, isDefault: false, dvProfile: 5, dvBlCompat: 0,
+                color: ColorClassification.DolbyVision),
+            TestData.Audio(index: 2),
+        });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
+
+        Assert.True(Has(issues, "REMUX_DV"));
+    }
+
+    [Fact]
+    public void Remux_Legacy_NonDvPrimaryWithValidDvSecondary_IsAllowed()
+    {
+        var src = TestData.Source(new[]
+        {
+            TestData.Video(index: 0, color: ColorClassification.SdrBt709),
+            TestData.Video(index: 1, isDefault: false, dvProfile: 8, dvBlCompat: 1,
+                color: ColorClassification.DolbyVision),
+            TestData.Audio(index: 2),
+        });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv), src);
+
+        Assert.DoesNotContain(issues, i => i.Code == "REMUX_DV");
+    }
+
+    [Fact]
+    public void Remux_V2_ExplicitDvSecondarySelection_IsBlocked()
+    {
+        var src = TestData.Source(new[]
+        {
+            TestData.Video(index: 0, color: ColorClassification.SdrBt709),
+            TestData.Video(index: 1, isDefault: false, dvProfile: 5, dvBlCompat: 0,
+                color: ColorClassification.DolbyVision),
+            TestData.Audio(index: 2),
+        });
+        var issues = MediaCompatibility.Validate(
+            TestData.Request(mode: ConversionMode.Remux, container: ContainerFormat.Mkv,
+                requestVersion: 2, video: VideoSelection.Stream(1)), src);
+
         Assert.True(Has(issues, "REMUX_DV"));
     }
 

@@ -63,9 +63,12 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- WinUI does not support IL trimming; keeping it off for every build also avoids the
+         NETSDK1102 failure when a framework-dependent Release build runs the linker. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- ReadyToRun is only meaningful for the self-contained publish performed by
+         tools/package-exe.ps1; plain builds stay fast and do not crossgen. -->
+    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug' and '$(SelfContained)' == 'true'">True</PublishReadyToRun>
+    <PublishReadyToRun Condition="'$(PublishReadyToRun)' == ''">False</PublishReadyToRun>
   </PropertyGroup>
 </Project>

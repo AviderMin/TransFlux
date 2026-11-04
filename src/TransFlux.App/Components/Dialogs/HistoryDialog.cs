@@ -41,14 +41,27 @@ public sealed class HistoryDialog : Component<HistoryDialogProps>
         UseEffect(() =>
         {
             var cts = new CancellationTokenSource();
+            var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+            void Post(Action action)
+            {
+                if (dispatcher is null || dispatcher.HasThreadAccess) action();
+                else dispatcher.TryEnqueue(() => action());
+            }
             _ = Task.Run(async () =>
             {
-                try { setEntries(await p.Services.History.GetRecentAsync(MaxEntries, cts.Token)); }
+                try
+                {
+                    var loaded = await p.Services.History.GetRecentAsync(MaxEntries, cts.Token);
+                    Post(() => setEntries(loaded));
+                }
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    setBanner(Notice.Error(UiText.HistoryLoadFailedTitle, ex.Message));
-                    setEntries(Array.Empty<HistoryEntry>());
+                    Post(() =>
+                    {
+                        setBanner(Notice.Error(UiText.HistoryLoadFailedTitle, ex.Message));
+                        setEntries(Array.Empty<HistoryEntry>());
+                    });
                 }
             });
             return () => cts.Cancel();

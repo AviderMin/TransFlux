@@ -33,8 +33,9 @@ public sealed class CapabilityService : ICapabilityService
         {
             var core = _engine.GetIdentity();
             IReadOnlyList<AdapterInfo> adapters;
+            var enumerationFailed = false;
             try { adapters = _enumerate().DistinctBy(a => a.AdapterId).ToArray(); }
-            catch { adapters = []; }
+            catch { adapters = []; enumerationFailed = true; }
             var osBuild = Environment.OSVersion.Version.Build.ToString();
             var key = CanonicalJson.Hash(new
             {
@@ -43,7 +44,9 @@ public sealed class CapabilityService : ICapabilityService
                     .Select(a => new { a.AdapterId, a.VendorId, a.DeviceId, a.DriverVersion, a.DxgiIndex, a.IsSoftware }).ToArray(),
                 targets = query.TargetEncoders.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             });
-            if (!query.ForceRefresh)
+            // A transient DXGI enumeration failure must never be cached as "no GPU": the empty
+            // adapter list would otherwise hit the 7-day normal TTL and disable hardware for good.
+            if (!query.ForceRefresh && !enumerationFailed)
             {
                 var cached = await _store.GetCapabilityAsync(key, ct).ConfigureAwait(false);
                 if (cached is { } hit)
@@ -79,7 +82,7 @@ public sealed class CapabilityService : ICapabilityService
             var result = new CapabilitySnapshot { CapabilityHash = key, CoreHash = core.CoreHash, OsBuild = osBuild,
                 Adapters = adapters, Candidates = candidates, ProbedUtc = _clock.UtcNow };
             // A cheap read must never poison the next real trial with "trial not requested".
-            if (query.IncludeTrialRun)
+            if (query.IncludeTrialRun && !enumerationFailed)
             {
                 try { await _store.SaveCapabilityAsync(key, CanonicalJson.Serialize(result), result.ProbedUtc, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }

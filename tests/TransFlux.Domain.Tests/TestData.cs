@@ -19,7 +19,8 @@ internal static class TestData
         string? colorTransfer = "bt709",
         string? colorPrimaries = "bt709",
         int? dvProfile = null,
-        int? dvBlCompat = null)
+        int? dvBlCompat = null,
+        ColorClassification? color = null)
         => new()
         {
             SourceIndex = index,
@@ -36,6 +37,7 @@ internal static class TestData
             ColorPrimaries = colorPrimaries,
             DvProfile = dvProfile,
             DvBlSignalCompatibilityId = dvBlCompat,
+            ColorClassification = color,
         };
 
     public static StreamDescriptor Audio(
@@ -76,14 +78,15 @@ internal static class TestData
         IReadOnlyList<StreamDescriptor> streams,
         ColorClassification color = ColorClassification.SdrBt709,
         long? durationUs = 5_000_000,
-        string path = @"C:\media\sample.mp4")
+        string path = @"C:\media\sample.mp4",
+        string formatName = "")
         => new()
         {
             MediaId = Guid.NewGuid(),
             AbsolutePath = path,
             Streams = streams,
             DurationUs = durationUs,
-            Format = new MediaFormat { DurationUs = durationUs },
+            Format = new MediaFormat { FormatName = formatName, DurationUs = durationUs },
             ColorClassification = color,
         };
 

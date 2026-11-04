@@ -14,6 +14,25 @@ public sealed record StreamDescriptor
     public bool IsDefault { get; init; }
     public bool IsForced { get; init; }
     public bool IsAttachedPicture { get; init; }
+    // Remaining ffprobe disposition flags. These are structural user intent (accessibility,
+    // commentary, karaoke/lyrics...) and must survive every metadata policy; the planner
+    // rebuilds the full disposition mask instead of emitting only default/forced.
+    public bool IsDub { get; init; }
+    public bool IsOriginal { get; init; }
+    public bool IsComment { get; init; }
+    public bool IsLyrics { get; init; }
+    public bool IsKaraoke { get; init; }
+    public bool IsHearingImpaired { get; init; }
+    public bool IsVisualImpaired { get; init; }
+    public bool IsCleanEffects { get; init; }
+    public bool IsTimedThumbnails { get; init; }
+    public bool IsNonDiegetic { get; init; }
+    public bool IsCaptions { get; init; }
+    public bool IsDescriptions { get; init; }
+    public bool IsMetadata { get; init; }
+    public bool IsDependent { get; init; }
+    public bool IsStillImage { get; init; }
+    public bool IsMultilayer { get; init; }
 
     // Video-specific
     public int? Width { get; init; }
@@ -30,6 +49,8 @@ public sealed record StreamDescriptor
     public string? ColorTransfer { get; init; }
     public string? ColorPrimaries { get; init; }
     public bool HasHdrSideData { get; init; }
+    /// <summary>Per-stream colour class; null means "not classified" (fall back to the snapshot).</summary>
+    public ColorClassification? ColorClassification { get; init; }
 
     // HDR static metadata (structured from mastering-display / content-light side data).
     // MasterDisplay uses the x265 -master-display syntax: G(x,y)B(x,y)R(x,y)WP(x,y)L(max,min).
@@ -44,6 +65,12 @@ public sealed record StreamDescriptor
     public int? DvProfile { get; init; }
     /// <summary>BL signal compatibility id (1=HDR10, 2=SDR, 4=HLG for profile 8); 0/absent = no compatible base layer.</summary>
     public int? DvBlSignalCompatibilityId { get; init; }
+    /// <summary>DOVI configuration record: RPU (reference processing unit) present flag; null when no record was reported.</summary>
+    public bool? DvRpuPresent { get; init; }
+    /// <summary>DOVI configuration record: enhancement layer present flag; null when no record was reported.</summary>
+    public bool? DvElPresent { get; init; }
+    /// <summary>DOVI configuration record: base layer present flag; null when no record was reported.</summary>
+    public bool? DvBlPresent { get; init; }
 
     // Audio-specific
     public int? Channels { get; init; }

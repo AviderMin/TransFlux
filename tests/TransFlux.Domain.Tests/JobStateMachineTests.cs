@@ -11,9 +11,9 @@ public class JobStateMachineTests
     private static readonly Dictionary<JobState, JobState[]> Expected = new()
     {
         [JobState.Queued] = new[] { JobState.Preflighting, JobState.Canceled, JobState.NeedsAttention },
-        [JobState.Preflighting] = new[] { JobState.Running, JobState.NeedsAttention, JobState.Failed, JobState.CancelRequested },
+        [JobState.Preflighting] = new[] { JobState.Running, JobState.NeedsAttention, JobState.Failed, JobState.CancelRequested, JobState.Interrupted },
         [JobState.Running] = new[] { JobState.Verifying, JobState.CancelRequested, JobState.Recovering, JobState.Failed, JobState.Interrupted },
-        [JobState.Recovering] = new[] { JobState.Preflighting, JobState.Failed, JobState.CancelRequested },
+        [JobState.Recovering] = new[] { JobState.Preflighting, JobState.Failed, JobState.CancelRequested, JobState.Interrupted },
         [JobState.Verifying] = new[] { JobState.Committing, JobState.Failed, JobState.CancelRequested, JobState.Interrupted },
         [JobState.Committing] = new[] { JobState.Succeeded, JobState.NeedsAttention, JobState.Interrupted },
         [JobState.CancelRequested] = new[] { JobState.Canceled },

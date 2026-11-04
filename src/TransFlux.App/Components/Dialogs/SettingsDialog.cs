@@ -51,17 +51,29 @@ public sealed class SettingsDialog : Component<SettingsDialogProps>
         {
             var cts = new CancellationTokenSource();
             probeLifetime.Current = cts;
+            var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+            void Post(Action action)
+            {
+                if (dispatcher is null || dispatcher.HasThreadAccess) action();
+                else dispatcher.TryEnqueue(() => action());
+            }
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    setIdentity(p.Services.Core.GetIdentity());
-                    setEngineCapabilities(await p.Services.Core.QueryAsync(cts.Token));
-                    setCapabilities(await p.Services.Capabilities.GetAsync(new CapabilityQuery(), cts.Token));
+                    var identityValue = p.Services.Core.GetIdentity();
+                    var engineValue = await p.Services.Core.QueryAsync(cts.Token);
+                    var capabilityValue = await p.Services.Capabilities.GetAsync(new CapabilityQuery(), cts.Token);
+                    Post(() =>
+                    {
+                        setIdentity(identityValue);
+                        setEngineCapabilities(engineValue);
+                        setCapabilities(capabilityValue);
+                    });
                 }
                 catch (OperationCanceledException) { }
-                catch (Exception ex) { setDiagError(ex.Message); }
-                finally { if (!cts.IsCancellationRequested) setProbing(false); }
+                catch (Exception ex) { Post(() => setDiagError(ex.Message)); }
+                finally { if (!cts.IsCancellationRequested) Post(() => setProbing(false)); }
             });
             return () => cts.Cancel();
         }, p.Services);

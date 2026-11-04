@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using TransFlux.Domain.Common;
 using TransFlux.Domain.Media;
 
@@ -170,12 +171,29 @@ public sealed record SubtitleSelection
 /// <summary>Immutable user request. Versioned separately from presets and plans.</summary>
 public sealed record ConversionRequest
 {
+    public ConversionRequest()
+    {
+    }
+
+    /// <summary>
+    /// JSON deserialization path. A request persisted by a legacy build has no
+    /// <c>requestVersion</c> member at all; treating a missing member as version 1 keeps its
+    /// SelectedStreamIndices meaning intact. The parameterless constructor above still defaults
+    /// newly created requests to version 2.
+    /// </summary>
+    [JsonConstructor]
+    public ConversionRequest(int requestVersion = 1)
+    {
+        RequestVersion = requestVersion;
+    }
+
     /// <summary>
     /// Request schema version. Version 1 is the legacy model where SelectedStreamIndices
     /// filters video, audio and subtitles together; version 2 uses the explicit selections
-    /// below and ignores SelectedStreamIndices. New requests are always written as version 2.
+    /// below and ignores SelectedStreamIndices. New requests default to version 2; only
+    /// persisted legacy requests may carry version 1.
     /// </summary>
-    public int RequestVersion { get; init; } = 1;
+    public int RequestVersion { get; init; } = 2;
     public required Guid SourceSnapshotId { get; init; }
     public ConversionMode Mode { get; init; } = ConversionMode.VideoTranscode;
     public ContainerFormat Container { get; init; } = ContainerFormat.Mp4;

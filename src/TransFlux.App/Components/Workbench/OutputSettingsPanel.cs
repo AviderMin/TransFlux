@@ -39,7 +39,11 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
         var editable = selection.Count > 0 && selection.All(i => i.CanEdit);
         bool Same<T>(Func<ConversionOptions, T> get) => options.Select(get).Distinct().Count() <= 1;
         int Index<T>(Func<ConversionOptions, T> get, int value) => Same(get) ? value : -1;
-        void Apply(Func<ConversionOptions, ConversionOptions> mutate) { if (editable) p.Apply(mutate); }
+        void Apply(Func<ConversionOptions, ConversionOptions> mutate)
+        {
+            // Normalize every edit so stale drafts/presets can never persist an invalid Copy selection.
+            if (editable) p.Apply(x => OutputTargets.Normalize(mutate(x)));
+        }
         Element Combo(string label, string[] items, int index, Action<int> change, string placeholder = "多种值")
             => ComboBox(items, index, i => { if (i >= 0 && i < items.Length) change(i); })
                 .Header(label).PlaceholderText(placeholder).AutomationName(label).IsEnabled(editable).HAlign(HorizontalAlignment.Stretch);
@@ -120,12 +124,14 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                     }
                     if (Same(x => x.Mode) && o.Mode != ConversionMode.Remux)
                     {
-                        var codecs = BasicAudioCodecs(o.Container);
+                        var codecs = BasicAudioCodecs(o);
                         var audioCodecField = Combo(OutputTargets.IsAudio(o) ? "编码格式" : "音频编码", codecs.Select(AudioLabel).ToArray(),
                             Index(x => OutputTargets.IsPcm(x.AudioCodec) ? AudioCodec.PcmS16le : x.AudioCodec, BasicAudioIndex(o.AudioCodec, codecs)),
                             i => Apply(x => codecs[i] == AudioCodec.PcmS16le && OutputTargets.IsPcm(x.AudioCodec)
                                 ? x : OutputTargets.WithAudioCodec(x, codecs[i])));
                         formatFields.Add(videoCodecField is null ? audioCodecField : Pair(videoCodecField, audioCodecField));
+                        if (Same(x => x.AudioCodec) && o.AudioCodec == AudioCodec.Copy && OutputTargets.SupportsAudioCopy(o))
+                            formatFields.Add(Ui.DimCaption(OutputTargets.AudioCopyCaption).TextWrapping(TextWrapping.Wrap));
                         if (OutputTargets.IsAudio(o) && !o.AudioCodec.HasBitrate())
                             formatFields.Add(Ui.DimCaption("无损编码不会恢复已损失的音质，输出文件可能更大。").TextWrapping(TextWrapping.Wrap));
                     }
@@ -148,7 +154,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             if (presets.Length > 0) commonFields.Add(Combo("使用预设", new[] { "自定义" }.Concat(presets.Select(pr => pr.Name)).ToArray(),
                 Index(PresetIndex, PresetIndex(o)), i =>
                 {
-                    if (i > 0) Apply(x => x.ApplyPresetTemplate(presets[i - 1].Template));
+                    if (i > 0) Apply(x => OutputTargets.Normalize(x.ApplyPresetTemplate(presets[i - 1].Template)));
                     else setNotice(Notices.PresetCustom());
                 }).ToolTip(UiText.PresetHint));
             if (!Same(x => x.Mode)) body.Add(Ui.DimCaption("已选项目使用不同转换方式。请先统一输出格式，或分别选择后编辑。").TextWrapping(TextWrapping.Wrap));
@@ -258,21 +264,28 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
                 }
                 if (o.Mode != ConversionMode.Remux)
                 {
-                    if (o.AudioCodec.HasBitrate())
-                        audioFields.Add(Pair(
-                            Number("音频码率 kbps", x => x.AudioBitRateKbps,
-                                (x, v) => x with { AudioBitRateKbps = FieldValues.IntOrNull(v, 16,
-                                    x.AudioCodec == AudioCodec.Mp3 ? 320 : x.AudioCodec == AudioCodec.Opus ? 510 : 512) }, 0, 512, 16),
-                            Number("采样率 Hz", x => x.AudioSampleRate, (x, v) => x with { AudioSampleRate = FieldValues.IntOrNull(v, 8000, 192000) }, 0, 192000, 100)));
+                    if (Same(x => x.AudioCodec) && o.AudioCodec == AudioCodec.Copy)
+                    {
+                        audioFields.Add(Ui.DimCaption(OutputTargets.AudioCopyCaption).TextWrapping(TextWrapping.Wrap));
+                    }
                     else
-                        audioFields.Add(Number("采样率 Hz", x => x.AudioSampleRate, (x, v) => x with { AudioSampleRate = FieldValues.IntOrNull(v, 8000, 192000) }, 0, 192000, 100));
-                    var channels = Number("声道数", x => x.AudioChannels, (x, v) => x with { AudioChannels = FieldValues.IntOrNull(v, 1, 8) }, 0, 8, 1);
-                    if (Same(x => OutputTargets.IsPcm(x.AudioCodec)) && OutputTargets.IsPcm(o.AudioCodec))
-                        audioFields.Add(Pair(channels, Combo("PCM 位深", ["16-bit", "24-bit"],
-                            Index(x => x.AudioCodec == AudioCodec.PcmS24le, o.AudioCodec == AudioCodec.PcmS24le ? 1 : 0),
-                            i => Apply(x => OutputTargets.WithPcmBitDepth(x, i == 1)))));
-                    else audioFields.Add(channels);
-                    audioFields.Add(Ui.DimCaption("声道数留空时保留源声道布局；PCM 为无损编码，不会恢复源文件已丢失的信息。").TextWrapping(TextWrapping.Wrap));
+                    {
+                        if (o.AudioCodec.HasBitrate())
+                            audioFields.Add(Pair(
+                                Number("音频码率 kbps", x => x.AudioBitRateKbps,
+                                    (x, v) => x with { AudioBitRateKbps = FieldValues.IntOrNull(v, 16,
+                                        x.AudioCodec == AudioCodec.Mp3 ? 320 : x.AudioCodec == AudioCodec.Opus ? 510 : 512) }, 0, 512, 16),
+                                Number("采样率 Hz", x => x.AudioSampleRate, (x, v) => x with { AudioSampleRate = FieldValues.IntOrNull(v, 8000, 192000) }, 0, 192000, 100)));
+                        else
+                            audioFields.Add(Number("采样率 Hz", x => x.AudioSampleRate, (x, v) => x with { AudioSampleRate = FieldValues.IntOrNull(v, 8000, 192000) }, 0, 192000, 100));
+                        var channels = Number("声道数", x => x.AudioChannels, (x, v) => x with { AudioChannels = FieldValues.IntOrNull(v, 1, 8) }, 0, 8, 1);
+                        if (Same(x => OutputTargets.IsPcm(x.AudioCodec)) && OutputTargets.IsPcm(o.AudioCodec))
+                            audioFields.Add(Pair(channels, Combo("PCM 位深", ["16-bit", "24-bit"],
+                                Index(x => x.AudioCodec == AudioCodec.PcmS24le, o.AudioCodec == AudioCodec.PcmS24le ? 1 : 0),
+                                i => Apply(x => OutputTargets.WithPcmBitDepth(x, i == 1)))));
+                        else audioFields.Add(channels);
+                        audioFields.Add(Ui.DimCaption("声道数留空时保留源声道布局；PCM 为无损编码，不会恢复源文件已丢失的信息。").TextWrapping(TextWrapping.Wrap));
+                    }
                 }
                 advancedGroups.Add(Group("音频与音轨", audioOpen, setAudioOpen, audioFields.ToArray()));
 
@@ -354,11 +367,14 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
             scroll.Grid(row: 1), outputFooter.Grid(row: 2)));
     }
 
-    private static IReadOnlyList<AudioCodec> BasicAudioCodecs(ContainerFormat container)
+    private static IReadOnlyList<AudioCodec> BasicAudioCodecs(ConversionOptions o)
     {
-        var all = OutputFormatCatalog.AudioCodecs(container);
+        var all = OutputFormatCatalog.AudioCodecs(o.Container);
         var basic = all.Where(codec => !OutputTargets.IsPcm(codec)).ToList();
         if (all.Any(OutputTargets.IsPcm)) basic.Add(AudioCodec.PcmS16le);
+        // Copy is appended only for the explicit video-transcode + supported container combination;
+        // AudioExtract and Remux never see it here.
+        if (OutputTargets.SupportsAudioCopy(o)) basic.Add(AudioCodec.Copy);
         return basic;
     }
 
@@ -369,6 +385,7 @@ public sealed class OutputSettingsPanel : Component<OutputSettingsProps>
         return -1;
     }
 
-    private static string AudioLabel(AudioCodec codec) => OutputTargets.IsPcm(codec) ? "PCM" : codec.Name();
+    private static string AudioLabel(AudioCodec codec) => OutputTargets.IsPcm(codec) ? "PCM"
+        : codec == AudioCodec.Copy ? OutputTargets.AudioCopyLabel : codec.Name();
     private static bool Matches(PresetRequestTemplate t, ConversionOptions o) => t == o.ToTemplate();
 }

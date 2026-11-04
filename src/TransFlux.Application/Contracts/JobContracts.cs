@@ -52,6 +52,9 @@ public interface IJobService
     QueueControlSnapshot GetControl();
     /// <summary>Removes a not-yet-started job from the queue (undoable).</summary>
     Task<bool> RemoveQueuedAsync(Guid id, CancellationToken ct);
+    /// <summary>Abandons a NeedsAttention job: cleans its preserved staging/reservation/journal and
+    /// records it terminal so the visible card can be dropped. Never touches final output files.</summary>
+    Task<bool> AbandonAsync(Guid id, CancellationToken ct);
     /// <summary>Updates limits for future dispatches; existing attempts keep their policy.</summary>
     void ConfigureExecution(int maxConcurrentTranscodes, bool allowAutomaticFallback, bool fullVerification);
 }

@@ -39,7 +39,8 @@ public static class FfprobeJsonParser
                 if (index is null) continue;
                 var at = streams.FindIndex(st => st.SourceIndex == index.Value);
                 if (at < 0) continue;
-                streams[at] = MergeSideInfo(streams[at], ParseSideData(fr));
+                var merged = MergeSideInfo(streams[at], ParseSideData(fr));
+                streams[at] = merged with { ColorClassification = ColorClassifier.Classify(merged) };
             }
         }
 
@@ -103,6 +104,22 @@ public static class FfprobeJsonParser
             IsDefault = Flag(disposition, "default"),
             IsForced = Flag(disposition, "forced"),
             IsAttachedPicture = Flag(disposition, "attached_pic"),
+            IsDub = Flag(disposition, "dub"),
+            IsOriginal = Flag(disposition, "original"),
+            IsComment = Flag(disposition, "comment"),
+            IsLyrics = Flag(disposition, "lyrics"),
+            IsKaraoke = Flag(disposition, "karaoke"),
+            IsHearingImpaired = Flag(disposition, "hearing_impaired"),
+            IsVisualImpaired = Flag(disposition, "visual_impaired"),
+            IsCleanEffects = Flag(disposition, "clean_effects"),
+            IsTimedThumbnails = Flag(disposition, "timed_thumbnails"),
+            IsNonDiegetic = Flag(disposition, "non_diegetic"),
+            IsCaptions = Flag(disposition, "captions"),
+            IsDescriptions = Flag(disposition, "descriptions"),
+            IsMetadata = Flag(disposition, "metadata"),
+            IsDependent = Flag(disposition, "dependent"),
+            IsStillImage = Flag(disposition, "still_image"),
+            IsMultilayer = Flag(disposition, "multilayer"),
         };
 
         if (kind == MediaKind.Video)
@@ -110,7 +127,9 @@ public static class FfprobeJsonParser
             var info = ParseSideData(s);
             var rotation = info.Rotation ?? ParseTagRotation(s);
             var pixFmt = Str(s, "pix_fmt");
-            var bitDepth = Int(s, "bits_per_raw_sample") ?? Int(s, "bits_per_sample") ?? ColorClassifier.InferBitDepth((pixFmt ?? string.Empty).ToLowerInvariant());
+            // ffprobe sometimes reports "0" for bits_per_*; zero is unknown, not 8-bit.
+            var bitDepth = PositiveInt(Int(s, "bits_per_raw_sample")) ?? PositiveInt(Int(s, "bits_per_sample"))
+                ?? ColorClassifier.InferBitDepth((pixFmt ?? string.Empty).ToLowerInvariant());
 
             descriptor = descriptor with
             {
@@ -131,6 +150,9 @@ public static class FfprobeJsonParser
                 SideDataSummary = info.Summary,
                 DvProfile = info.DvProfile,
                 DvBlSignalCompatibilityId = info.DvBlCompat,
+                DvRpuPresent = info.DvRpuPresent,
+                DvElPresent = info.DvElPresent,
+                DvBlPresent = info.DvBlPresent,
                 MasterDisplay = info.MasterDisplay,
                 MaxCLL = info.MaxCLL,
                 MaxFALL = info.MaxFALL,
@@ -139,6 +161,7 @@ public static class FfprobeJsonParser
                 StartUs = SecondsToUs(Str(s, "start_time")),
                 TimeBase = ParseRational(Str(s, "time_base")),
             };
+            descriptor = descriptor with { ColorClassification = ColorClassifier.Classify(descriptor) };
         }
         else if (kind == MediaKind.Audio)
         {
@@ -176,6 +199,9 @@ public static class FfprobeJsonParser
         bool HasHdr,
         int? DvProfile,
         int? DvBlCompat,
+        bool? DvRpuPresent,
+        bool? DvElPresent,
+        bool? DvBlPresent,
         string? MasterDisplay,
         int? MaxCLL,
         int? MaxFALL);
@@ -186,9 +212,11 @@ public static class FfprobeJsonParser
         var summary = new List<string>();
         var hasHdr = false;
         int? dvProfile = null, dvBlCompat = null, maxCLL = null, maxFALL = null;
+        bool? dvRpuPresent = null, dvElPresent = null, dvBlPresent = null;
         string? masterDisplay = null;
         if (!s.TryGetProperty("side_data_list", out var list) || list.ValueKind != JsonValueKind.Array)
-            return new SideInfo(rotation, null, hasHdr, dvProfile, dvBlCompat, masterDisplay, maxCLL, maxFALL);
+            return new SideInfo(rotation, null, hasHdr, dvProfile, dvBlCompat, dvRpuPresent, dvElPresent, dvBlPresent,
+                masterDisplay, maxCLL, maxFALL);
 
         foreach (var item in list.EnumerateArray())
         {
@@ -208,6 +236,9 @@ public static class FfprobeJsonParser
             {
                 dvProfile ??= Int(item, "dv_profile");
                 dvBlCompat ??= Int(item, "dv_bl_signal_compatibility_id") ?? Int(item, "bl_signal_compatibility_id");
+                dvRpuPresent ??= FlagOrNull(item, "rpu_present_flag");
+                dvElPresent ??= FlagOrNull(item, "el_present_flag");
+                dvBlPresent ??= FlagOrNull(item, "bl_present_flag");
             }
             if (lower.Contains("mastering display"))
                 masterDisplay ??= BuildMasterDisplay(item);
@@ -227,7 +258,7 @@ public static class FfprobeJsonParser
         }
 
         return new SideInfo(rotation, summary.Count == 0 ? null : string.Join("; ", summary), hasHdr,
-            dvProfile, dvBlCompat, masterDisplay, maxCLL, maxFALL);
+            dvProfile, dvBlCompat, dvRpuPresent, dvElPresent, dvBlPresent, masterDisplay, maxCLL, maxFALL);
     }
 
     /// <summary>
@@ -284,6 +315,9 @@ public static class FfprobeJsonParser
         {
             DvProfile = s.DvProfile ?? info.DvProfile,
             DvBlSignalCompatibilityId = s.DvBlSignalCompatibilityId ?? info.DvBlCompat,
+            DvRpuPresent = s.DvRpuPresent ?? info.DvRpuPresent,
+            DvElPresent = s.DvElPresent ?? info.DvElPresent,
+            DvBlPresent = s.DvBlPresent ?? info.DvBlPresent,
             MasterDisplay = s.MasterDisplay ?? info.MasterDisplay,
             MaxCLL = s.MaxCLL ?? info.MaxCLL,
             MaxFALL = s.MaxFALL ?? info.MaxFALL,
@@ -364,6 +398,12 @@ public static class FfprobeJsonParser
         if (disposition.ValueKind != JsonValueKind.Object) return false;
         return Int(disposition, name) is > 0;
     }
+
+    /// <summary>Like <see cref="Flag"/> but distinguishes an absent flag from an explicit zero.</summary>
+    private static bool? FlagOrNull(JsonElement e, string name) => Int(e, name) is int value ? value > 0 : null;
+
+    /// <summary>Treats zero/negative numeric metadata as absent so it cannot override pixel-format inference.</summary>
+    private static int? PositiveInt(int? value) => value is > 0 ? value : null;
 
     private static int? Int(JsonElement e, string name)
     {

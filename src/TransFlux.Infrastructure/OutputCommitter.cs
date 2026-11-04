@@ -79,6 +79,10 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler, IOutp
         }
         catch (IOException ex)
         {
+            // Keep the Failed row until startup recovery closes it. Deleting it here would open a
+            // crash window where the job is still Committing with no journal: recovery could not
+            // tell that the commit failed, and preserved staging would be orphaned without a
+            // NeedsAttention transition. GetOpenJournals includes Failed rows for exactly this.
             await SafeUpsertAsync(prepared with { Phase = CommitPhase.Failed, UpdatedUtc = _clock.UtcNow }, ct);
             return Fail(FailureCode.OutputConflict, "OUTPUT_CONFLICT", ex.Message, token);
         }
@@ -100,7 +104,7 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler, IOutp
             return Fail(FailureCode.VerifyFailed, "COMMIT_FINAL_SIZE_MISMATCH",
                 $"Published file size {finalSize} does not match committed {actualSize}.", token);
 
-        await SaveOutputAsync(published, ct);
+        await SaveOutputAsync(published, request.VerificationSummary, ct);
 
         try
         {
@@ -324,7 +328,7 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler, IOutp
 
         var published = entry with { Phase = CommitPhase.Published, SizeBytes = finalSize, UpdatedUtc = _clock.UtcNow };
         await UpsertJournalWithIdentityAsync(published, expectedHash, ct).ConfigureAwait(false);
-        await SaveOutputAsync(published, ct).ConfigureAwait(false);
+        await SaveOutputAsync(published, "Recovered from commit journal.", ct).ConfigureAwait(false);
         await _store.DeleteJournalAsync(entry.CommitToken, ct).ConfigureAwait(false);
         TryDeleteFile(OutputReservation.LockPath(entry.FinalPath));
         return new CommitResult { Success = true, CommitToken = entry.CommitToken, FinalPath = entry.FinalPath };
@@ -345,14 +349,14 @@ public sealed class OutputCommitter : IOutputCommitter, ICommitReconciler, IOutp
         return Convert.ToHexString(hash);
     }
 
-    private Task SaveOutputAsync(CommitJournalEntry entry, CancellationToken ct)
+    private Task SaveOutputAsync(CommitJournalEntry entry, string verificationSummary, CancellationToken ct)
         => _store.SaveOutputAsync(new OutputRecord
         {
             JobId = entry.JobId,
             AttemptId = entry.AttemptId,
             FinalPath = entry.FinalPath,
             Size = entry.SizeBytes,
-            VerificationSummary = string.Empty,
+            VerificationSummary = verificationSummary,
             CommittedUtc = _clock.UtcNow,
             CommitToken = entry.CommitToken,
         }, ct);

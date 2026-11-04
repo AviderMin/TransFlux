@@ -1,3 +1,5 @@
+using TransFlux.Domain.Media;
+
 namespace TransFlux.Domain.Plans;
 
 public sealed record ExecutionCandidate
@@ -11,6 +13,38 @@ public sealed record ExecutionCandidate
     /// <summary>Fully structured ffmpeg argument list (excluding executable path).</summary>
     public IReadOnlyList<string> Arguments { get; init; } = Array.Empty<string>();
     public string Rationale { get; init; } = string.Empty;
+}
+
+/// <summary>
+/// Expected signature of one output video/audio track, in output mapping order. Null
+/// members are not asserted, so a plan only fails verification on data it actually knows.
+/// </summary>
+public sealed record ExpectedStreamSignature
+{
+    public required MediaKind Kind { get; init; }
+    /// <summary>Expected ffprobe codec_name; null = not asserted.</summary>
+    public string? Codec { get; init; }
+    /// <summary>Expected audio channel count; null = not asserted.</summary>
+    public int? Channels { get; init; }
+    /// <summary>Expected default disposition; null = not asserted.</summary>
+    public bool? IsDefault { get; init; }
+    /// <summary>Expected forced disposition; null = not asserted.</summary>
+    public bool? IsForced { get; init; }
+}
+
+/// <summary>Dolby Vision retention expectation derived from the selected source video.</summary>
+public sealed record DolbyVisionExpectation
+{
+    /// <summary>DOVI configuration record profile (5/7/8).</summary>
+    public required int Profile { get; init; }
+    /// <summary>Expected BL signal compatibility id; null = not asserted.</summary>
+    public int? BlSignalCompatibilityId { get; init; }
+    /// <summary>True when the source DOVI record declared an RPU; the output must declare one too.</summary>
+    public bool RpuRequired { get; init; }
+    /// <summary>True when the source DOVI record declared an enhancement layer; the output must too.</summary>
+    public bool ElRequired { get; init; }
+    /// <summary>True when the source DOVI record declared a base layer; the output must too.</summary>
+    public bool BlRequired { get; init; }
 }
 
 public sealed record ExpectedOutput
@@ -35,6 +69,10 @@ public sealed record ExpectedOutput
     /// <summary>Per-output-track language tags in mapping order ("und"/empty = not asserted).</summary>
     public IReadOnlyList<string> AudioLanguages { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> SubtitleLanguages { get; init; } = Array.Empty<string>();
+    /// <summary>Per-track video/audio signatures in output mapping order; empty = not asserted.</summary>
+    public IReadOnlyList<ExpectedStreamSignature> TrackSignatures { get; init; } = Array.Empty<ExpectedStreamSignature>();
+    /// <summary>Dolby Vision DOVI configuration retention expectation; null = not asserted.</summary>
+    public DolbyVisionExpectation? DolbyVision { get; init; }
 }
 
 public sealed record ResourceNeeds

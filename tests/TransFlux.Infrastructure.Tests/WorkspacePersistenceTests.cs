@@ -28,4 +28,31 @@ public sealed class WorkspacePersistenceTests
         var cleared = await service.LoadAsync(default); Assert.NotNull(cleared);
         Assert.Empty(cleared); Assert.Equal("source unchanged", File.ReadAllText(source));
     }
+
+    [Fact]
+    public async Task CorruptWorkspace_IsBackedUpAndLaterSavesStillPersist()
+    {
+        using var dir = new TempDir();
+        await using var db = new SqliteJobStore(Path.Combine(dir.Path, "state.db"));
+        await db.InitializeAsync(default);
+
+        const string corrupt = "{\"schema\":99,";
+        await db.SaveSettingAsync("workspace.v1", corrupt, default);
+        var service = new WorkspacePersistence(db);
+
+        // A corrupt value must degrade to "no workspace" instead of throwing and disabling saves.
+        Assert.Null(await service.LoadAsync(default));
+
+        var settings = await db.GetSettingsAsync(default);
+        var backup = Assert.Single(settings, kv => kv.Key.StartsWith("workspace.v1.corrupt-", StringComparison.Ordinal));
+        Assert.Equal(corrupt, backup.Value);
+
+        // User changes produced after the corrupt restore must persist to the primary key.
+        var id = Guid.NewGuid();
+        await service.SaveAsync([new WorkspaceEntry(id, Path.Combine(dir.Path, "source.mp4"),
+            new ConversionRequest { SourceSnapshotId = id, Output = new() }, null)], default);
+        var entries = await service.LoadAsync(default);
+        Assert.NotNull(entries);
+        Assert.Equal(id, Assert.Single(entries).MediaId);
+    }
 }

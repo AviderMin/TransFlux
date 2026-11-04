@@ -74,4 +74,83 @@ public class CoreLocatorTests
             try { Directory.Delete(dir, true); } catch { }
         }
     }
+
+    [Fact]
+    public void Locate_WithoutManifest_IsRejected()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tf-core-nomanifest-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "ffmpeg.exe"), "fake");
+            File.WriteAllText(Path.Combine(dir, "ffprobe.exe"), "fake");
+            Assert.Throws<CoreNotFoundException>(() => FfmpegCoreLocator.Locate(dir));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Locate_WithMissingManifestHash_IsRejected()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tf-core-nohash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "ffmpeg.exe"), "fake-ffmpeg");
+            File.WriteAllText(Path.Combine(dir, "ffprobe.exe"), "fake-ffprobe");
+            var manifest = new
+            {
+                schemaVersion = 2,
+                ffmpeg = new { relativePath = "ffmpeg.exe", sha256 = "" },
+                ffprobe = new { relativePath = "ffprobe.exe", sha256 = "" },
+            };
+            File.WriteAllText(Path.Combine(dir, "core-manifest.json"), JsonSerializer.Serialize(manifest));
+            var ex = Assert.Throws<CoreIntegrityException>(() => FfmpegCoreLocator.Locate(dir));
+            Assert.Contains("missing sha256", ex.ExpectedHash);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Locate_WithMalformedManifest_IsRejected()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tf-core-badjson-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "ffmpeg.exe"), "fake");
+            File.WriteAllText(Path.Combine(dir, "ffprobe.exe"), "fake");
+            File.WriteAllText(Path.Combine(dir, "core-manifest.json"), "{ not json");
+            var ex = Assert.Throws<CoreIntegrityException>(() => FfmpegCoreLocator.Locate(dir));
+            Assert.Contains("malformed", ex.ExpectedHash);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Locate_AllowUnverifiedEscapeHatch_AcceptsRawExes()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tf-core-dev-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "ffmpeg.exe"), "dev-ffmpeg");
+            File.WriteAllText(Path.Combine(dir, "ffprobe.exe"), "dev-ffprobe");
+            var core = FfmpegCoreLocator.Locate(dir, allowUnverified: true);
+            Assert.Equal(64, core.CoreHash.Length);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
 }

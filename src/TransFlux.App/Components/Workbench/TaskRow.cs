@@ -14,9 +14,9 @@ using TransFlux.Domain.Plans;
 namespace TransFlux.App.Components.Workbench;
 
 /// <summary>Callbacks for one task card; bundled so Render keeps its signature readable.</summary>
-public sealed record TaskRowActions(Action Select, Action ToggleSelect, Action Remove, Action Cancel, Action Copy,
-    Action MoveUp, Action MoveDown, Action Retry, Action EditQueued, Action Open, Action Reveal, Action CopyPath,
-    Action Details);
+public sealed record TaskRowActions(Action Select, Action ToggleSelect, Action Remove, Action Abandon, Action Cancel,
+    Action Copy, Action MoveUp, Action MoveDown, Action Retry, Action EditQueued, Action Open, Action Reveal,
+    Action CopyPath, Action Details);
 
 /// <summary>A responsive card whose identity survives enqueue, cancel, retry and completion.
 /// The visual hierarchy is file -> source facts -> target facts -> live state -> actions.</summary>
@@ -147,6 +147,8 @@ public static class TaskRow
                 _ => "修改后转换",
             }, actions.Copy);
         if (job is not null || d.Status == DraftStatus.Invalid || item.Issues.Count > 2) ActionButton("技术详情", actions.Details);
+        // Explicit destructive action for NeedsAttention; ordinary remove never appears for it.
+        if (item.CanAbandon) ActionButton("放弃并清理暂存", actions.Abandon);
         if (item.CanRemove) ActionButton("移除", actions.Remove);
         if (buttons.Count > 0)
         {
